@@ -77,6 +77,12 @@ Examples:
 
     Listen for incoming gRPC connections from the logging SDK and stream the results to disk:
         rerun --save new_recording.rrd
+
+    Run in headless mode without spawning a viewer:
+        rerun --headless
+
+    Continuously download data to a file every 30 seconds in headless mode:
+        rerun --headless --save recording.rrd --continuous-download-interval 30
 "#;
 
 #[derive(Debug, clap::Parser)]
@@ -293,6 +299,18 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     /// Fails if no messages are received, or if no messages are received within a dozen or so seconds.
     #[clap(long)]
     test_receive: bool,
+
+    /// Run in headless mode without spawning a viewer GUI.
+    ///
+    /// This is useful for running rerun-viewer as a background service or in CI/CD environments.
+    #[clap(long)]
+    headless: bool,
+
+    /// Continuously download data to the specified file at regular intervals.
+    ///
+    /// The interval is specified in seconds. Requires --headless and --save to be set.
+    #[clap(long)]
+    continuous_download_interval: Option<u64>,
 }
 
 impl Args {
@@ -828,6 +846,16 @@ fn run_impl(
         (rxs_logs, rxs_table)
     };
 
+    // Validate headless mode and continuous download arguments
+    if let Some(_interval) = args.continuous_download_interval {
+        if !args.headless {
+            anyhow::bail!("--continuous-download-interval requires --headless");
+        }
+        if args.save.is_none() {
+            anyhow::bail!("--continuous-download-interval requires --save <path>");
+        }
+    }
+
     // Now what do we do with the data?
 
     if args.test_receive {
@@ -837,6 +865,14 @@ fn run_impl(
 
         let rx = ReceiveSet::new(rxs_log);
         assert_receive_into_entity_db(&rx).map(|_db| ())
+    } else if let Some(interval) = args.continuous_download_interval {
+        if !redap_uris.is_empty() {
+            anyhow::bail!("`--continuous-download-interval` does not support catalogs");
+        }
+
+        let rx = ReceiveSet::new(rxs_log);
+        let rrd_path = args.save.unwrap(); // Already validated above
+        Ok(stream_to_rrd_continuous(&rx, &rrd_path.into(), interval)?)
     } else if let Some(rrd_path) = args.save {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--save` does not support catalogs");
@@ -974,6 +1010,26 @@ fn run_impl(
 
         sink.flush_blocking();
 
+        Ok(())
+    } else if args.headless {
+        // Headless mode: just keep the connections alive without spawning a viewer
+        re_log::info!("Running in headless mode - no viewer will be spawned");
+        
+        // Keep the process alive to maintain connections
+        let rx = ReceiveSet::new(rxs_log);
+        while rx.is_connected() {
+            while let Ok(msg) = rx.recv() {
+                if let Some(_payload) = msg.into_data() {
+                    // In headless mode, we could optionally log basic stats
+                    // but for now we just consume the messages
+                }
+            }
+        }
+        
+        if !redap_uris.is_empty() {
+            re_log::warn!("Catalogs are not fully supported in headless mode yet.");
+        }
+        
         Ok(())
     } else {
         #[cfg(feature = "native_viewer")]
@@ -1186,5 +1242,96 @@ fn stream_to_rrd_on_disk(
 
     re_log::info!("File saved to {path:?}");
 
+    Ok(())
+}
+
+fn stream_to_rrd_continuous(
+    rx: &re_smart_channel::ReceiveSet<LogMsg>,
+    path: &std::path::PathBuf,
+    interval_seconds: u64,
+) -> Result<(), re_log_encoding::FileSinkError> {
+
+    re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+
+    let mut message_buffer = Vec::new();
+    let mut last_save = std::time::Instant::now();
+    let save_interval = std::time::Duration::from_secs(interval_seconds);
+
+    loop {
+        if !rx.is_connected() {
+            re_log::info!("Connection closed, performing final save before exit.");
+            break;
+        }
+
+        // Try to receive messages with a timeout
+        let timeout = std::time::Duration::from_millis(100);
+        match rx.recv_timeout(timeout) {
+            Some((_, msg)) => {
+                match msg.payload {
+                    re_smart_channel::SmartMessagePayload::Msg(payload) => {
+                        message_buffer.push(payload);
+                    }
+                    re_smart_channel::SmartMessagePayload::Flush { on_flush_done } => {
+                        on_flush_done();
+                    }
+                    re_smart_channel::SmartMessagePayload::Quit(_) => {
+                        re_log::info!("Received quit message, stopping continuous download.");
+                        break;
+                    }
+                }
+            }
+            None => {
+                // No message received within timeout, check if we should save
+                if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
+                    save_messages_to_file(&message_buffer, path)?;
+                    message_buffer.clear();
+                    last_save = std::time::Instant::now();
+                }
+            }
+        }
+
+        // Also check for saving if we have messages and enough time has passed
+        if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
+            save_messages_to_file(&message_buffer, path)?;
+            message_buffer.clear();
+            last_save = std::time::Instant::now();
+        }
+    }
+
+    // Final save of any remaining messages
+    if !message_buffer.is_empty() {
+        save_messages_to_file(&message_buffer, path)?;
+    }
+
+    re_log::info!("Continuous download completed.");
+    Ok(())
+}
+
+fn save_messages_to_file(
+    messages: &[LogMsg],
+    path: &std::path::PathBuf,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    use re_log_encoding::FileSinkError;
+
+    re_log::info!("Saving {} messages to {path:?}", messages.len());
+
+    let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+    
+    let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
+        re_build_info::CrateVersion::LOCAL,
+        encoding_options,
+        file,
+    )?;
+
+    for msg in messages {
+        encoder.append(msg)?;
+    }
+
+    re_log::info!("Successfully saved {} messages to {path:?}", messages.len());
     Ok(())
 }
