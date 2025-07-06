@@ -1,0 +1,25 @@
+[package]
+name = "objectron"
+version = "0.24.0-alpha.1+dev"
+edition = "2021"
+rust-version = "1.84"
+license = "MIT OR Apache-2.0"
+publish = false
+
+
+[dependencies]
+rerun = { path = "../../../crates/top/rerun", features = [
+  "web_viewer",
+  "clap",
+] }
+
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+glam = "0.28"
+prost = "0.13"
+
+
+[build-dependencies]
+re_build_tools = { path = "../../../crates/build/re_build_tools" }
+prost-build = "0.13"
+protoc-prebuilt = "0.3"

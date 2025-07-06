@@ -1,0 +1,23 @@
+[package]
+name = "plot_dashboard_stress"
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+include.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+re_log = { workspace = true, features = ["setup"] }
+rerun = { path = "../../../crates/top/rerun", features = ["clap"] }
+
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+rand = "0.8"
+rand_distr = "0.4"

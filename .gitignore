@@ -1,0 +1,81 @@
+.DS_Store
+__MACOSX
+
+# C++ and CMake stuff:
+*.a
+*.bin
+*.o
+/.ccls-cache/
+/arrow/
+/build/
+**/build-msvc/
+**/CMakeFiles/
+**/CMakeCache.txt
+**/Makefile
+**/cmake_install.cmake
+_deps
+**/.cache/
+**/rerun_cpp/docs/html
+**/rerun_cpp/docs/xml
+*.tgz
+
+# Rust compile target directory:
+**/target
+**/target_ra
+**/target_wasm
+
+# Python virtual environment:
+**/venv*
+**/.venv*
+.python-version
+
+# Python build artifacts:
+__pycache__
+*.pyc
+*.pyd
+*.so
+**/.pytest_cache
+**/.ipynb_checkpoints/
+
+# Pixi environment
+.pixi
+
+.gdb_history
+perf.data*
+
+**/dataset/
+
+# Screenshots from samples etc.
+screenshot*.png
+
+# Saved example `.rrd` files
+example_data
+
+# Various builds
+dist
+wheels
+
+# Screenshot comparison build
+/compare_screenshot
+**/tests/snapshots/**/*.diff.png
+**/tests/snapshots/**/*.new.png
+**/tests/snapshots/**/*.old.png
+
+# Mesa install
+mesa
+mesa.7z
+mesa.tar.xz
+icd.json
+
+*.rrd
+
+/meilisearch
+
+.pixi/*
+justfile
+
+# heaptrack files
+*.zst
+
+# IDE stuff
+/.idea

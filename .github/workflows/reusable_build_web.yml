@@ -1,0 +1,132 @@
+name: Reusable Build web viewer
+
+on:
+  workflow_call:
+    inputs:
+      CONCURRENCY:
+        required: true
+        type: string
+      RELEASE_VERSION:
+        required: false
+        type: string
+        default: "prerelease"
+      CHANNEL: # `nightly` or `main`
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ inputs.CONCURRENCY }}-build-web
+  cancel-in-progress: true
+
+env:
+  # web_sys_unstable_apis is required to enable the web_sys clipboard API which egui_web uses
+  # https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
+  # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
+  RUSTFLAGS: --cfg=web_sys_unstable_apis --deny warnings
+
+  RUSTDOCFLAGS: --deny warnings
+
+  # Disable the GHA backend (Github's 10GB storage) since we use our own GCS backend.
+  # See: https://github.com/marketplace/actions/sccache-action
+  SCCACHE_GHA_ENABLED: "false"
+
+  # Wrap every `rustc` invocation in `sccache`.
+  RUSTC_WRAPPER: "sccache"
+
+  # Not only `sccache` cannot cache incremental builds, it's counter-productive to generate all
+  # these incremental artifacts when running on CI.
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: "write"
+  id-token: "write"
+  pull-requests: "write"
+
+jobs:
+  rs-build-web-viewer:
+    name: Build web viewer
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - name: Get sha
+        id: get-sha
+        run: |
+          full_commit="${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}"
+          echo "sha=$(echo $full_commit | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Status comment
+        if: github.event_name == 'pull_request'
+        # https://github.com/mshick/add-pr-comment
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          message-id: "web-viewer-build-status"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            Web viewer is being built.
+
+            | Result | Commit  | Link  | Manifest |
+            | ------ | ------- | ----- | -------- |
+            | ⏳ | ${{ steps.get-sha.outputs.sha }} | https://rerun.io/viewer/pr/${{ github.event.pull_request.number }} | [`+nightly`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/nightly/examples_manifest.json) [`+main`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/main/examples_manifest.json) |
+
+            <sup>Note: This comment is updated whenever you push a commit.</sup>
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache_key: "build-web"
+          # Cache will be produced by `reusable_checks/rs-check-wasm`
+          save_cache: false
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Build web-viewer (release)
+        run: |
+          if [ ${{ inputs.CHANNEL }} = "nightly" ]; then
+            export DEFAULT_EXAMPLES_MANIFEST_URL="https://app.rerun.io/version/nightly/examples_manifest.json"
+          fi
+          pixi run rerun-build-web-release
+
+      # We build a single manifest pointing to the `commit`
+      # All the `pr`, `main`, release tag, etc. variants will always just point to the resolved commit
+      - name: Build examples manifest
+        run: |
+          full_commit="${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}"
+          sha="$(echo $full_commit | cut -c1-7)"
+
+          pixi run build-examples manifest \
+            --base-url "https://app.rerun.io/commit/$sha" \
+            --channel "${{ inputs.CHANNEL }}" \
+            web_viewer/examples_manifest.json
+
+      - name: Upload web viewer
+        uses: actions/upload-artifact@v4
+        with:
+          name: web_viewer
+          path: web_viewer
+
+      - name: Status comment
+        if: failure() && github.event_name == 'pull_request'
+        # https://github.com/mshick/add-pr-comment
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          message-id: "web-viewer-build-status"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            Web viewer failed to build.
+
+            | Result | Commit  | Link  | Manifest |
+            | ------ | ------- | ----- | -------- |
+            | ❌ | ${{ steps.get-sha.outputs.sha }} | https://rerun.io/viewer/pr/${{ github.event.pull_request.number }} | [`+nightly`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/nightly/examples_manifest.json) [`+main`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/main/examples_manifest.json) |
+
+            <sup>Note: This comment is updated whenever you push a commit.</sup>

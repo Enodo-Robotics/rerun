@@ -1,0 +1,275 @@
+name: "General checks: Lints, Tests, Docs"
+
+on:
+  workflow_call:
+    inputs:
+      CONCURRENCY:
+        required: true
+        type: string
+      CHANNEL: # `nightly`/`main`/`pr`
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ inputs.CONCURRENCY }}-checks
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.9"
+  # web_sys_unstable_apis is required to enable the web_sys clipboard API which egui_web uses
+  # https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
+  # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
+  RUSTFLAGS: --cfg=web_sys_unstable_apis --deny warnings
+
+  RUSTDOCFLAGS: --deny warnings
+
+  # Disable the GHA backend (Github's 10GB storage) since we use our own GCS backend.
+  # See: https://github.com/marketplace/actions/sccache-action
+  SCCACHE_GHA_ENABLED: "false"
+
+  # Wrap every `rustc` invocation in `sccache`.
+  RUSTC_WRAPPER: "sccache"
+
+  # Not only `sccache` cannot cache incremental builds, it's counter-productive to generate all
+  # these incremental artifacts when running on CI.
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: "read"
+  id-token: "write"
+
+jobs:
+  no-codegen-changes:
+    name: Check if running codegen would produce any changes
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      # Note: We explicitly don't override `ref` here. We need to see if changes would be made
+      # in a context where we have merged with main. Otherwise we might miss changes such as one
+      # PR introduces a new type and another PR changes the codegen.
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache_key: "build-linux"
+          save_cache: true
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Codegen check
+        run: pixi run codegen --force --check
+
+      - name: Codegen out-of-sync (protos)
+        run: pixi run codegen-protos-check
+
+  # ---------------------------------------------------------------------------
+
+  # NOTE: We don't want spurious failures caused by issues being closed, so this does not run on CI,
+  # at least for the time being.
+  # - name: Check for zombie TODOs
+  #   shell: bash
+  #   run: |
+  #     pixi run ./scripts/zombie_todos.py --token ${{ secrets.GITHUB_TOKEN }}
+
+  rerun-lints:
+    name: Rerun lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Rerun lints
+        run: pixi run lint-rerun
+
+  toml-format-check:
+    name: Toml format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Toml format check
+        run: pixi run toml-fmt-check
+
+  check-too-large-files:
+    name: Check for too large files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Check for too large files
+        run: pixi run check-large-files
+
+  check-example-thumbnails:
+    name: Check Python example thumbnails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Check Python example thumbnails
+        run: pixi run ./scripts/ci/thumbnails.py check
+
+  check-example-manifest-coverage:
+    name: Check example manifest coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check example manifest coverage
+        run: pixi run ./scripts/check_example_manifest_coverage.py
+
+      - name: Check the migration guide redirect
+        run: pixi run python scripts/ci/check_migration_guide_redirect.py
+
+  lint-md:
+    name: Lint markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run linter
+        run: |
+          # Single quoted because pixi does its own glob expansion
+          pixi run mdlint --glob 'docs/content/**/*.md'
+          pixi run mdlint --glob 'examples/python/*/README.md'
+          pixi run mdlint --glob 'examples/cpp/*/README.md'
+          pixi run mdlint --glob 'examples/rust/*/README.md'
+
+  # ---------------------------------------------------------------------------
+
+  spell-check:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Actions Repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - name: Check spelling of entire workspace
+        uses: crate-ci/typos@v1.18.0
+
+  # ---------------------------------------------------------------------------
+
+  misc-formatting:
+    name: Misc formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.41.4
+
+      - name: prettier --check
+        run: pixi run misc-fmt-check
+
+  # ---------------------------------------------------------------------------
+
+  markdown-paths-filter:
+    runs-on: ubuntu-latest
+    outputs:
+      md_changes: ${{ steps.filter.outputs.md_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            md_changes:
+              - '**/*.md'
+
+  link-checker:
+    name: Check links
+    needs: markdown-paths-filter
+    if: inputs.CHANNEL == 'nightly' || needs.markdown-paths-filter.outputs.md_changes == 'true'
+    runs-on: ubuntu-latest
+    # do not fail entire workflow (e.g. nightly) if this is the only failing check
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore lychee cache
+        id: restore-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .lycheecache
+          key: cache-lychee-${{ github.sha }}
+          restore-keys: cache-lychee-
+
+      # Check https://github.com/lycheeverse/lychee on how to run locally.
+      - name: Link Checker
+        id: lychee
+        uses: lycheeverse/lychee-action@v1.10.0
+        with:
+          fail: true
+          lycheeVersion: "0.15.1"
+          # When given a directory, lychee checks only markdown, html and text files, everything else we have to glob in manually.
+          # Pass --verbose, so that all considered links are printed, making it easier to debug.
+          args: |
+            --verbose --cache --max-cache-age 1d . --base . "**/*.md" "**/*.rs" "**/*.toml" "**/*.hpp" "**/*.cpp" "**/CMakeLists.txt" "**/*.py" "**/*.yml"
+
+      - name: Warn because of broken links
+        if: ${{ steps.lychee.outputs.exit_code != '0' }}
+        run: echo "::warning title="Link checker"::Link checker detected broken links!"

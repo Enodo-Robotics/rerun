@@ -1,0 +1,174 @@
+name: Reusable Upload Web
+
+on:
+  workflow_call:
+    inputs:
+      CONCURRENCY:
+        required: true
+        type: string
+      ADHOC_NAME:
+        type: string
+        required: false
+        default: ""
+      MARK_TAGGED_VERSION:
+        required: false
+        type: boolean
+        default: false
+      RELEASE_VERSION:
+        required: false
+        type: string
+        default: "prerelease"
+      PR_NUMBER:
+        required: false
+        type: string
+        default: ""
+      NIGHTLY:
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ inputs.CONCURRENCY }}-upload-web
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: "write"
+  id-token: "write"
+  pull-requests: "write"
+
+jobs:
+  upload-web:
+    name: Upload web build to google cloud (wasm32 + wasm-bindgen)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || '' }}
+
+      - name: Download Web Viewer
+        uses: actions/download-artifact@v4
+        with:
+          name: web_viewer
+          path: web_viewer
+
+      # Upload the wasm, html etc to a Google cloud bucket:
+      - id: "auth"
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+
+      - name: Get sha
+        id: get-sha
+        run: |
+          full_commit="${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.sha }}"
+          echo "sha=$(echo $full_commit | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: "Upload web-viewer (commit)"
+        if: ${{ !inputs.NIGHTLY }}
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/commit/${{ steps.get-sha.outputs.sha }}"
+          parent: false
+          process_gcloudignore: false
+
+      - name: "Upload web-viewer (tagged)"
+        if: inputs.MARK_TAGGED_VERSION
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/version/${{inputs.RELEASE_VERSION}}"
+          parent: false
+          process_gcloudignore: false
+
+      - name: "Upload web-viewer (adhoc)"
+        if: ${{ inputs.ADHOC_NAME != '' }}
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/adhoc/${{inputs.ADHOC_NAME}}"
+          parent: false
+          process_gcloudignore: false
+
+      - name: "Upload web-viewer (prerelease)"
+        if: github.ref == 'refs/heads/main'
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/prerelease"
+          parent: false
+          process_gcloudignore: false
+          headers: |-
+            cache-control: no-cache, max-age=0
+
+      - name: "Upload web-viewer (main)"
+        if: github.ref == 'refs/heads/main'
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/version/main"
+          parent: false
+          process_gcloudignore: false
+          headers: |-
+            cache-control: no-cache, max-age=0
+
+      - name: "Upload web-viewer (pr)"
+        if: ${{ inputs.PR_NUMBER != '' }}
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/pr/${{ inputs.PR_NUMBER }}"
+          parent: false
+          process_gcloudignore: false
+          headers: |-
+            cache-control: no-cache, max-age=0
+
+      - name: "Upload web-viewer (nightly)"
+        if: ${{ inputs.NIGHTLY }}
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: "web_viewer"
+          destination: "rerun-web-viewer/version/nightly"
+          parent: false
+          process_gcloudignore: false
+          headers: |-
+            cache-control: no-cache, max-age=0
+
+      - name: Status comment
+        if: success() && github.event_name == 'pull_request'
+        # https://github.com/mshick/add-pr-comment
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          message-id: "web-viewer-build-status"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            Web viewer built successfully. If applicable, you should also test it:
+
+            - [ ] I have tested the web viewer
+
+            | Result | Commit  | Link | Manifest |
+            | ------ | ------- | ---- | -------- |
+            | ✅ | ${{ steps.get-sha.outputs.sha }} | https://rerun.io/viewer/pr/${{ github.event.pull_request.number }} | [`+nightly`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/nightly/examples_manifest.json) [`+main`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/main/examples_manifest.json) |
+
+            <sup>Note: This comment is updated whenever you push a commit.</sup>
+
+      - name: Status comment
+        if: failure() && github.event_name == 'pull_request'
+        # https://github.com/mshick/add-pr-comment
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          message-id: "web-viewer-build-status"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            Web viewer failed to build.
+
+            | Result | Commit  | Link | Manifest |
+            | ------ | ------- | ----- |
+            | ❌ | ${{ steps.get-sha.outputs.sha }} | https://rerun.io/viewer/pr/${{ github.event.pull_request.number }} | [`+nightly`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/nightly/examples_manifest.json) [`+main`](https://rerun.io/viewer/pr/${{ github.event.pull_request.number }}?manifest_url=https://app.rerun.io/version/main/examples_manifest.json) |
+
+            <sup>Note: This comment is updated whenever you push a commit.</sup>
