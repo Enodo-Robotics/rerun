@@ -83,6 +83,9 @@ Examples:
 
     Continuously download data to a file every 30 seconds in headless mode:
         rerun --headless --save recording.rrd --continuous-download-interval 30
+
+    Continuously download with timestamped file rotation every 60 seconds:
+        rerun --headless --save recording.rrd --continuous-download-interval 60 --rotate-files
 "#;
 
 #[derive(Debug, clap::Parser)]
@@ -311,6 +314,13 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     /// The interval is specified in seconds. Requires --headless and --save to be set.
     #[clap(long)]
     continuous_download_interval: Option<u64>,
+
+    /// Create a new file for each save interval instead of appending to the same file.
+    ///
+    /// Files will be named with Unix timestamps: <basename>_ts<timestamp>.rrd
+    /// Requires --continuous-download-interval to be set.
+    #[clap(long)]
+    rotate_files: bool,
 }
 
 impl Args {
@@ -855,6 +865,10 @@ fn run_impl(
             anyhow::bail!("--continuous-download-interval requires --save <path>");
         }
     }
+    
+    if args.rotate_files && args.continuous_download_interval.is_none() {
+        anyhow::bail!("--rotate-files requires --continuous-download-interval");
+    }
 
     // Now what do we do with the data?
 
@@ -872,7 +886,7 @@ fn run_impl(
 
         let rx = ReceiveSet::new(rxs_log);
         let rrd_path = args.save.unwrap(); // Already validated above
-        Ok(stream_to_rrd_continuous(&rx, &rrd_path.into(), interval)?)
+        Ok(stream_to_rrd_continuous(&rx, &rrd_path.into(), interval, args.rotate_files)?)
     } else if let Some(rrd_path) = args.save {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--save` does not support catalogs");
@@ -1249,9 +1263,14 @@ fn stream_to_rrd_continuous(
     rx: &re_smart_channel::ReceiveSet<LogMsg>,
     path: &std::path::PathBuf,
     interval_seconds: u64,
+    rotate_files: bool,
 ) -> Result<(), re_log_encoding::FileSinkError> {
 
-    re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+    if rotate_files {
+        re_log::info!("Starting continuous download with file rotation based on {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+    } else {
+        re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+    }
 
     let mut message_buffer = Vec::new();
     let mut last_save = std::time::Instant::now();
@@ -1283,7 +1302,12 @@ fn stream_to_rrd_continuous(
             None => {
                 // No message received within timeout, check if we should save
                 if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
-                    save_messages_to_file(&message_buffer, path)?;
+                    let target_path = if rotate_files {
+                        generate_timestamped_path(path)
+                    } else {
+                        path.clone()
+                    };
+                    save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
                     message_buffer.clear();
                     last_save = std::time::Instant::now();
                 }
@@ -1292,7 +1316,12 @@ fn stream_to_rrd_continuous(
 
         // Also check for saving if we have messages and enough time has passed
         if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
-            save_messages_to_file(&message_buffer, path)?;
+            let target_path = if rotate_files {
+                generate_timestamped_path(path)
+            } else {
+                path.clone()
+            };
+            save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
             message_buffer.clear();
             last_save = std::time::Instant::now();
         }
@@ -1300,7 +1329,12 @@ fn stream_to_rrd_continuous(
 
     // Final save of any remaining messages
     if !message_buffer.is_empty() {
-        save_messages_to_file(&message_buffer, path)?;
+        let target_path = if rotate_files {
+            generate_timestamped_path(path)
+        } else {
+            path.clone()
+        };
+        save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
     }
 
     re_log::info!("Continuous download completed.");
@@ -1310,17 +1344,23 @@ fn stream_to_rrd_continuous(
 fn save_messages_to_file(
     messages: &[LogMsg],
     path: &std::path::PathBuf,
+    append: bool,
 ) -> Result<(), re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
     re_log::info!("Saving {} messages to {path:?}", messages.len());
 
     let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+    let file = if append {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?
+    } else {
+        std::fs::File::create(path)
+            .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?
+    };
     
     let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
         re_build_info::CrateVersion::LOCAL,
@@ -1334,4 +1374,18 @@ fn save_messages_to_file(
 
     re_log::info!("Successfully saved {} messages to {path:?}", messages.len());
     Ok(())
+}
+
+fn generate_timestamped_path(base_path: &std::path::PathBuf) -> std::path::PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let parent = base_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+    let extension = base_path.extension().and_then(|s| s.to_str()).unwrap_or("rrd");
+    
+    let new_filename = format!("{}_ts{}.{}", stem, now, extension);
+    parent.join(new_filename)
 }
