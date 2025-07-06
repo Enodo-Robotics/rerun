@@ -43,6 +43,7 @@ repository = "https://github.com/rerun-io/rerun"
 
 [project.scripts]
 rerun = "rerun_cli.__main__:main"
+rerun-logger = "rerun_sdk.rerun_logger:main"
 
 
 ######################
@@ -184,10 +185,12 @@ include = [
   "rerun_sdk.pth",
   "rerun_sdk/rerun_cli/rerun",
   "rerun_sdk/rerun_cli/rerun.exe",
+  "rerun_sdk/rerun_cli/rerun-logger",
+  "rerun_sdk/rerun_cli/rerun-logger.exe",
 ]
 locked = true
 name = "rerun_bindings"
-python-packages = ["rerun_sdk/rerun", "rerun_sdk/rerun_cli"]
+python-packages = ["rerun_sdk/rerun", "rerun_sdk/rerun_cli", "rerun_sdk/rerun_logger"]
 
 # Setting this to 1 causes lets the build.rs script know we are building a wheel,
 # which will cause it to check for the existence of the `rerun` binary.

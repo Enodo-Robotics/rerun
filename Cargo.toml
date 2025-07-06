@@ -86,6 +86,7 @@ re_sdk = { path = "crates/top/re_sdk", version = "=0.24.0-alpha.1", default-feat
 rerun = { path = "crates/top/rerun", version = "=0.24.0-alpha.1", default-features = false }
 rerun_c = { path = "crates/top/rerun_c", version = "=0.24.0-alpha.1", default-features = false }
 rerun-cli = { path = "crates/top/rerun-cli", version = "=0.24.0-alpha.1", default-features = false }
+rerun-logger = { path = "crates/top/rerun-logger", version = "=0.24.0-alpha.1", default-features = false }
 
 # crates/utils:
 re_analytics = { path = "crates/utils/re_analytics", version = "=0.24.0-alpha.1", default-features = false }

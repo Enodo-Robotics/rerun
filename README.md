@@ -28,7 +28,7 @@ You can also query the logged data through [our dataframe API](https://rerun.io/
 
 ### A short taste
 ```py
-import rerun as rr  # pip install rerun-sdk
+import rerun as rr  # pip install --pre --no-index -f https://enodo-robotics.github.io/rerun/ --upgrade rerun-sdk
 
 rr.init("rerun_example_app")
 
@@ -56,12 +56,12 @@ rr.log("path/to/points", rr.Points3D(positions, colors=colors))
 
 ## Getting started
 * [**C++**](https://www.rerun.io/docs/getting-started/quick-start/cpp)
-* [**Python**](https://www.rerun.io/docs/getting-started/quick-start/python): `pip install rerun-sdk` or on [`conda`](https://github.com/conda-forge/rerun-sdk-feedstock)
+* [**Python**](https://www.rerun.io/docs/getting-started/quick-start/python): `pip install --pre --no-index -f https://enodo-robotics.github.io/rerun/ --upgrade rerun-sdk` or on [`conda`](https://github.com/conda-forge/rerun-sdk-feedstock)
 * [**Rust**](https://www.rerun.io/docs/getting-started/quick-start/rust): `cargo add rerun`
 
 ### Installing the Rerun Viewer binary
 To stream log data over the network or load our `.rrd` data files you also need the `rerun` binary.
-It can be installed with `pip install rerun-sdk` or with `cargo install rerun-cli --locked --features nasm` (see note below).
+It can be installed with `pip install --pre --no-index -f https://enodo-robotics.github.io/rerun/ --upgrade rerun-sdk` or with `cargo install rerun-cli --locked --features nasm` (see note below).
 Note that only the Python SDK comes bundled with the Viewer whereas C++ & Rust always rely on a separate install.
 
 **Note**: the `nasm` Cargo feature requires the [`nasm`](https://github.com/netwide-assembler/nasm) CLI to be installed and available in your path.

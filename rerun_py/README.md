@@ -9,7 +9,7 @@ Use the Rerun SDK to record data like images, tensors, point clouds, and text. D
 ## Install
 
 ```sh
-pip3 install rerun-sdk
+pip3 install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk
 ```
 
 ℹ️ Note:
@@ -19,7 +19,7 @@ For other SDK languages see [Installing Rerun](https://www.rerun.io/docs/getting
 
 We also provide a [Jupyter widget](https://pypi.org/project/rerun-notebook/) for interactive data visualization in Jupyter notebooks:
 ```sh
-pip3 install rerun-sdk[notebook]
+pip3 install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk[notebook]
 ```
 
 ## Example

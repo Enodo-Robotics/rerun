@@ -21,7 +21,7 @@ You'll additionally need to install the Viewer, see [below](#installing-the-view
 
 ### Python
 
--   `pip install rerun-sdk` via pip
+-   `pip install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk` via pip
 -   `conda install -c conda-forge rerun-sdk` via Conda
 
 Either way this includes both the SDK & the Viewer and you're ready to go!
@@ -44,7 +44,7 @@ There are many ways to install the viewer. Please pick whatever works best for y
 -   Via Snap (_community maintained_)
     -   `snap install rerun` - download the viewer from the [Store](https://snapcraft.io/rerun).
 -   Together with the Rerun [Python SDK](./quick-start/python.md):
-    -   `pip3 install rerun-sdk` - download it via pip
+    -   `pip3 install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk` - download it via pip
     -   `conda install -c conda-forge rerun-sdk` - download via Conda
     -   `pixi global install rerun-sdk` - download it via [Pixi](https://pixi.sh/latest/)
 

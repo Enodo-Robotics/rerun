@@ -7,7 +7,7 @@ The Rerun SDK is available on [PyPI](https://pypi.org/) under the
 Python package:
 
 ```sh
-pip install rerun-sdk
+pip install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk
 ```
 
 ## Logging your own data

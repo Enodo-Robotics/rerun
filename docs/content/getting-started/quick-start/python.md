@@ -10,7 +10,7 @@ The Rerun SDK for Python requires a working installation of [Python-3.9+](https:
 You can install the Rerun SDK using the [rerun-sdk](https://pypi.org/project/rerun-sdk/) pypi package via pip:
 
 ```bash
-$ pip3 install rerun-sdk
+$ pip3 install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk
 ```
 
 You are now ready to start logging and visualizing data.

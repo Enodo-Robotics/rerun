@@ -67,7 +67,7 @@ And unset the wayland display either by `unset WAYLAND_DISPLAY` or `WAYLAND_DISP
 
 ## `pip install` issues
 
-If you see the following when running `pip install rerun-sdk` or `pip install rerun-notebook` on a supported platform:
+If you see the following when running `pip install --pre --no-index -f https://github.com/enodo_motion/rerun/releases/download/prerelease --upgrade rerun-sdk` or `pip install rerun-notebook` on a supported platform:
 
 ```sh
 ERROR: Could not find a version that satisfies the requirement rerun-sdk (from versions: none)
