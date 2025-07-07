@@ -69,6 +69,9 @@ Examples:
     Host a Rerun gRPC server without spawning a Viewer:
         rerun --serve-grpc
 
+    Host a Rerun gRPC server with continuous file saving:
+        rerun --serve-grpc --save recording.rrd --continuous-download-interval 30
+
     Spawn a Viewer without also hosting a gRPC server:
         rerun --connect
 
@@ -858,8 +861,8 @@ fn run_impl(
 
     // Validate headless mode and continuous download arguments
     if let Some(_interval) = args.continuous_download_interval {
-        if !args.headless {
-            anyhow::bail!("--continuous-download-interval requires --headless");
+        if !args.headless && !args.serve_grpc {
+            anyhow::bail!("--continuous-download-interval requires --headless or --serve-grpc");
         }
         if args.save.is_none() {
             anyhow::bail!("--continuous-download-interval requires --save <path>");
@@ -879,6 +882,58 @@ fn run_impl(
 
         let rx = ReceiveSet::new(rxs_log);
         assert_receive_into_entity_db(&rx).map(|_db| ())
+    } else if args.serve_grpc && args.continuous_download_interval.is_some() {
+        // Combined mode: serve gRPC AND continuously save to file
+        if !redap_uris.is_empty() {
+            anyhow::bail!("`--serve-grpc` with `--continuous-download-interval` does not support catalogs");
+        }
+
+        if !cfg!(feature = "server") {
+            _ = (call_source, rxs_log, rxs_table);
+            anyhow::bail!("Can't host server - rerun was not compiled with the 'server' feature");
+        }
+
+        #[cfg(feature = "server")]
+        {
+            let interval = args.continuous_download_interval.unwrap();
+            let rrd_path = args.save.unwrap(); // Already validated above
+            
+            // Spawn gRPC server and get its receiver
+            let (signal, shutdown) = re_grpc_server::shutdown::shutdown();
+            let (server_rx, _server_table_rx) = re_grpc_server::spawn_with_recv(
+                server_addr,
+                server_memory_limit,
+                shutdown,
+            );
+
+            // Create a receiver set with both the server receiver and any original receivers
+            let mut all_receivers = vec![server_rx];
+            all_receivers.extend(rxs_log);
+            let rx_set = ReceiveSet::new(all_receivers);
+
+            re_log::info!("gRPC server running on {server_addr} with continuous file saving to {rrd_path}");
+
+            // Handle continuous file saving in the main thread
+            let rrd_path_clone = rrd_path.clone();
+            let rotate_files = args.rotate_files;
+            
+            // Set up for graceful shutdown
+            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+            let tokio_handle = tokio_runtime_handle.clone();
+            std::thread::spawn(move || {
+                tokio_handle.block_on(tokio::signal::ctrl_c()).ok();
+                re_log::info!("Received shutdown signal, stopping server...");
+                signal.stop();
+                let _ = shutdown_tx.send(());
+            });
+
+            // Run continuous file saving with shutdown handling
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path_clone.into(), interval, rotate_files, shutdown_rx) {
+                re_log::error!("Continuous file saving failed: {e}");
+            }
+        }
+
+        Ok(())
     } else if let Some(interval) = args.continuous_download_interval {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--continuous-download-interval` does not support catalogs");
@@ -1279,6 +1334,90 @@ fn stream_to_rrd_continuous(
     loop {
         if !rx.is_connected() {
             re_log::info!("Connection closed, performing final save before exit.");
+            break;
+        }
+
+        // Try to receive messages with a timeout
+        let timeout = std::time::Duration::from_millis(100);
+        match rx.recv_timeout(timeout) {
+            Some((_, msg)) => {
+                match msg.payload {
+                    re_smart_channel::SmartMessagePayload::Msg(payload) => {
+                        message_buffer.push(payload);
+                    }
+                    re_smart_channel::SmartMessagePayload::Flush { on_flush_done } => {
+                        on_flush_done();
+                    }
+                    re_smart_channel::SmartMessagePayload::Quit(_) => {
+                        re_log::info!("Received quit message, stopping continuous download.");
+                        break;
+                    }
+                }
+            }
+            None => {
+                // No message received within timeout, check if we should save
+                if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
+                    let target_path = if rotate_files {
+                        generate_timestamped_path(path)
+                    } else {
+                        path.clone()
+                    };
+                    save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
+                    message_buffer.clear();
+                    last_save = std::time::Instant::now();
+                }
+            }
+        }
+
+        // Also check for saving if we have messages and enough time has passed
+        if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
+            let target_path = if rotate_files {
+                generate_timestamped_path(path)
+            } else {
+                path.clone()
+            };
+            save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
+            message_buffer.clear();
+            last_save = std::time::Instant::now();
+        }
+    }
+
+    // Final save of any remaining messages
+    if !message_buffer.is_empty() {
+        let target_path = if rotate_files {
+            generate_timestamped_path(path)
+        } else {
+            path.clone()
+        };
+        save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
+    }
+
+    re_log::info!("Continuous download completed.");
+    Ok(())
+}
+
+fn stream_to_rrd_continuous_with_shutdown(
+    rx: &re_smart_channel::ReceiveSet<LogMsg>,
+    path: &std::path::PathBuf,
+    interval_seconds: u64,
+    rotate_files: bool,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+) -> Result<(), re_log_encoding::FileSinkError> {
+
+    if rotate_files {
+        re_log::info!("Starting continuous download with file rotation based on {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+    } else {
+        re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+    }
+
+    let mut message_buffer = Vec::new();
+    let mut last_save = std::time::Instant::now();
+    let save_interval = std::time::Duration::from_secs(interval_seconds);
+
+    loop {
+        // Check for shutdown signal
+        if shutdown_rx.try_recv().is_ok() {
+            re_log::info!("Shutdown signal received, performing final save before exit.");
             break;
         }
 
