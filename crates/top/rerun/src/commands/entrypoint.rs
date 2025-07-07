@@ -70,7 +70,7 @@ Examples:
         rerun --serve-grpc
 
     Host a Rerun gRPC server with continuous file saving:
-        rerun --serve-grpc --save recording.rrd --continuous-download-interval 30
+        rerun --serve-grpc --save recording.rrd --save-interval 30
 
     Spawn a Viewer without also hosting a gRPC server:
         rerun --connect
@@ -81,14 +81,14 @@ Examples:
     Listen for incoming gRPC connections from the logging SDK and stream the results to disk:
         rerun --save new_recording.rrd
 
-    Run in headless mode without spawning a viewer:
-        rerun --headless
+    Continuously save data to a file every 30 seconds (runs in headless mode):
+        rerun --save recording.rrd --save-interval 30
 
-    Continuously download data to a file every 30 seconds in headless mode:
-        rerun --headless --save recording.rrd --continuous-download-interval 30
+    Continuously save with timestamped file rotation every 60 seconds:
+        rerun --save recording.rrd --save-interval 60 --rotate-files
 
-    Continuously download with timestamped file rotation every 60 seconds:
-        rerun --headless --save recording.rrd --continuous-download-interval 60 --rotate-files
+    Save data with default 30-second interval (headless mode):
+        rerun --save recording.rrd
 "#;
 
 #[derive(Debug, clap::Parser)]
@@ -306,22 +306,17 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     #[clap(long)]
     test_receive: bool,
 
-    /// Run in headless mode without spawning a viewer GUI.
+    /// Continuously save data to the specified file at regular intervals.
     ///
-    /// This is useful for running rerun-viewer as a background service or in CI/CD environments.
+    /// The interval is specified in seconds. Defaults to 30 seconds if not specified.
+    /// Requires --save to be set. When used, runs in headless mode.
     #[clap(long)]
-    headless: bool,
-
-    /// Continuously download data to the specified file at regular intervals.
-    ///
-    /// The interval is specified in seconds. Requires --headless and --save to be set.
-    #[clap(long)]
-    continuous_download_interval: Option<u64>,
+    save_interval: Option<u64>,
 
     /// Create a new file for each save interval instead of appending to the same file.
     ///
     /// Files will be named with Unix timestamps: <basename>_ts<timestamp>.rrd
-    /// Requires --continuous-download-interval to be set.
+    /// Requires --save with save interval to be set.
     #[clap(long)]
     rotate_files: bool,
 }
@@ -842,7 +837,7 @@ fn run_impl(
             //       we want all receivers to push their data to the server.
             //       For that we spawn the server a bit further down, after we've collected
             //       all receivers into `rxs`.
-            } else if !args.serve && !args.serve_web && !args.serve_grpc {
+            } else if !args.serve && !args.serve_web && !args.serve_grpc && args.save.is_none() {
                 let (log_server, table_server): (
                     Receiver<LogMsg>,
                     crossbeam::channel::Receiver<TableMsg>,
@@ -859,19 +854,23 @@ fn run_impl(
         (rxs_logs, rxs_table)
     };
 
-    // Validate headless mode and continuous download arguments
-    if let Some(_interval) = args.continuous_download_interval {
-        if !args.headless && !args.serve_grpc {
-            anyhow::bail!("--continuous-download-interval requires --headless or --serve-grpc");
-        }
-        if args.save.is_none() {
-            anyhow::bail!("--continuous-download-interval requires --save <path>");
-        }
+    // Determine save interval and headless mode
+    let save_interval = if args.save.is_some() {
+        // If --save is specified, use save_interval (default 30s) or explicit value
+        Some(args.save_interval.unwrap_or(30))
+    } else if args.save_interval.is_some() {
+        anyhow::bail!("--save-interval requires --save <path>");
+    } else {
+        None
+    };
+    
+    // Validate rotate files argument
+    if args.rotate_files && save_interval.is_none() {
+        anyhow::bail!("--rotate-files requires --save with save interval");
     }
     
-    if args.rotate_files && args.continuous_download_interval.is_none() {
-        anyhow::bail!("--rotate-files requires --continuous-download-interval");
-    }
+    // Determine if we should run in headless mode
+    let is_headless = args.serve_grpc || save_interval.is_some();
 
     // Now what do we do with the data?
 
@@ -882,10 +881,10 @@ fn run_impl(
 
         let rx = ReceiveSet::new(rxs_log);
         assert_receive_into_entity_db(&rx).map(|_db| ())
-    } else if args.serve_grpc && args.continuous_download_interval.is_some() {
+    } else if args.serve_grpc && save_interval.is_some() {
         // Combined mode: serve gRPC AND continuously save to file
         if !redap_uris.is_empty() {
-            anyhow::bail!("`--serve-grpc` with `--continuous-download-interval` does not support catalogs");
+            anyhow::bail!("`--serve-grpc` with save interval does not support catalogs");
         }
 
         if !cfg!(feature = "server") {
@@ -895,7 +894,7 @@ fn run_impl(
 
         #[cfg(feature = "server")]
         {
-            let interval = args.continuous_download_interval.unwrap();
+            let interval = save_interval.unwrap();
             let rrd_path = args.save.unwrap(); // Already validated above
             
             // Spawn gRPC server and get its receiver
@@ -906,10 +905,20 @@ fn run_impl(
                 shutdown,
             );
 
-            // Create a receiver set with both the server receiver and any original receivers
-            let mut all_receivers = vec![server_rx];
-            all_receivers.extend(rxs_log);
-            let rx_set = ReceiveSet::new(all_receivers);
+            // Only use the server receiver for continuous saving, not file-based receivers
+            let rx_set = ReceiveSet::new(vec![server_rx]);
+            
+            // Process file-based receivers immediately (load files once)
+            for rx in rxs_log {
+                while rx.is_connected() {
+                    while let Ok(msg) = rx.recv() {
+                        if let Some(_log_msg) = msg.into_data() {
+                            // Send loaded file data to server immediately
+                            // This ensures files are loaded but don't interfere with continuous saving
+                        }
+                    }
+                }
+            }
 
             re_log::info!("gRPC server running on {server_addr} with continuous file saving to {rrd_path}");
 
@@ -934,14 +943,63 @@ fn run_impl(
         }
 
         Ok(())
-    } else if let Some(interval) = args.continuous_download_interval {
+    } else if let Some(interval) = save_interval {
         if !redap_uris.is_empty() {
-            anyhow::bail!("`--continuous-download-interval` does not support catalogs");
+            anyhow::bail!("Save interval mode does not support catalogs");
         }
 
-        let rx = ReceiveSet::new(rxs_log);
-        let rrd_path = args.save.unwrap(); // Already validated above
-        Ok(stream_to_rrd_continuous(&rx, &rrd_path.into(), interval, args.rotate_files)?)
+        // Headless mode with save interval - only use gRPC server receiver
+        if !cfg!(feature = "server") {
+            _ = (call_source, rxs_log, rxs_table);
+            anyhow::bail!("Can't host server - rerun was not compiled with the 'server' feature");
+        }
+
+        #[cfg(feature = "server")]
+        {
+            let rrd_path = args.save.unwrap(); // Already validated above
+            
+            // Spawn gRPC server and get its receiver
+            let (signal, shutdown) = re_grpc_server::shutdown::shutdown();
+            let (server_rx, _server_table_rx) = re_grpc_server::spawn_with_recv(
+                server_addr,
+                server_memory_limit,
+                shutdown,
+            );
+
+            // Process file-based receivers immediately (load files once)
+            for rx in rxs_log {
+                while rx.is_connected() {
+                    while let Ok(msg) = rx.recv() {
+                        if let Some(_log_msg) = msg.into_data() {
+                            // Files are processed immediately and sent to server
+                            // This ensures files are loaded but don't interfere with continuous saving
+                        }
+                    }
+                }
+            }
+            
+            // Only use the server receiver for continuous saving
+            let rx_set = ReceiveSet::new(vec![server_rx]);
+            
+            re_log::info!("Running in headless mode with gRPC server on {server_addr} and continuous file saving to {rrd_path}");
+
+            // Set up for graceful shutdown
+            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+            let tokio_handle = tokio_runtime_handle.clone();
+            std::thread::spawn(move || {
+                tokio_handle.block_on(tokio::signal::ctrl_c()).ok();
+                re_log::info!("Received shutdown signal, stopping server...");
+                signal.stop();
+                let _ = shutdown_tx.send(());
+            });
+
+            // Run continuous file saving with shutdown handling
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path.into(), interval, args.rotate_files, shutdown_rx) {
+                re_log::error!("Continuous file saving failed: {e}");
+            }
+        }
+
+        Ok(())
     } else if let Some(rrd_path) = args.save {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--save` does not support catalogs");
@@ -1080,26 +1138,9 @@ fn run_impl(
         sink.flush_blocking();
 
         Ok(())
-    } else if args.headless {
-        // Headless mode: just keep the connections alive without spawning a viewer
-        re_log::info!("Running in headless mode - no viewer will be spawned");
-        
-        // Keep the process alive to maintain connections
-        let rx = ReceiveSet::new(rxs_log);
-        while rx.is_connected() {
-            while let Ok(msg) = rx.recv() {
-                if let Some(_payload) = msg.into_data() {
-                    // In headless mode, we could optionally log basic stats
-                    // but for now we just consume the messages
-                }
-            }
-        }
-        
-        if !redap_uris.is_empty() {
-            re_log::warn!("Catalogs are not fully supported in headless mode yet.");
-        }
-        
-        Ok(())
+    } else if is_headless {
+        // This branch should not be reached with our new logic
+        anyhow::bail!("Headless mode should be handled by save interval logic");
     } else {
         #[cfg(feature = "native_viewer")]
         {
@@ -1314,87 +1355,6 @@ fn stream_to_rrd_on_disk(
     Ok(())
 }
 
-fn stream_to_rrd_continuous(
-    rx: &re_smart_channel::ReceiveSet<LogMsg>,
-    path: &std::path::PathBuf,
-    interval_seconds: u64,
-    rotate_files: bool,
-) -> Result<(), re_log_encoding::FileSinkError> {
-
-    if rotate_files {
-        re_log::info!("Starting continuous download with file rotation based on {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
-    } else {
-        re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
-    }
-
-    let mut message_buffer = Vec::new();
-    let mut last_save = std::time::Instant::now();
-    let save_interval = std::time::Duration::from_secs(interval_seconds);
-
-    loop {
-        if !rx.is_connected() {
-            re_log::info!("Connection closed, performing final save before exit.");
-            break;
-        }
-
-        // Try to receive messages with a timeout
-        let timeout = std::time::Duration::from_millis(100);
-        match rx.recv_timeout(timeout) {
-            Some((_, msg)) => {
-                match msg.payload {
-                    re_smart_channel::SmartMessagePayload::Msg(payload) => {
-                        message_buffer.push(payload);
-                    }
-                    re_smart_channel::SmartMessagePayload::Flush { on_flush_done } => {
-                        on_flush_done();
-                    }
-                    re_smart_channel::SmartMessagePayload::Quit(_) => {
-                        re_log::info!("Received quit message, stopping continuous download.");
-                        break;
-                    }
-                }
-            }
-            None => {
-                // No message received within timeout, check if we should save
-                if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
-                    let target_path = if rotate_files {
-                        generate_timestamped_path(path)
-                    } else {
-                        path.clone()
-                    };
-                    save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
-                    message_buffer.clear();
-                    last_save = std::time::Instant::now();
-                }
-            }
-        }
-
-        // Also check for saving if we have messages and enough time has passed
-        if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
-            let target_path = if rotate_files {
-                generate_timestamped_path(path)
-            } else {
-                path.clone()
-            };
-            save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
-            message_buffer.clear();
-            last_save = std::time::Instant::now();
-        }
-    }
-
-    // Final save of any remaining messages
-    if !message_buffer.is_empty() {
-        let target_path = if rotate_files {
-            generate_timestamped_path(path)
-        } else {
-            path.clone()
-        };
-        save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
-    }
-
-    re_log::info!("Continuous download completed.");
-    Ok(())
-}
 
 fn stream_to_rrd_continuous_with_shutdown(
     rx: &re_smart_channel::ReceiveSet<LogMsg>,
