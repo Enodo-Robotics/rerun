@@ -1318,6 +1318,23 @@ fn parse_size(size: &str) -> anyhow::Result<[f32; 2]> {
 
 // TODO(cmc): dedicated module for io utils, especially stdio streaming in and out.
 
+fn is_static_message(log_msg: &LogMsg) -> bool {
+    match log_msg {
+        LogMsg::ArrowMsg(_, arrow_msg) => {
+            // Check if the timepoint_max is empty (static)
+            arrow_msg.timepoint_max.is_static()
+        }
+        LogMsg::SetStoreInfo(_) => {
+            // Store info is typically static metadata
+            true
+        }
+        LogMsg::BlueprintActivationCommand(_) => {
+            // Blueprint commands are typically static
+            true
+        }
+    }
+}
+
 fn stream_to_rrd_on_disk(
     rx: &re_smart_channel::ReceiveSet<LogMsg>,
     path: &std::path::PathBuf,
@@ -1370,7 +1387,8 @@ fn stream_to_rrd_continuous_with_shutdown(
         re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
     }
 
-    let mut message_buffer = Vec::new();
+    let mut static_messages = Vec::new();
+    let mut temporal_messages = Vec::new();
     let mut last_save = std::time::Instant::now();
     let save_interval = std::time::Duration::from_secs(interval_seconds);
 
@@ -1387,7 +1405,21 @@ fn stream_to_rrd_continuous_with_shutdown(
             Some((_, msg)) => {
                 match msg.payload {
                     re_smart_channel::SmartMessagePayload::Msg(payload) => {
-                        message_buffer.push(payload);
+                        if is_static_message(&payload) {
+                            // Only add to static_messages if not already present
+                            if !static_messages.iter().any(|existing| {
+                                match (existing, &payload) {
+                                    (LogMsg::ArrowMsg(_, existing_arrow), LogMsg::ArrowMsg(_, new_arrow)) => {
+                                        existing_arrow.chunk_id == new_arrow.chunk_id
+                                    }
+                                    _ => false,
+                                }
+                            }) {
+                                static_messages.push(payload);
+                            }
+                        } else {
+                            temporal_messages.push(payload);
+                        }
                     }
                     re_smart_channel::SmartMessagePayload::Flush { on_flush_done } => {
                         on_flush_done();
@@ -1400,66 +1432,62 @@ fn stream_to_rrd_continuous_with_shutdown(
             }
             None => {
                 // No message received within timeout, check if we should save
-                if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
+                if last_save.elapsed() >= save_interval && !temporal_messages.is_empty() {
                     let target_path = if rotate_files {
                         generate_timestamped_path(path)
                     } else {
                         path.clone()
                     };
-                    save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
-                    message_buffer.clear();
+                    save_messages_to_file_with_static(&static_messages, &temporal_messages, &target_path)?;
+                    temporal_messages.clear();
                     last_save = std::time::Instant::now();
                 }
             }
         }
 
         // Also check for saving if we have messages and enough time has passed
-        if last_save.elapsed() >= save_interval && !message_buffer.is_empty() {
+        if last_save.elapsed() >= save_interval && !temporal_messages.is_empty() {
             let target_path = if rotate_files {
                 generate_timestamped_path(path)
             } else {
                 path.clone()
             };
-            save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
-            message_buffer.clear();
+            save_messages_to_file_with_static(&static_messages, &temporal_messages, &target_path)?;
+            temporal_messages.clear();
             last_save = std::time::Instant::now();
         }
     }
 
     // Final save of any remaining messages
-    if !message_buffer.is_empty() {
+    if !temporal_messages.is_empty() {
         let target_path = if rotate_files {
             generate_timestamped_path(path)
         } else {
             path.clone()
         };
-        save_messages_to_file(&message_buffer, &target_path, !rotate_files)?;
+        save_messages_to_file_with_static(&static_messages, &temporal_messages, &target_path)?;
     }
 
     re_log::info!("Continuous download completed.");
     Ok(())
 }
 
-fn save_messages_to_file(
-    messages: &[LogMsg],
+
+
+fn save_messages_to_file_with_static(
+    static_messages: &[LogMsg],
+    temporal_messages: &[LogMsg],
     path: &std::path::PathBuf,
-    append: bool,
 ) -> Result<(), re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
-    re_log::info!("Saving {} messages to {path:?}", messages.len());
+    let total_messages = static_messages.len() + temporal_messages.len();
+    re_log::info!("Saving {} messages ({} static, {} temporal) to {path:?}", 
+                  total_messages, static_messages.len(), temporal_messages.len());
 
     let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
-    let file = if append {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?
-    } else {
-        std::fs::File::create(path)
-            .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?
-    };
+    let file = std::fs::File::create(path)
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
     
     let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
         re_build_info::CrateVersion::LOCAL,
@@ -1467,11 +1495,17 @@ fn save_messages_to_file(
         file,
     )?;
 
-    for msg in messages {
+    // First write all static messages
+    for msg in static_messages {
         encoder.append(msg)?;
     }
 
-    re_log::info!("Successfully saved {} messages to {path:?}", messages.len());
+    // Then write temporal messages
+    for msg in temporal_messages {
+        encoder.append(msg)?;
+    }
+
+    re_log::info!("Successfully saved {} messages to {path:?}", total_messages);
     Ok(())
 }
 
