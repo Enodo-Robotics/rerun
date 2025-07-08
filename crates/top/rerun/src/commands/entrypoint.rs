@@ -1482,8 +1482,36 @@ fn save_messages_to_file_with_static(
     use re_log_encoding::FileSinkError;
 
     let total_messages = static_messages.len() + temporal_messages.len();
-    re_log::info!("Saving {} messages ({} static, {} temporal) to {path:?}", 
-                  total_messages, static_messages.len(), temporal_messages.len());
+    
+    // For timestamped files (rotate_files), always create new files
+    // For non-rotating files, check if file exists to determine append vs create
+    let should_append = path.exists() && 
+                       path.metadata().map(|m| m.len() > 0).unwrap_or(false) &&
+                       !path.file_name()
+                           .and_then(|name| name.to_str())
+                           .map(|name| name.contains("_ts"))
+                           .unwrap_or(false);
+    
+    if should_append {
+        // Append mode: only write temporal messages
+        re_log::info!("Appending {} temporal messages to existing file {path:?}", temporal_messages.len());
+        append_messages_to_file(temporal_messages, path)?;
+    } else {
+        // New file: write static + temporal messages
+        re_log::info!("Creating new file with {} messages ({} static, {} temporal) at {path:?}", 
+                      total_messages, static_messages.len(), temporal_messages.len());
+        create_file_with_messages(static_messages, temporal_messages, path)?;
+    }
+
+    Ok(())
+}
+
+fn create_file_with_messages(
+    static_messages: &[LogMsg],
+    temporal_messages: &[LogMsg],
+    path: &std::path::PathBuf,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    use re_log_encoding::FileSinkError;
 
     let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
     let file = std::fs::File::create(path)
@@ -1505,7 +1533,83 @@ fn save_messages_to_file_with_static(
         encoder.append(msg)?;
     }
 
-    re_log::info!("Successfully saved {} messages to {path:?}", total_messages);
+    Ok(())
+}
+
+fn append_messages_to_file(
+    messages: &[LogMsg],
+    path: &std::path::PathBuf,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    use re_log_encoding::FileSinkError;
+
+    if messages.is_empty() {
+        return Ok(());
+    }
+
+    // Remove the end marker from the existing file
+    remove_end_marker(path)?;
+
+    // Open file in append mode
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+
+    let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
+    let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
+        re_build_info::CrateVersion::LOCAL,
+        encoding_options,
+        file,
+    )?;
+
+    // Write new messages
+    for msg in messages {
+        encoder.append(msg)?;
+    }
+
+    Ok(())
+}
+
+fn remove_end_marker(path: &std::path::PathBuf) -> Result<(), re_log_encoding::FileSinkError> {
+    use re_log_encoding::FileSinkError;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+
+    let file_len = file.metadata()
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?
+        .len();
+
+    if file_len < 16 {
+        // File too small to have an end marker
+        return Ok(());
+    }
+
+    // Read last 16 bytes to check for end marker
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = file;
+    file.seek(SeekFrom::End(-16))
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+
+    let mut last_16_bytes = [0u8; 16];
+    file.read_exact(&mut last_16_bytes)
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+
+    // Check if it's an end marker (MessageKind::End = 0)
+    let message_kind = u64::from_le_bytes([
+        last_16_bytes[0], last_16_bytes[1], last_16_bytes[2], last_16_bytes[3],
+        last_16_bytes[4], last_16_bytes[5], last_16_bytes[6], last_16_bytes[7],
+    ]);
+
+    if message_kind == 0 { // MessageKind::End
+        // Truncate file to remove the end marker
+        file.set_len(file_len - 16)
+            .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+    }
+
     Ok(())
 }
 
