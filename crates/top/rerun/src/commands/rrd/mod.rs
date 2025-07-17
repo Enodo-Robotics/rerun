@@ -6,7 +6,7 @@ mod verify;
 
 use self::compare::CompareCommand;
 use self::filter::FilterCommand;
-use self::merge_compact::{CompactCommand, MergeCommand};
+use self::merge_compact::{CompactCommand, MergeCommand, SplitCommand};
 use self::print::PrintCommand;
 use self::verify::VerifyCommand;
 
@@ -71,6 +71,15 @@ pub enum RrdCommands {
     ///
     /// Example: `rerun filter --drop-timeline log_tick /my/recordings/*.rrd > output.rrd`
     Filter(FilterCommand),
+
+    /// Splits a .rrd file into multiple chunks of roughly equal size in chronological order.
+    ///
+    /// Reads from standard input if no path is specified.
+    ///
+    /// The output files will be named with the pattern `<output_prefix>_part_<index>.rrd`.
+    ///
+    /// Example: `rerun rrd split recording.rrd -o chunks/output --chunk-size 524288000`
+    Split(SplitCommand),
 }
 
 impl RrdCommands {
@@ -87,6 +96,7 @@ impl RrdCommands {
             Self::Compact(compact_command) => compact_command.run(),
             Self::Merge(merge_command) => merge_command.run(),
             Self::Filter(drop_command) => drop_command.run(),
+            Self::Split(split_command) => split_command.run(),
         }
     }
 }
