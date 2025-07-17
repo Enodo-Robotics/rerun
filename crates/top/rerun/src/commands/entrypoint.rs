@@ -90,6 +90,15 @@ Examples:
 
     Save data with default 30-second interval (headless mode):
         rerun --save recording.rrd
+
+    Split a large recording into smaller chunks:
+        rerun rrd split large_recording.rrd -o chunks/output
+
+    Split with custom chunk size (1GB chunks):
+        rerun rrd split recording.rrd -o split/data --chunk-size 1073741824
+
+    Merge split files back together:
+        rerun rrd merge chunks/output_part_*.rrd -o merged.rrd
 "#;
 
 #[derive(Debug, clap::Parser)]
