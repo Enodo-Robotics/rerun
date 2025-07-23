@@ -23,9 +23,9 @@ git checkout oscar-rrl
 
 ### Step 1: Build the CLI Binary
 
-First, build the CLI binary with the headless features:
+First, build the CLI binary with the headless features from the correct crate:
 ```bash
-cargo build --release --bin rerun
+cargo build --release --bin rerun --manifest-path crates/top/rerun-cli/Cargo.toml
 ```
 
 ### Step 2: Replace CLI Binary in Python Package
@@ -106,7 +106,7 @@ If the wheel doesn't contain headless features:
 ```bash
 # Full build sequence
 git checkout oscar-rrl
-cargo build --release --bin rerun
+cargo build --release --bin rerun --manifest-path crates/top/rerun-cli/Cargo.toml
 cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
 RERUN_BUILDING_WHEEL=1 maturin build --release --manifest-path rerun_py/Cargo.toml --features web_viewer,nasm --out ./wheels/
 ```
