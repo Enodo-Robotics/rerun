@@ -613,7 +613,7 @@ where
     if args.version {
         println!("{build_info}");
         println!("Video features: {}", re_video::build_info().features);
-        println!("Release: v0.0.8 - Recording Splicing: Added splice and split commands for time-based data manipulation");
+        println!("Release: v0.0.8 - Recording Splicing & Continuous Save: Added splice/split commands for time-based data manipulation and continuous recording save functionality");
         return Ok(0);
     }
 
