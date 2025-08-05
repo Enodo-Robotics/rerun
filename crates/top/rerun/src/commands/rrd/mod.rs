@@ -2,12 +2,16 @@ mod compare;
 mod filter;
 mod merge_compact;
 mod print;
+mod splice;
+mod split;
 mod verify;
 
 use self::compare::CompareCommand;
 use self::filter::FilterCommand;
 use self::merge_compact::{CompactCommand, MergeCommand};
 use self::print::PrintCommand;
+use self::splice::SpliceCommand;
+use self::split::SplitCommand;
 use self::verify::VerifyCommand;
 
 // ---
@@ -71,6 +75,25 @@ pub enum RrdCommands {
     ///
     /// Example: `rerun filter --drop-timeline log_tick /my/recordings/*.rrd > output.rrd`
     Filter(FilterCommand),
+
+    /// Extracts a time-based slice from .rrd/.rbl files/streams, and writes the result to standard output.
+    ///
+    /// Reads from standard input if no paths are specified.
+    ///
+    /// This allows you to extract data within a specific time range on a specified timeline.
+    ///
+    /// Example: `rerun rrd splice --timeline log_time --start 1000000000 --end 2000000000 /my/recordings/*.rrd -o output.rrd`
+    Splice(SpliceCommand),
+
+    /// Splits .rrd/.rbl files into smaller chunks of a specified maximum size.
+    ///
+    /// Reads from standard input if no paths are specified.
+    ///
+    /// The split files can be recombined using `rerun rrd merge` to reconstruct the original.
+    /// A merge script is automatically generated for convenience.
+    ///
+    /// Example: `rerun rrd split --size 50MB --output-dir ./chunks /my/recordings/*.rrd`
+    Split(SplitCommand),
 }
 
 impl RrdCommands {
@@ -87,6 +110,8 @@ impl RrdCommands {
             Self::Compact(compact_command) => compact_command.run(),
             Self::Merge(merge_command) => merge_command.run(),
             Self::Filter(drop_command) => drop_command.run(),
+            Self::Splice(splice_command) => splice_command.run(),
+            Self::Split(split_command) => split_command.run(),
         }
     }
 }
