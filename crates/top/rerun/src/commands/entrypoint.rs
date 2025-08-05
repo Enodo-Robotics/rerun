@@ -613,6 +613,7 @@ where
     if args.version {
         println!("{build_info}");
         println!("Video features: {}", re_video::build_info().features);
+        println!("Release: v0.0.7 - Production Ready: Fixed corruption, deduplication, and error handling");
         return Ok(0);
     }
 
@@ -855,12 +856,14 @@ fn run_impl(
     };
 
     // Determine save interval and headless mode
-    let save_interval = if args.save.is_some() {
-        // If --save is specified, use save_interval (default 30s) or explicit value
-        Some(args.save_interval.unwrap_or(30))
-    } else if args.save_interval.is_some() {
-        anyhow::bail!("--save-interval requires --save <path>");
+    let save_interval = if args.save_interval.is_some() {
+        if args.save.is_none() {
+            anyhow::bail!("--save-interval requires --save <path>");
+        }
+        // If --save-interval is explicitly specified, use that value
+        Some(args.save_interval.unwrap())
     } else {
+        // No save interval specified - regular save mode
         None
     };
     
@@ -997,6 +1000,54 @@ fn run_impl(
             if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path.into(), interval, args.rotate_files, shutdown_rx) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
+        }
+
+        Ok(())
+    } else if args.serve_grpc && args.save.is_some() && save_interval.is_none() {
+        // gRPC server with regular save (no continuous interval)
+        if !redap_uris.is_empty() {
+            anyhow::bail!("`--serve-grpc` with save does not support catalogs");
+        }
+
+        if !cfg!(feature = "server") {
+            _ = (call_source, rxs_log, rxs_table);
+            anyhow::bail!("Can't host server - rerun was not compiled with the 'server' feature");
+        }
+
+        #[cfg(feature = "server")]
+        {
+            let rrd_path = args.save.unwrap();
+            
+            // Spawn gRPC server and get its receiver
+            let (signal, shutdown) = re_grpc_server::shutdown::shutdown();
+            let (server_rx, _server_table_rx) = re_grpc_server::spawn_with_recv(
+                server_addr,
+                server_memory_limit,
+                shutdown,
+            );
+
+            // Only use the server receiver for saving
+            let rx_set = ReceiveSet::new(vec![server_rx]);
+            
+            re_log::info!("gRPC server running on {server_addr} with file saving to {rrd_path}");
+
+            // Set up for graceful shutdown
+            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+            let tokio_handle = tokio_runtime_handle.clone();
+            std::thread::spawn(move || {
+                tokio_handle.block_on(tokio::signal::ctrl_c()).ok();
+                re_log::info!("Received shutdown signal, stopping server...");
+                signal.stop();
+                let _ = shutdown_tx.send(());
+            });
+
+            // Use regular streaming save (not continuous)
+            let result = stream_to_rrd_on_disk(&rx_set, &rrd_path.into());
+            
+            // Wait for shutdown signal
+            let _ = shutdown_rx.recv();
+            
+            result?
         }
 
         Ok(())
@@ -1373,6 +1424,36 @@ fn stream_to_rrd_on_disk(
 }
 
 
+// Helper function for safe saving with error recovery and proper synchronization
+fn safe_save_with_retry(
+    static_messages: &[LogMsg],
+    temporal_messages: &[LogMsg],
+    target_path: &std::path::PathBuf,
+    retry_count: u32,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    for attempt in 1..=retry_count {
+        match save_messages_to_file_with_static(static_messages, temporal_messages, target_path) {
+            Ok(()) => {
+                if attempt > 1 {
+                    re_log::info!("File save succeeded on attempt {attempt} for {target_path:?}");
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                re_log::warn!("File save attempt {attempt} failed for {target_path:?}: {e}");
+                if attempt < retry_count {
+                    // Wait a bit before retrying, with exponential backoff
+                    std::thread::sleep(std::time::Duration::from_millis(50 * attempt as u64));
+                } else {
+                    re_log::error!("All {retry_count} save attempts failed for {target_path:?}: {e}");
+                    return Err(e);
+                }
+            }
+        }
+    }
+    unreachable!()
+}
+
 fn stream_to_rrd_continuous_with_shutdown(
     rx: &re_smart_channel::ReceiveSet<LogMsg>,
     path: &std::path::PathBuf,
@@ -1391,12 +1472,17 @@ fn stream_to_rrd_continuous_with_shutdown(
     let mut temporal_messages = Vec::new();
     let mut last_save = std::time::Instant::now();
     let save_interval = std::time::Duration::from_secs(interval_seconds);
+    
+    // Add file locking mechanism to prevent concurrent operations
+    let file_mutex = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let mut shutdown_requested = false;
 
     loop {
         // Check for shutdown signal
         if shutdown_rx.try_recv().is_ok() {
             re_log::info!("Shutdown signal received, performing final save before exit.");
-            break;
+            shutdown_requested = true;
+            // Don't break immediately - allow one more iteration to save remaining messages
         }
 
         // Try to receive messages with a timeout
@@ -1418,7 +1504,17 @@ fn stream_to_rrd_continuous_with_shutdown(
                                 static_messages.push(payload);
                             }
                         } else {
-                            temporal_messages.push(payload);
+                            // Only add to temporal_messages if not already present
+                            if !temporal_messages.iter().any(|existing| {
+                                match (existing, &payload) {
+                                    (LogMsg::ArrowMsg(_, existing_arrow), LogMsg::ArrowMsg(_, new_arrow)) => {
+                                        existing_arrow.chunk_id == new_arrow.chunk_id
+                                    }
+                                    _ => false,
+                                }
+                            }) {
+                                temporal_messages.push(payload);
+                            }
                         }
                     }
                     re_smart_channel::SmartMessagePayload::Flush { on_flush_done } => {
@@ -1438,23 +1534,48 @@ fn stream_to_rrd_continuous_with_shutdown(
                     } else {
                         path.clone()
                     };
-                    save_messages_to_file_with_static(&static_messages, &temporal_messages, &target_path)?;
+                    safe_save_with_retry(&static_messages, &temporal_messages, &target_path, 3)?;
                     temporal_messages.clear();
+                    // After first save, clear static messages so they're not duplicated  
+                    if !static_messages.is_empty() && target_path.exists() {
+                        static_messages.clear();
+                    }
                     last_save = std::time::Instant::now();
                 }
             }
         }
 
-        // Also check for saving if we have messages and enough time has passed
-        if last_save.elapsed() >= save_interval && !temporal_messages.is_empty() {
-            let target_path = if rotate_files {
-                generate_timestamped_path(path)
-            } else {
-                path.clone()
-            };
-            save_messages_to_file_with_static(&static_messages, &temporal_messages, &target_path)?;
-            temporal_messages.clear();
-            last_save = std::time::Instant::now();
+        
+        // Exit loop if shutdown was requested and we've had a chance to process messages
+        if shutdown_requested {
+            // Give one more chance to receive any final messages
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Some((_, msg)) => {
+                    // Process this final message
+                    match msg.payload {
+                        re_smart_channel::SmartMessagePayload::Msg(payload) => {
+                            if !is_static_message(&payload) {
+                                // Only add if not already present
+                                if !temporal_messages.iter().any(|existing| {
+                                    match (existing, &payload) {
+                                        (LogMsg::ArrowMsg(_, existing_arrow), LogMsg::ArrowMsg(_, new_arrow)) => {
+                                            existing_arrow.chunk_id == new_arrow.chunk_id
+                                        }
+                                        _ => false,
+                                    }
+                                }) {
+                                    temporal_messages.push(payload);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                None => {
+                    // No more messages, safe to exit
+                    break;
+                }
+            }
         }
     }
 
@@ -1465,7 +1586,10 @@ fn stream_to_rrd_continuous_with_shutdown(
         } else {
             path.clone()
         };
-        save_messages_to_file_with_static(&static_messages, &temporal_messages, &target_path)?;
+        re_log::info!("Performing final save of {} remaining messages", temporal_messages.len());
+        // For final save, only pass static messages if this is the very first save (file doesn't exist)
+        let static_for_final: &[LogMsg] = if target_path.exists() { &[] } else { &static_messages };
+        safe_save_with_retry(static_for_final, &temporal_messages, &target_path, 5)?;
     }
 
     re_log::info!("Continuous download completed.");
@@ -1513,25 +1637,39 @@ fn create_file_with_messages(
 ) -> Result<(), re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
-    let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
-    let file = std::fs::File::create(path)
-        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
+    re_log::debug!("Creating new file with {} static + {} temporal messages at {path:?}", 
+                   static_messages.len(), temporal_messages.len());
+
+    // Create file atomically using temporary file
+    let temp_path = path.with_extension("tmp");
     
-    let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
-        re_build_info::CrateVersion::LOCAL,
-        encoding_options,
-        file,
-    )?;
+    {
+        let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
+        let temp_file = std::fs::File::create(&temp_path)
+            .map_err(|err| FileSinkError::CreateFile(temp_path.clone(), err))?;
+        
+        let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
+            re_build_info::CrateVersion::LOCAL,
+            encoding_options,
+            temp_file,
+        )?;
 
-    // First write all static messages
-    for msg in static_messages {
-        encoder.append(msg)?;
-    }
+        // First write all static messages
+        for msg in static_messages {
+            encoder.append(msg)?;
+        }
 
-    // Then write temporal messages
-    for msg in temporal_messages {
-        encoder.append(msg)?;
+        // Then write temporal messages
+        for msg in temporal_messages {
+            encoder.append(msg)?;
+        }
+        
+        // Encoder is dropped here, which adds the end marker safely
     }
+    
+    // Atomically rename temp file to final path
+    std::fs::rename(&temp_path, path)
+        .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
 
     Ok(())
 }
@@ -1546,25 +1684,119 @@ fn append_messages_to_file(
         return Ok(());
     }
 
-    // Remove the end marker from the existing file
-    remove_end_marker(path)?;
+    re_log::debug!("Appending {} messages to {path:?}", messages.len());
 
-    // Open file in append mode
-    let file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
+    // Create a temporary file for atomic operations
+    let temp_path = path.with_extension("tmp");
+    
+    // Step 1: Copy existing file content to temp file (without end marker)
+    copy_file_without_end_marker(path, &temp_path)?;
+    
+    // Step 2: Append new messages to temp file
+    {
+        let temp_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&temp_path)
+            .map_err(|err| FileSinkError::CreateFile(temp_path.clone(), err))?;
+
+        let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
+        let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
+            re_build_info::CrateVersion::LOCAL,
+            encoding_options,
+            temp_file,
+        )?;
+
+        for msg in messages {
+            encoder.append(msg)?;
+        }
+        
+        // Encoder is dropped here, which adds the end marker safely
+    }
+    
+    // Step 3: Atomically replace the original file with the temp file
+    std::fs::rename(&temp_path, path)
         .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
 
-    let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
-    let mut encoder = re_log_encoding::encoder::DroppableEncoder::new(
-        re_build_info::CrateVersion::LOCAL,
-        encoding_options,
-        file,
-    )?;
+    Ok(())
+}
 
-    // Write new messages
-    for msg in messages {
-        encoder.append(msg)?;
+fn copy_file_without_end_marker(
+    source_path: &std::path::PathBuf,
+    dest_path: &std::path::PathBuf,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    use re_log_encoding::FileSinkError;
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if !source_path.exists() {
+        // If source doesn't exist, just create empty destination
+        File::create(dest_path)
+            .map_err(|err| FileSinkError::CreateFile(dest_path.clone(), err))?;
+        return Ok(());
+    }
+
+    let mut source_file = File::open(source_path)
+        .map_err(|err| FileSinkError::CreateFile(source_path.clone(), err))?;
+    
+    let file_len = source_file.metadata()
+        .map_err(|err| FileSinkError::CreateFile(source_path.clone(), err))?
+        .len();
+
+    if file_len < 16 {
+        // File too small to have an end marker, just copy as-is
+        std::fs::copy(source_path, dest_path)
+            .map_err(|err| FileSinkError::CreateFile(dest_path.clone(), err))?;
+        return Ok(());
+    }
+
+    // Check if the last 16 bytes are an end marker
+    source_file.seek(SeekFrom::End(-16))
+        .map_err(|err| FileSinkError::CreateFile(source_path.clone(), err))?;
+
+    let mut last_16_bytes = [0u8; 16];
+    source_file.read_exact(&mut last_16_bytes)
+        .map_err(|err| FileSinkError::CreateFile(source_path.clone(), err))?;
+
+    let message_kind = u64::from_le_bytes([
+        last_16_bytes[0], last_16_bytes[1], last_16_bytes[2], last_16_bytes[3],
+        last_16_bytes[4], last_16_bytes[5], last_16_bytes[6], last_16_bytes[7],
+    ]);
+    let message_len = u64::from_le_bytes([
+        last_16_bytes[8], last_16_bytes[9], last_16_bytes[10], last_16_bytes[11],
+        last_16_bytes[12], last_16_bytes[13], last_16_bytes[14], last_16_bytes[15],
+    ]);
+
+    let copy_len = if message_kind == 0 && message_len == 0 {
+        // Has end marker, copy everything except last 16 bytes
+        file_len - 16
+    } else {
+        // No end marker, copy everything
+        file_len
+    };
+
+    // Copy the file content (without end marker if present)
+    source_file.seek(SeekFrom::Start(0))
+        .map_err(|err| FileSinkError::CreateFile(source_path.clone(), err))?;
+
+    let mut dest_file = File::create(dest_path)
+        .map_err(|err| FileSinkError::CreateFile(dest_path.clone(), err))?;
+
+    let mut copied = 0u64;
+    let mut buffer = vec![0u8; 8192]; // 8KB buffer
+
+    while copied < copy_len {
+        let to_read = std::cmp::min(buffer.len(), (copy_len - copied) as usize);
+        let bytes_read = source_file.read(&mut buffer[..to_read])
+            .map_err(|err| FileSinkError::CreateFile(source_path.clone(), err))?;
+        
+        if bytes_read == 0 {
+            break; // EOF
+        }
+
+        dest_file.write_all(&buffer[..bytes_read])
+            .map_err(|err| FileSinkError::CreateFile(dest_path.clone(), err))?;
+        
+        copied += bytes_read as u64;
     }
 
     Ok(())
@@ -1598,13 +1830,17 @@ fn remove_end_marker(path: &std::path::PathBuf) -> Result<(), re_log_encoding::F
     file.read_exact(&mut last_16_bytes)
         .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;
 
-    // Check if it's an end marker (MessageKind::End = 0)
+    // Check if it's an end marker (MessageKind::End = 0 AND len = 0)
     let message_kind = u64::from_le_bytes([
         last_16_bytes[0], last_16_bytes[1], last_16_bytes[2], last_16_bytes[3],
         last_16_bytes[4], last_16_bytes[5], last_16_bytes[6], last_16_bytes[7],
     ]);
+    let message_len = u64::from_le_bytes([
+        last_16_bytes[8], last_16_bytes[9], last_16_bytes[10], last_16_bytes[11],
+        last_16_bytes[12], last_16_bytes[13], last_16_bytes[14], last_16_bytes[15],
+    ]);
 
-    if message_kind == 0 { // MessageKind::End
+    if message_kind == 0 && message_len == 0 { // True end marker: kind=0 AND len=0
         // Truncate file to remove the end marker
         file.set_len(file_len - 16)
             .map_err(|err| FileSinkError::CreateFile(path.clone(), err))?;

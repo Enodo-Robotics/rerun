@@ -748,7 +748,16 @@ impl message_proxy_service_server::MessageProxyService for MessageProxy {
                 }
 
                 Err(err) => {
-                    re_log::error!("Error while receiving messages: {err}");
+                    // Differentiate between expected network disconnections and actual errors
+                    let err_msg = err.to_string();
+                    if err_msg.contains("h2 protocol error") || 
+                       err_msg.contains("error reading a body from connection") ||
+                       err_msg.contains("Connection reset by peer") ||
+                       err_msg.contains("Broken pipe") {
+                        re_log::debug!("Client disconnected: {err}");
+                    } else {
+                        re_log::error!("Error while receiving messages: {err}");
+                    }
                     break;
                 }
             }
