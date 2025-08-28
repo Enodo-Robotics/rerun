@@ -1,4 +1,5 @@
 mod compare;
+mod extract;
 mod filter;
 mod merge_compact;
 mod print;
@@ -7,6 +8,7 @@ mod split;
 mod verify;
 
 use self::compare::CompareCommand;
+use self::extract::ExtractCommand;
 use self::filter::FilterCommand;
 use self::merge_compact::{CompactCommand, MergeCommand};
 use self::print::PrintCommand;
@@ -67,6 +69,21 @@ pub enum RrdCommands {
     /// Example: `rerun merge /my/recordings/*.rrd > output.rrd`
     Merge(MergeCommand),
 
+    /// Extracts and analyzes data from .rrd/.rbl files/streams with filtering options.
+    ///
+    /// Reads from standard input if no paths are specified.
+    ///
+    /// Supports extraction of static data, temporal data, specific entity paths, and multiple output formats.
+    /// Always includes data from all timelines when extracting temporal data.
+    ///
+    /// Examples:
+    /// * `rerun rrd extract --static-only /my/recordings/*.rrd -o static.rrd`
+    /// * `rerun rrd extract --entity-path '/world/**' /my/recordings/*.rrd -o world_data.rrd`
+    /// * `rerun rrd extract --entity-path '/cameras/*' --entity-path '/radar/*' /my/recordings/*.rrd -o sensors.rrd`
+    /// * `rerun rrd extract --entity-path '/cameras/*' --format json /my/recordings/*.rrd -o cameras.json`
+    /// * `rerun rrd extract --list-entities /my/recordings/*.rrd`
+    Extract(ExtractCommand),
+
     /// Filters out data from .rrd/.rbl files/streams, and writes the result to standard output.
     ///
     /// Reads from standard input if no paths are specified.
@@ -105,6 +122,7 @@ impl RrdCommands {
                     // Print current directory, this can be useful for debugging issues with relative paths.
                     .with_context(|| format!("current directory {:?}", std::env::current_dir()))
             }
+            Self::Extract(extract_command) => extract_command.run(),
             Self::Print(print_command) => print_command.run(),
             Self::Verify(verify_command) => verify_command.run(),
             Self::Compact(compact_command) => compact_command.run(),

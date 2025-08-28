@@ -10,6 +10,24 @@ use re_sdk::StoreKind;
 
 use crate::commands::read_rrd_streams_from_file_or_stdin;
 
+// Helper function to determine if a message is static (timeline-less)
+fn is_static_message(log_msg: &LogMsg) -> bool {
+    match log_msg {
+        LogMsg::ArrowMsg(_, arrow_msg) => {
+            // Check if the timepoint_max is empty (static)
+            arrow_msg.timepoint_max.is_static()
+        }
+        LogMsg::SetStoreInfo(_) => {
+            // Store info is typically static metadata
+            true
+        }
+        LogMsg::BlueprintActivationCommand(_) => {
+            // Blueprint commands are typically static
+            true
+        }
+    }
+}
+
 // ---
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -29,6 +47,10 @@ pub struct SplitCommand {
     #[arg(short = 's', long = "size", default_value = "104857600")]
     max_size_bytes: u64,
 
+    /// Exclude static (timeline-less) data from the output. By default, static data is included.
+    #[arg(long = "exclude-static")]
+    exclude_static: bool,
+
     /// If set, will try to proceed even in the face of IO and/or decoding errors in the input data.
     #[clap(long = "continue-on-error", default_value_t = false)]
     continue_on_error: bool,
@@ -41,6 +63,7 @@ impl SplitCommand {
             output_dir,
             base_name,
             max_size_bytes,
+            exclude_static,
             continue_on_error,
         } = self;
 
@@ -62,6 +85,7 @@ impl SplitCommand {
             max_size_bytes
         );
 
+
         // NOTE: We're doing headless processing, there's no point in running subscribers, it will just
         // (massively) slow us down.
         let store_config = ChunkStoreConfig::ALL_DISABLED;
@@ -73,6 +97,7 @@ impl SplitCommand {
             output_dir,
             base_name,
             *max_size_bytes,
+            *exclude_static,
         )
     }
 }
@@ -84,6 +109,7 @@ fn split_recording(
     output_dir: &str,
     base_name: &str,
     max_size_bytes: u64,
+    exclude_static: bool,
 ) -> anyhow::Result<()> {
     let file_size_to_string = |size: Option<u64>| {
         size.map_or_else(
@@ -105,6 +131,7 @@ fn split_recording(
 
     // Collect all messages first to ensure proper ordering
     let mut all_messages = Vec::new();
+    let mut store_info_messages = Vec::new(); // Collect StoreInfo messages separately
     let mut entity_dbs: std::collections::HashMap<StoreId, EntityDb> = Default::default();
 
     for (_source, res) in rx {
@@ -112,6 +139,11 @@ fn split_recording(
 
         match res {
             Ok(msg) => {
+                // Collect StoreInfo messages separately to include in each chunk
+                if matches!(msg, re_log_types::LogMsg::SetStoreInfo(_)) {
+                    store_info_messages.push(msg.clone());
+                }
+                
                 // Store the message for later processing
                 all_messages.push(msg.clone());
                 
@@ -187,13 +219,21 @@ fn split_recording(
     };
 
     for msg in all_messages {
+        let is_static = is_static_message(&msg);
+        
+        // Apply static filtering
+        if exclude_static && is_static {
+            continue;
+        }
+        
         let msg_size = estimate_message_size(&msg);
         
         // If adding this message would exceed the limit and we have messages in the current chunk
         if current_size + msg_size > max_size_bytes && !current_chunk.is_empty() {
-            // Write current chunk
+            // Write current chunk (including StoreInfo at the beginning)
             let chunk_path = format!("{}/{}_part_{:03}.rrd", output_dir, base_name, chunk_index);
-            let chunk_size = write_chunk(&current_chunk, &chunk_path, version, encoding_options)?;
+            let chunk_with_store_info = prepend_store_info(&store_info_messages, &current_chunk);
+            let chunk_size = write_chunk(&chunk_with_store_info, &chunk_path, version, encoding_options)?;
             
             re_log::info!(
                 chunk = chunk_index,
@@ -219,7 +259,8 @@ fn split_recording(
     // Write the final chunk if it has any messages
     if !current_chunk.is_empty() {
         let chunk_path = format!("{}/{}_part_{:03}.rrd", output_dir, base_name, chunk_index);
-        let chunk_size = write_chunk(&current_chunk, &chunk_path, version, encoding_options)?;
+        let chunk_with_store_info = prepend_store_info(&store_info_messages, &current_chunk);
+        let chunk_size = write_chunk(&chunk_with_store_info, &chunk_path, version, encoding_options)?;
         
         re_log::info!(
             chunk = chunk_index,
@@ -286,4 +327,24 @@ fn write_chunk(
     rrd_out.flush().context("couldn't flush output")?;
 
     Ok(size)
+}
+
+/// Prepends StoreInfo messages to the beginning of a chunk to preserve original application_id
+fn prepend_store_info(
+    store_info_messages: &[re_log_types::LogMsg],
+    chunk_messages: &[re_log_types::LogMsg],
+) -> Vec<re_log_types::LogMsg> {
+    let mut result = Vec::with_capacity(store_info_messages.len() + chunk_messages.len());
+    
+    // Add all StoreInfo messages first
+    result.extend_from_slice(store_info_messages);
+    
+    // Add the chunk messages, but skip any StoreInfo messages to avoid duplicates
+    for msg in chunk_messages {
+        if !matches!(msg, re_log_types::LogMsg::SetStoreInfo(_)) {
+            result.push(msg.clone());
+        }
+    }
+    
+    result
 }

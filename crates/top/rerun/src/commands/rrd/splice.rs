@@ -5,11 +5,29 @@ use itertools::Either;
 
 use re_chunk_store::ChunkStoreConfig;
 use re_entity_db::EntityDb;
-use re_log_types::{ResolvedTimeRangeF, StoreId, TimeInt};
+use re_log_types::{LogMsg, ResolvedTimeRangeF, StoreId, TimeInt};
 use re_chunk::TimelineName;
 use re_sdk::StoreKind;
 
 use crate::commands::read_rrd_streams_from_file_or_stdin;
+
+// Helper function to determine if a message is static (timeline-less)
+fn is_static_message(log_msg: &LogMsg) -> bool {
+    match log_msg {
+        LogMsg::ArrowMsg(_, arrow_msg) => {
+            // Check if the timepoint_max is empty (static)
+            arrow_msg.timepoint_max.is_static()
+        }
+        LogMsg::SetStoreInfo(_) => {
+            // Store info is typically static metadata
+            true
+        }
+        LogMsg::BlueprintActivationCommand(_) => {
+            // Blueprint commands are typically static
+            true
+        }
+    }
+}
 
 // ---
 
@@ -34,6 +52,14 @@ pub struct SpliceCommand {
     #[arg(long = "end")]
     end_time: Option<i64>,
 
+    /// Exclude static (timeline-less) data from the output. By default, static data is included.
+    #[arg(long = "exclude-static")]
+    exclude_static: bool,
+
+    /// Include only static (timeline-less) data in the output. Cannot be used with --exclude-static.
+    #[arg(long = "static-only")]
+    static_only: bool,
+
     /// If set, will try to proceed even in the face of IO and/or decoding errors in the input data.
     #[clap(long = "continue-on-error", default_value_t = false)]
     continue_on_error: bool,
@@ -47,6 +73,8 @@ impl SpliceCommand {
             timeline,
             start_time,
             end_time,
+            exclude_static,
+            static_only,
             continue_on_error,
         } = self;
 
@@ -65,6 +93,11 @@ impl SpliceCommand {
                 start,
                 end
             );
+        }
+
+        // Validate conflicting options
+        if *exclude_static && *static_only {
+            anyhow::bail!("Cannot specify both --exclude-static and --static-only");
         }
 
         // Parse timeline
@@ -108,6 +141,8 @@ impl SpliceCommand {
             path_to_input_rrds,
             path_to_output_rrd.as_ref(),
             time_selection,
+            *exclude_static,
+            *static_only,
         )
     }
 }
@@ -118,6 +153,8 @@ fn splice_recording(
     path_to_input_rrds: &[String],
     path_to_output_rrd: Option<&String>,
     time_selection: Option<(TimelineName, ResolvedTimeRangeF)>,
+    exclude_static: bool,
+    static_only: bool,
 ) -> anyhow::Result<()> {
     let file_size_to_string = |size: Option<u64>| {
         size.map_or_else(
@@ -194,12 +231,34 @@ fn splice_recording(
     let messages_rbl = entity_dbs
         .values()
         .filter(|entity_db| entity_db.store_kind() == StoreKind::Blueprint)
-        .flat_map(|entity_db| entity_db.to_messages(None /* time selection */));
+        .flat_map(|entity_db| entity_db.to_messages(None /* time selection */))
+        .filter_map(|msg_result| match msg_result {
+            Ok(msg) => {
+                let is_static = is_static_message(&msg);
+                if (exclude_static && is_static) || (static_only && !is_static) {
+                    None
+                } else {
+                    Some(Ok(msg))
+                }
+            }
+            Err(err) => Some(Err(err)),
+        });
 
     let messages_rrd = entity_dbs
         .values()
         .filter(|entity_db| entity_db.store_kind() == StoreKind::Recording)
-        .flat_map(|entity_db| entity_db.to_messages(time_selection));
+        .flat_map(|entity_db| entity_db.to_messages(time_selection))
+        .filter_map(|msg_result| match msg_result {
+            Ok(msg) => {
+                let is_static = is_static_message(&msg);
+                if (exclude_static && is_static) || (static_only && !is_static) {
+                    None
+                } else {
+                    Some(Ok(msg))
+                }
+            }
+            Err(err) => Some(Err(err)),
+        });
 
     // TODO(cmc): encoding options should match the original.
     let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
