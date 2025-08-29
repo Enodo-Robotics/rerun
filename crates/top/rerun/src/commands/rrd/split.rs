@@ -43,9 +43,11 @@ pub struct SplitCommand {
     #[arg(short = 'n', long = "name", default_value = "chunk")]
     base_name: String,
 
-    /// Maximum size per output file in bytes. Defaults to 100MB.
+    /// Minimum size per output file in bytes (lower bound). Defaults to 100MB.
+    /// Each chunk will accumulate messages until it reaches at least this size,
+    /// except for the final chunk which may be smaller.
     #[arg(short = 's', long = "size", default_value = "104857600")]
-    max_size_bytes: u64,
+    min_size_bytes: u64,
 
     /// Exclude static (timeline-less) data from the output. By default, static data is included.
     #[arg(long = "exclude-static")]
@@ -62,7 +64,7 @@ impl SplitCommand {
             path_to_input_rrds,
             output_dir,
             base_name,
-            max_size_bytes,
+            min_size_bytes,
             exclude_static,
             continue_on_error,
         } = self;
@@ -80,9 +82,9 @@ impl SplitCommand {
         );
 
         anyhow::ensure!(
-            *max_size_bytes > 1024,
-            "max size must be at least 1KB, got {}",
-            max_size_bytes
+            *min_size_bytes > 1024,
+            "minimum size must be at least 1KB, got {}",
+            min_size_bytes
         );
 
 
@@ -96,7 +98,7 @@ impl SplitCommand {
             path_to_input_rrds,
             output_dir,
             base_name,
-            *max_size_bytes,
+            *min_size_bytes,
             *exclude_static,
         )
     }
@@ -108,7 +110,7 @@ fn split_recording(
     path_to_input_rrds: &[String],
     output_dir: &str,
     base_name: &str,
-    max_size_bytes: u64,
+    min_size_bytes: u64,
     exclude_static: bool,
 ) -> anyhow::Result<()> {
     let file_size_to_string = |size: Option<u64>| {
@@ -123,7 +125,7 @@ fn split_recording(
         srcs = ?path_to_input_rrds,
         output_dir,
         base_name,
-        max_size_bytes = %file_size_to_string(Some(max_size_bytes)),
+        min_size_bytes = %file_size_to_string(Some(min_size_bytes)),
         "split started"
     );
 
@@ -202,20 +204,19 @@ fn split_recording(
     // Split messages into chunks based on size
     let mut chunk_index = 0;
     let mut current_chunk = Vec::new();
-    let mut current_size = 0u64;
     let mut total_output_size = 0u64;
     let mut files_created = 0;
 
-    // Estimate message size for splitting decisions
-    let estimate_message_size = |msg: &LogMsg| -> u64 {
-        match msg {
-            LogMsg::ArrowMsg(_, arrow_msg) => {
-                // Rough estimate based on arrow data
-                arrow_msg.batch.get_array_memory_size() as u64 + 1024 // Add overhead
-            }
-            LogMsg::SetStoreInfo(_) => 1024, // Small fixed size
-            LogMsg::BlueprintActivationCommand(_) => 512, // Small fixed size
-        }
+    // Helper function to get the actual encoded size of a chunk
+    let get_encoded_size = |messages: &[LogMsg]| -> anyhow::Result<u64> {
+        let mut buffer = Vec::new();
+        let size = re_log_encoding::encoder::encode(
+            version,
+            encoding_options,
+            messages.iter().cloned().map(Ok),
+            &mut buffer,
+        )?;
+        Ok(size)
     };
 
     for msg in all_messages {
@@ -226,34 +227,36 @@ fn split_recording(
             continue;
         }
         
-        let msg_size = estimate_message_size(&msg);
-        
-        // If adding this message would exceed the limit and we have messages in the current chunk
-        if current_size + msg_size > max_size_bytes && !current_chunk.is_empty() {
-            // Write current chunk (including StoreInfo at the beginning)
-            let chunk_path = format!("{}/{}_part_{:03}.rrd", output_dir, base_name, chunk_index);
-            let chunk_with_store_info = prepend_store_info(&store_info_messages, &current_chunk);
-            let chunk_size = write_chunk(&chunk_with_store_info, &chunk_path, version, encoding_options)?;
-            
-            re_log::info!(
-                chunk = chunk_index,
-                path = %chunk_path,
-                size = %file_size_to_string(Some(chunk_size)),
-                messages = current_chunk.len(),
-                "wrote chunk"
-            );
-            
-            total_output_size += chunk_size;
-            files_created += 1;
-            chunk_index += 1;
-            
-            // Start new chunk
-            current_chunk.clear();
-            current_size = 0;
-        }
-        
+        // Add message to current chunk
         current_chunk.push(msg);
-        current_size += msg_size;
+        
+        // Check the actual encoded size periodically (every 10 messages to avoid too much overhead)
+        if current_chunk.len() % 10 == 0 || current_chunk.len() < 10 {
+            let chunk_with_store_info = prepend_store_info(&store_info_messages, &current_chunk);
+            let current_encoded_size = get_encoded_size(&chunk_with_store_info)?;
+            
+            // If we've reached the minimum size threshold, write the chunk
+            if current_encoded_size >= min_size_bytes {
+                // Write current chunk
+                let chunk_path = format!("{}/{}_part_{:03}.rrd", output_dir, base_name, chunk_index);
+                let chunk_size = write_chunk(&chunk_with_store_info, &chunk_path, version, encoding_options)?;
+                
+                re_log::info!(
+                    chunk = chunk_index,
+                    path = %chunk_path,
+                    size = %file_size_to_string(Some(chunk_size)),
+                    messages = current_chunk.len(),
+                    "wrote chunk"
+                );
+                
+                total_output_size += chunk_size;
+                files_created += 1;
+                chunk_index += 1;
+                
+                // Start new chunk
+                current_chunk.clear();
+            }
+        }
     }
 
     // Write the final chunk if it has any messages

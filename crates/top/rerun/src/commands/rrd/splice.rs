@@ -247,17 +247,25 @@ fn splice_recording(
     let messages_rrd = entity_dbs
         .values()
         .filter(|entity_db| entity_db.store_kind() == StoreKind::Recording)
-        .flat_map(|entity_db| entity_db.to_messages(time_selection))
-        .filter_map(|msg_result| match msg_result {
-            Ok(msg) => {
-                let is_static = is_static_message(&msg);
-                if (exclude_static && is_static) || (static_only && !is_static) {
-                    None
-                } else {
-                    Some(Ok(msg))
-                }
-            }
-            Err(err) => Some(Err(err)),
+        .flat_map(|entity_db| {
+            // Include ALL static messages regardless of time selection
+            // Static data represents timeless state and should always be included
+            let static_messages = entity_db.to_messages(None)
+                .filter_map(|msg_result| match msg_result {
+                    Ok(msg) if is_static_message(&msg) && !exclude_static => Some(Ok(msg)),
+                    _ => None,
+                });
+            
+            // Include temporal messages within the time selection
+            let temporal_messages = entity_db.to_messages(time_selection)
+                .filter_map(|msg_result| match msg_result {
+                    Ok(msg) if !is_static_message(&msg) && !static_only => Some(Ok(msg)),
+                    Err(err) => Some(Err(err)),
+                    _ => None,
+                });
+            
+            // Chain static and temporal messages
+            static_messages.chain(temporal_messages)
         });
 
     // TODO(cmc): encoding options should match the original.

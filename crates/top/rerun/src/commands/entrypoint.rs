@@ -86,6 +86,8 @@ Examples:
 
     Continuously save with timestamped file rotation every 60 seconds:
         rerun --save recording.rrd --save-interval 60 --rotate-files
+    Continuously save with rotation, keeping only the last 10 files (session-safe):
+        rerun --save recording.rrd --save-interval 60 --rotate-files --max-files 10
 
     Save data with default 30-second interval (headless mode):
         rerun --save recording.rrd
@@ -319,6 +321,14 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     /// Requires --save with save interval to be set.
     #[clap(long)]
     rotate_files: bool,
+
+    /// Maximum number of files to keep when using --rotate-files (circular buffer).
+    ///
+    /// When this limit is exceeded, the oldest timestamped files will be deleted.
+    /// Only applies when --rotate-files is enabled. If not specified, files will
+    /// accumulate indefinitely.
+    #[clap(long)]
+    max_files: Option<usize>,
 }
 
 impl Args {
@@ -613,7 +623,7 @@ where
     if args.version {
         println!("{build_info}");
         println!("Video features: {}", re_video::build_info().features);
-        println!("Release: v0.0.8 - Recording Splicing & Continuous Save: Added splice/split commands for time-based data manipulation and continuous recording save functionality");
+        println!("Release: v0.0.9 - Session Tracking & Safe Circular Buffer: Enhanced file rotation with session isolation to prevent accidental deletion of unrelated files");
         return Ok(0);
     }
 
@@ -871,6 +881,11 @@ fn run_impl(
     if args.rotate_files && save_interval.is_none() {
         anyhow::bail!("--rotate-files requires --save with save interval");
     }
+
+    // Validate max files argument
+    if args.max_files.is_some() && !args.rotate_files {
+        anyhow::bail!("--max-files requires --rotate-files to be enabled");
+    }
     
     // Determine if we should run in headless mode
     let is_headless = args.serve_grpc || save_interval.is_some();
@@ -928,6 +943,7 @@ fn run_impl(
             // Handle continuous file saving in the main thread
             let rrd_path_clone = rrd_path.clone();
             let rotate_files = args.rotate_files;
+            let max_files = args.max_files;
             
             // Set up for graceful shutdown
             let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
@@ -940,7 +956,7 @@ fn run_impl(
             });
 
             // Run continuous file saving with shutdown handling
-            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path_clone.into(), interval, rotate_files, shutdown_rx) {
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path_clone.into(), interval, rotate_files, max_files, shutdown_rx) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
         }
@@ -997,7 +1013,7 @@ fn run_impl(
             });
 
             // Run continuous file saving with shutdown handling
-            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path.into(), interval, args.rotate_files, shutdown_rx) {
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path.into(), interval, args.rotate_files, args.max_files, shutdown_rx) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
         }
@@ -1459,6 +1475,7 @@ fn stream_to_rrd_continuous_with_shutdown(
     path: &std::path::PathBuf,
     interval_seconds: u64,
     rotate_files: bool,
+    max_files: Option<usize>,
     shutdown_rx: std::sync::mpsc::Receiver<()>,
 ) -> Result<(), re_log_encoding::FileSinkError> {
 
@@ -1473,8 +1490,11 @@ fn stream_to_rrd_continuous_with_shutdown(
     let mut last_save = std::time::Instant::now();
     let save_interval = std::time::Duration::from_secs(interval_seconds);
     
+    // Track files created in this session to avoid deleting unrelated files
+    let mut session_created_files: Vec<std::path::PathBuf> = Vec::new();
+    
     // Add file locking mechanism to prevent concurrent operations
-    let file_mutex = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let _file_mutex = std::sync::Arc::new(std::sync::Mutex::new(()));
     let mut shutdown_requested = false;
 
     loop {
@@ -1535,6 +1555,16 @@ fn stream_to_rrd_continuous_with_shutdown(
                         path.clone()
                     };
                     safe_save_with_retry(&static_messages, &temporal_messages, &target_path, 3)?;
+                    
+                    // Track this file if it's a new rotation file
+                    if rotate_files {
+                        session_created_files.push(target_path.clone());
+                    }
+                    
+                    // Clean up old files if max_files is set and we're rotating
+                    if rotate_files && max_files.is_some() {
+                        cleanup_session_files(&mut session_created_files, max_files.unwrap())?;
+                    }
                     temporal_messages.clear();
                     // After first save, clear static messages so they're not duplicated  
                     if !static_messages.is_empty() && target_path.exists() {
@@ -1590,6 +1620,16 @@ fn stream_to_rrd_continuous_with_shutdown(
         // For final save, only pass static messages if this is the very first save (file doesn't exist)
         let static_for_final: &[LogMsg] = if target_path.exists() { &[] } else { &static_messages };
         safe_save_with_retry(static_for_final, &temporal_messages, &target_path, 5)?;
+        
+        // Track this file if it's a new rotation file
+        if rotate_files {
+            session_created_files.push(target_path.clone());
+        }
+        
+        // Clean up old files if max_files is set and we're rotating
+        if rotate_files && max_files.is_some() {
+            cleanup_session_files(&mut session_created_files, max_files.unwrap())?;
+        }
     }
 
     re_log::info!("Continuous download completed.");
@@ -1603,7 +1643,6 @@ fn save_messages_to_file_with_static(
     temporal_messages: &[LogMsg],
     path: &std::path::PathBuf,
 ) -> Result<(), re_log_encoding::FileSinkError> {
-    use re_log_encoding::FileSinkError;
 
     let total_messages = static_messages.len() + temporal_messages.len();
     
@@ -1861,4 +1900,89 @@ fn generate_timestamped_path(base_path: &std::path::PathBuf) -> std::path::PathB
     
     let new_filename = format!("{}_ts{}.{}", stem, now, extension);
     parent.join(new_filename)
+}
+
+fn cleanup_old_files(base_path: &std::path::PathBuf, max_files: usize) -> Result<(), re_log_encoding::FileSinkError> {
+    
+    let parent = base_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+    let extension = base_path.extension().and_then(|s| s.to_str()).unwrap_or("rrd");
+    
+    // Find all timestamped files matching our pattern
+    let pattern = format!("{}_ts", stem);
+    let mut timestamped_files = Vec::new();
+    
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            if let Some(file_name) = entry.file_name().to_str() {
+                // Check if this is a timestamped file with our pattern
+                if file_name.starts_with(&pattern) && file_name.ends_with(&format!(".{}", extension)) {
+                    // Extract timestamp from filename
+                    let timestamp_part = &file_name[pattern.len()..file_name.len() - extension.len() - 1]; // Remove prefix and .extension
+                    if let Ok(timestamp) = timestamp_part.parse::<u64>() {
+                        timestamped_files.push((timestamp, entry.path()));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Sort by timestamp (oldest first)
+    timestamped_files.sort_by_key(|(timestamp, _)| *timestamp);
+    
+    // Remove oldest files if we exceed max_files
+    while timestamped_files.len() > max_files {
+        let (timestamp, path) = timestamped_files.remove(0);
+        match std::fs::remove_file(&path) {
+            Ok(_) => {
+                re_log::info!("Removed old file: {} (timestamp: {})", path.display(), timestamp);
+            }
+            Err(err) => {
+                re_log::warn!("Failed to remove old file {}: {}", path.display(), err);
+                // Don't fail completely, just warn and continue
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn cleanup_session_files(session_files: &mut Vec<std::path::PathBuf>, max_files: usize) -> Result<(), re_log_encoding::FileSinkError> {
+    // Only clean up files that were created in this session and still exist
+    session_files.retain(|path| path.exists());
+    
+    if session_files.len() <= max_files {
+        return Ok(());
+    }
+    
+    // Sort by creation time (extract timestamp from filename)
+    session_files.sort_by_key(|path| {
+        // Extract timestamp from filename like "filename_ts1234567890.rrd"
+        if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(ts_pos) = filename.find("_ts") {
+                let ts_start = ts_pos + 3; // Skip "_ts"
+                if let Some(dot_pos) = filename[ts_start..].find('.') {
+                    let timestamp_str = &filename[ts_start..ts_start + dot_pos];
+                    return timestamp_str.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        0 // Default timestamp if parsing fails
+    });
+    
+    // Remove oldest files from the session until we're within the limit
+    while session_files.len() > max_files {
+        let path_to_remove = session_files.remove(0);
+        match std::fs::remove_file(&path_to_remove) {
+            Ok(_) => {
+                re_log::info!("Removed old session file: {}", path_to_remove.display());
+            }
+            Err(err) => {
+                re_log::warn!("Failed to remove old session file {}: {}", path_to_remove.display(), err);
+                // Don't fail completely, just warn and continue
+            }
+        }
+    }
+    
+    Ok(())
 }
