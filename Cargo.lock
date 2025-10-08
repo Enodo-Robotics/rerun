@@ -7956,6 +7956,7 @@ dependencies = [
  "re_tracing",
  "re_types",
  "similar-asserts",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",

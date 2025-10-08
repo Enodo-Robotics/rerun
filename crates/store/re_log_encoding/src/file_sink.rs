@@ -47,6 +47,8 @@ enum Command {
     Flush {
         on_done: SyncSender<Result<(), String>>,
     },
+    #[allow(dead_code)] // Reserved for future manual rotation API
+    RotateFile,
 }
 
 impl Command {
@@ -66,6 +68,11 @@ pub struct FileSink {
     ///
     /// `None` indicates stdout.
     path: Option<PathBuf>,
+
+    /// Maximum file size in bytes before creating a new file.
+    /// `None` means no rotation.
+    #[allow(dead_code)] // Stored for diagnostics/debugging
+    max_file_size: Option<u64>,
 }
 
 impl Drop for FileSink {
@@ -80,6 +87,18 @@ impl Drop for FileSink {
 impl FileSink {
     /// Start writing log messages to a file at the given path.
     pub fn new(path: impl Into<std::path::PathBuf>) -> Result<Self, FileSinkError> {
+        Self::new_with_max_size(path, None)
+    }
+
+    /// Start writing log messages to a file at the given path with optional file rotation.
+    ///
+    /// If `max_file_size` is `Some(size)`, the sink will create new files when the current
+    /// file exceeds `size` bytes. Static messages (SetStoreInfo, BlueprintActivationCommand)
+    /// will be written to every file, while temporal messages (ArrowMsg) will be split across files.
+    pub fn new_with_max_size(
+        path: impl Into<std::path::PathBuf>,
+        max_file_size: Option<u64>,
+    ) -> Result<Self, FileSinkError> {
         // We always compress on disk
         let encoding_options = crate::EncodingOptions::PROTOBUF_COMPRESSED;
 
@@ -100,12 +119,13 @@ impl FileSink {
             encoding_options,
             file,
         )?;
-        let join_handle = spawn_and_stream(Some(&path), encoder, rx)?;
+        let join_handle = spawn_and_stream(Some(&path), encoder, rx, max_file_size)?;
 
         Ok(Self {
             tx: tx.into(),
             join_handle: Some(join_handle),
             path: Some(path),
+            max_file_size,
         })
     }
 
@@ -122,12 +142,13 @@ impl FileSink {
             encoding_options,
             std::io::stdout(),
         )?;
-        let join_handle = spawn_and_stream(None, encoder, rx)?;
+        let join_handle = spawn_and_stream(None, encoder, rx, None)?;
 
         Ok(Self {
             tx: tx.into(),
             join_handle: Some(join_handle),
             path: None,
+            max_file_size: None,
         })
     }
 
@@ -157,6 +178,21 @@ impl FileSink {
 
 /// Set `filepath` to `None` to stream to standard output.
 fn spawn_and_stream<W: std::io::Write + Send + 'static>(
+    filepath: Option<&std::path::Path>,
+    encoder: crate::encoder::DroppableEncoder<W>,
+    rx: Receiver<Option<Command>>,
+    max_file_size: Option<u64>,
+) -> Result<std::thread::JoinHandle<()>, FileSinkError> {
+    // If we have a filepath and max_file_size, use the rotating version
+    if let (Some(filepath), Some(max_size)) = (filepath, max_file_size) {
+        spawn_rotating_file_stream(filepath, rx, max_size)
+    } else {
+        spawn_simple_stream(filepath, encoder, rx)
+    }
+}
+
+/// Simple non-rotating stream handler
+fn spawn_simple_stream<W: std::io::Write + Send + 'static>(
     filepath: Option<&std::path::Path>,
     mut encoder: crate::encoder::DroppableEncoder<W>,
     rx: Receiver<Option<Command>>,
@@ -193,6 +229,10 @@ fn spawn_and_stream<W: std::io::Write + Send + 'static>(
                                 re_log::error!("{err}");
                             }
                         }
+                        Command::RotateFile => {
+                            // This command is only used in the file rotation version
+                            re_log::warn!("Received RotateFile command on non-rotating sink");
+                        }
                     }
                 }
                 if let Err(err) = encoder.finish() {
@@ -200,6 +240,158 @@ fn spawn_and_stream<W: std::io::Write + Send + 'static>(
                     return;
                 }
                 re_log::debug!("Log stream written to {target}");
+            }
+        })
+        .map_err(FileSinkError::SpawnThread)
+}
+
+/// Rotating file stream handler - creates new files when size limit is exceeded
+fn spawn_rotating_file_stream(
+    base_path: &std::path::Path,
+    rx: Receiver<Option<Command>>,
+    max_file_size: u64,
+) -> Result<std::thread::JoinHandle<()>, FileSinkError> {
+    let base_path = base_path.to_owned();
+    let encoding_options = crate::EncodingOptions::PROTOBUF_COMPRESSED;
+
+    std::thread::Builder::new()
+        .name("rotating_file_writer".into())
+        .spawn({
+            move || {
+                let mut file_index = 0u32;
+                let mut current_size = 0u64;
+                let mut static_messages: Vec<LogMsg> = Vec::new();
+
+                // Helper to create new file path
+                let make_file_path = |index: u32| -> PathBuf {
+                    if index == 0 {
+                        base_path.clone()
+                    } else {
+                        let parent = base_path.parent().unwrap_or_else(|| std::path::Path::new(""));
+                        let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
+                        let extension = base_path.extension().and_then(|s| s.to_str()).unwrap_or("rrd");
+                        parent.join(format!("{}_{:03}.{}", stem, index, extension))
+                    }
+                };
+
+                // Helper to create new encoder
+                let create_encoder = |index: u32, static_msgs: &[LogMsg]| -> Result<crate::encoder::DroppableEncoder<std::fs::File>, FileSinkError> {
+                    let file_path = make_file_path(index);
+                    re_log::debug!("Creating new file: {file_path:?}");
+
+                    let file = std::fs::File::create(&file_path)
+                        .map_err(|err| FileSinkError::CreateFile(file_path.clone(), err))?;
+                    let mut encoder = crate::encoder::DroppableEncoder::new(
+                        re_build_info::CrateVersion::LOCAL,
+                        encoding_options,
+                        file,
+                    )?;
+
+                    // Write static messages to new file
+                    for msg in static_msgs {
+                        if let Err(err) = encoder.append(msg) {
+                            re_log::error!("Failed to write static message to {file_path:?}: {err}");
+                            return Err(FileSinkError::LogMsgEncode(err));
+                        }
+                    }
+
+                    Ok(encoder)
+                };
+
+                let mut encoder = match create_encoder(file_index, &static_messages) {
+                    Ok(e) => e,
+                    Err(err) => {
+                        re_log::error!("Failed to create initial encoder: {err}");
+                        return;
+                    }
+                };
+                file_index += 1;
+
+                while let Ok(Some(cmd)) = rx.recv() {
+                    match cmd {
+                        Command::Send(log_msg) => {
+                            // Track static messages
+                            let is_static = matches!(
+                                log_msg,
+                                LogMsg::SetStoreInfo(_) | LogMsg::BlueprintActivationCommand(_)
+                            );
+
+                            if is_static {
+                                static_messages.push(log_msg.clone());
+                            }
+
+                            // Check if we need to rotate before writing
+                            if current_size > 0 && current_size >= max_file_size && !is_static {
+                                // Finish current file
+                                if let Err(err) = encoder.finish() {
+                                    re_log::error!("Failed to finish file before rotation: {err}");
+                                    return;
+                                }
+
+                                // Create new encoder
+                                encoder = match create_encoder(file_index, &static_messages) {
+                                    Ok(e) => e,
+                                    Err(err) => {
+                                        re_log::error!("Failed to create new encoder during rotation: {err}");
+                                        return;
+                                    }
+                                };
+                                file_index += 1;
+                                current_size = 0;
+                            }
+
+                            // Write the message
+                            match encoder.append(&log_msg) {
+                                Ok(size) => {
+                                    current_size += size;
+                                }
+                                Err(err) => {
+                                    re_log::error!("Failed to write log stream: {err}");
+                                    return;
+                                }
+                            }
+                        }
+                        Command::Flush { on_done } => {
+                            re_log::trace!("Flushing…");
+
+                            let result = encoder.flush_blocking().map_err(|err| {
+                                format!("Failed to flush log stream: {err}")
+                            });
+
+                            // Send back the result:
+                            if let Err(SendError(result)) = on_done.send(result)
+                                && let Err(err) = result
+                            {
+                                // There was an error, and nobody received it:
+                                re_log::error!("{err}");
+                            }
+                        }
+                        Command::RotateFile => {
+                            // Manual rotation request
+                            if let Err(err) = encoder.finish() {
+                                re_log::error!("Failed to finish file before manual rotation: {err}");
+                                return;
+                            }
+
+                            encoder = match create_encoder(file_index, &static_messages) {
+                                Ok(e) => e,
+                                Err(err) => {
+                                    re_log::error!("Failed to create new encoder during manual rotation: {err}");
+                                    return;
+                                }
+                            };
+                            file_index += 1;
+                            current_size = 0;
+                        }
+                    }
+                }
+
+                // Finish the last file
+                if let Err(err) = encoder.finish() {
+                    re_log::error!("Failed to end log stream: {err}");
+                    return;
+                }
+                re_log::debug!("Rotating file stream completed. {} files written.", file_index);
             }
         })
         .map_err(FileSinkError::SpawnThread)

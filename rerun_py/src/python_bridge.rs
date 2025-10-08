@@ -910,15 +910,16 @@ impl PyGrpcSink {
 #[derive(PartialEq, Hash)]
 struct PyFileSink {
     path: PathBuf,
+    max_file_size: Option<u64>,
 }
 
 #[pymethods]
 impl PyFileSink {
     #[new]
-    #[pyo3(signature = (path))]
-    #[pyo3(text_signature = "(self, path)")]
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    #[pyo3(signature = (path, max_file_size=None))]
+    #[pyo3(text_signature = "(self, path, max_file_size=None)")]
+    fn new(path: PathBuf, max_file_size: Option<u64>) -> Self {
+        Self { path, max_file_size }
     }
 }
 
@@ -948,7 +949,7 @@ fn set_sinks(
             resolved_sinks.push(Box::new(sink));
         } else if let Ok(sink) = sink.downcast_bound::<PyFileSink>(py) {
             let sink = sink.get();
-            let sink = re_sdk::sink::FileSink::new(sink.path.clone())
+            let sink = re_sdk::sink::FileSink::new_with_max_size(sink.path.clone(), sink.max_file_size)
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
             resolved_sinks.push(Box::new(sink));
         } else {
