@@ -244,6 +244,15 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     #[clap(long, default_value_t = Default::default())]
     web_viewer_port: WebViewerServerPort,
 
+    /// Override the public URL used in the web viewer.
+    ///
+    /// By default, the web viewer constructs URLs using localhost or the bind address.
+    /// Use this to specify a public IP or hostname that browsers should connect to.
+    /// Example: --public-url http://192.168.1.100:9090
+    #[cfg(feature = "web_viewer")]
+    #[clap(long)]
+    public_url: Option<String>,
+
     /// Hide the normal Rerun welcome screen.
     #[clap(long)]
     hide_welcome_screen: bool,
@@ -770,6 +779,7 @@ fn run_impl(
                     force_wgpu_backend: args.renderer,
                     video_decoder: args.video_decoder,
                     open_browser: true,
+                    public_url: args.public_url.clone(),
                 }
                 .host_web_viewer()?
                 .block();
@@ -1146,6 +1156,7 @@ fn run_impl(
                 force_wgpu_backend: args.renderer,
                 video_decoder: args.video_decoder,
                 open_browser,
+                public_url: args.public_url,
             }
             .host_web_viewer()?
             .block();

@@ -159,6 +159,12 @@ pub struct WebViewerConfig {
     ///
     /// Defaults to `true`.
     pub open_browser: bool,
+
+    /// Override the public URL base for the web viewer.
+    ///
+    /// By default, the web viewer constructs URLs using the actual server address.
+    /// This allows overriding with a public IP or hostname for remote access.
+    pub public_url: Option<String>,
 }
 
 #[cfg(feature = "web_viewer")]
@@ -171,6 +177,7 @@ impl Default for WebViewerConfig {
             force_wgpu_backend: None,
             video_decoder: None,
             open_browser: true,
+            public_url: None,
         }
     }
 }
@@ -192,12 +199,14 @@ impl WebViewerConfig {
             force_wgpu_backend,
             video_decoder,
             open_browser,
+            public_url,
         } = self;
 
         let web_server = WebViewerServer::new(&bind_ip, web_port)?;
         let http_web_viewer_url = web_server.server_url();
 
-        let mut viewer_url = http_web_viewer_url;
+        // Use public_url if provided, otherwise use the actual server URL
+        let mut viewer_url = public_url.unwrap_or(http_web_viewer_url);
 
         let mut first_arg = true;
         let mut append_argument = |arg| {
