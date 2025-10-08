@@ -146,26 +146,16 @@ impl GraphNodes {
             component_type: Some("rerun.components.Radius".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.GraphNodesIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [GraphNodes::descriptor_node_ids()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [GraphNodes::descriptor_node_ids()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [GraphNodes::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 5usize]> =
+    std::sync::LazyLock::new(|| {
         [
             GraphNodes::descriptor_positions(),
             GraphNodes::descriptor_colors(),
@@ -175,11 +165,10 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 6usize]> =
+    std::sync::LazyLock::new(|| {
         [
             GraphNodes::descriptor_node_ids(),
-            GraphNodes::descriptor_indicator(),
             GraphNodes::descriptor_positions(),
             GraphNodes::descriptor_colors(),
             GraphNodes::descriptor_labels(),
@@ -189,16 +178,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]> =
     });
 
 impl GraphNodes {
-    /// The total number of components in the archetype: 1 required, 1 recommended, 5 optional
-    pub const NUM_COMPONENTS: usize = 7usize;
+    /// The total number of components in the archetype: 1 required, 0 recommended, 5 optional
+    pub const NUM_COMPONENTS: usize = 6usize;
 }
 
-/// Indicator component for the [`GraphNodes`] [`::re_types_core::Archetype`]
-pub type GraphNodesIndicator = ::re_types_core::GenericIndicatorComponent<GraphNodes>;
-
 impl ::re_types_core::Archetype for GraphNodes {
-    type Indicator = GraphNodesIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.GraphNodes".into()
@@ -207,14 +191,6 @@ impl ::re_types_core::Archetype for GraphNodes {
     #[inline]
     fn display_name() -> &'static str {
         "Graph nodes"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        GraphNodesIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -282,7 +258,6 @@ impl ::re_types_core::AsComponents for GraphNodes {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.node_ids.clone(),
             self.positions.clone(),
             self.colors.clone(),
@@ -390,12 +365,7 @@ impl GraphNodes {
                 .map(|radii| radii.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -420,7 +390,7 @@ impl GraphNodes {
             .or(len_show_labels)
             .or(len_radii)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// A list of node IDs.

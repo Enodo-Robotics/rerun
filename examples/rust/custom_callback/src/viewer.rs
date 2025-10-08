@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // There are other ways of "feeding" the viewer though - all you need is a `re_smart_channel::Receiver`.
     let (rx_log, rx_table) = re_grpc_server::spawn_with_recv(
         "0.0.0.0:9877".parse()?,
-        "75%".parse()?,
+        Default::default(),
         re_grpc_server::shutdown::never(),
     );
 
@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut rerun_app = re_viewer::App::new(
                 main_thread_token,
                 re_viewer::build_info(),
-                &app_env,
+                app_env,
                 startup_options,
                 cc,
                 None,

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use arrow::array::{Array as _, ArrayRef};
+use arrow::datatypes::TimeUnit;
 
 use crate::{ArchetypeName, ComponentDescriptor, ComponentIdentifier, ComponentType};
 
@@ -48,22 +49,90 @@ pub fn generic_placeholder_for_datatype(
         DataType::Boolean => Arc::new(array::BooleanArray::from_iter([Some(false)])),
         DataType::Int8 => Arc::new(array::Int8Array::from_iter([0])),
         DataType::Int16 => Arc::new(array::Int16Array::from_iter([0])),
+        DataType::Int32 => Arc::new(array::Int32Array::from_iter([0])),
+        DataType::Int64 => Arc::new(array::Int64Array::from_iter([0])),
 
-        DataType::Int32
-        | DataType::Date32
-        | DataType::Time32(_)
-        | DataType::Interval(IntervalUnit::YearMonth) => {
-            // TODO(andreas): Do we have to further distinguish these types? They do share the physical type.
-            Arc::new(array::Int32Array::from_iter([0]))
-        }
-        DataType::Int64
-        | DataType::Date64
-        | DataType::Timestamp(_, _)
-        | DataType::Time64(_)
-        | DataType::Duration(_) => {
-            // TODO(andreas): Do we have to further distinguish these types? They do share the physical type.
-            Arc::new(array::Int64Array::from_iter([0]))
-        }
+        DataType::Date32 => Arc::new(array::Date32Array::from_iter([Some(0)])),
+
+        DataType::Date64 => Arc::new(array::Date64Array::from_iter([Some(0)])),
+
+        DataType::Interval(interval_unit) => match interval_unit {
+            IntervalUnit::YearMonth => {
+                Arc::new(array::IntervalYearMonthArray::from_iter([Some(0)]))
+            }
+            IntervalUnit::DayTime => Arc::new(array::IntervalDayTimeArray::from_iter([Some(
+                types::IntervalDayTime::new(0, 0),
+            )])),
+            IntervalUnit::MonthDayNano => {
+                Arc::new(array::IntervalMonthDayNanoArray::from_iter([Some(
+                    types::IntervalMonthDayNano::new(0, 0, 0),
+                )]))
+            }
+        },
+
+        DataType::Timestamp(time_unit, _) => match time_unit {
+            TimeUnit::Second => Arc::new(array::TimestampSecondArray::new(vec![0].into(), None)),
+
+            TimeUnit::Millisecond => {
+                Arc::new(array::TimestampMillisecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Microsecond => {
+                Arc::new(array::TimestampMicrosecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Nanosecond => {
+                Arc::new(array::TimestampNanosecondArray::new(vec![0].into(), None))
+            }
+        },
+
+        DataType::Time32(time_unit) => match time_unit {
+            TimeUnit::Second => Arc::new(array::Time32SecondArray::new(vec![0].into(), None)),
+
+            TimeUnit::Millisecond => {
+                Arc::new(array::Time32MillisecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Microsecond | TimeUnit::Nanosecond => {
+                re_log::debug_once!(
+                    "Attempted to create a placeholder for out-of-spec datatype: {datatype}"
+                );
+                array::new_empty_array(datatype)
+            }
+        },
+
+        DataType::Time64(time_unit) => match time_unit {
+            TimeUnit::Microsecond => {
+                Arc::new(array::Time64MicrosecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Nanosecond => {
+                Arc::new(array::Time64NanosecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Second | TimeUnit::Millisecond => {
+                re_log::debug_once!(
+                    "Attempted to create a placeholder for out-of-spec datatype: {datatype}"
+                );
+                array::new_empty_array(datatype)
+            }
+        },
+
+        DataType::Duration(time_unit) => match time_unit {
+            TimeUnit::Second => Arc::new(array::DurationSecondArray::new(vec![0].into(), None)),
+
+            TimeUnit::Millisecond => {
+                Arc::new(array::DurationMillisecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Microsecond => {
+                Arc::new(array::DurationMicrosecondArray::new(vec![0].into(), None))
+            }
+
+            TimeUnit::Nanosecond => {
+                Arc::new(array::DurationNanosecondArray::new(vec![0].into(), None))
+            }
+        },
 
         DataType::UInt8 => Arc::new(array::UInt8Array::from_iter([0])),
         DataType::UInt16 => Arc::new(array::UInt16Array::from_iter([0])),
@@ -72,17 +141,6 @@ pub fn generic_placeholder_for_datatype(
         DataType::Float16 => Arc::new(array::Float16Array::from_iter([half::f16::ZERO])),
         DataType::Float32 => Arc::new(array::Float32Array::from_iter([0.0])),
         DataType::Float64 => Arc::new(array::Float64Array::from_iter([0.0])),
-
-        DataType::Interval(IntervalUnit::DayTime) => {
-            Arc::new(array::IntervalDayTimeArray::from(vec![
-                types::IntervalDayTime::new(0, 0),
-            ]))
-        }
-        DataType::Interval(IntervalUnit::MonthDayNano) => {
-            Arc::new(array::IntervalMonthDayNanoArray::from(vec![
-                types::IntervalMonthDayNano::new(0, 0, 0),
-            ]))
-        }
 
         DataType::Binary => Arc::new(array::GenericBinaryArray::<i32>::from_vec(vec![&[]])),
         DataType::LargeBinary => Arc::new(array::GenericBinaryArray::<i64>::from_vec(vec![&[]])),
@@ -140,7 +198,7 @@ pub fn generic_placeholder_for_datatype(
             {
                 Arc::new(array::FixedSizeListArray::from(list_data))
             } else {
-                re_log::warn_once!("Bug in FixedSizeListArray of {:?}", field.data_type());
+                re_log::warn_once!("Bug in FixedSizeListArray of {}", field.data_type());
                 array::new_empty_array(datatype)
             }
         }
@@ -172,8 +230,13 @@ pub fn generic_placeholder_for_datatype(
             arrow::datatypes::i256::ZERO,
         ])),
 
-        DataType::FixedSizeBinary { .. }
-        | DataType::Dictionary { .. }
+        DataType::FixedSizeBinary(length) => Arc::new(array::FixedSizeBinaryArray::new(
+            *length,
+            vec![0u8; *length as usize].into(),
+            None,
+        )),
+
+        DataType::Dictionary { .. }
         | DataType::Union { .. }
         | DataType::Map { .. }
         | DataType::BinaryView
@@ -182,7 +245,7 @@ pub fn generic_placeholder_for_datatype(
         | DataType::LargeListView { .. }
         | DataType::RunEndEncoded { .. } => {
             // TODO(emilk)
-            re_log::debug_once!("Unimplemented: placeholder value for: {datatype:?}");
+            re_log::debug_once!("Unimplemented: placeholder value for: {datatype}");
             array::new_empty_array(datatype) // TODO(emilk)
         }
     }
@@ -305,7 +368,7 @@ pub trait ComponentDescriptorExt {
     ///
     /// Following the viewer's conventions, this also changes the archetype
     /// part of [`ComponentDescriptor::component`].
-    fn with_builtin_archetype(self, archetype: ArchetypeName) -> Self;
+    fn with_builtin_archetype(self, archetype: impl Into<ArchetypeName>) -> Self;
 
     /// Sets [`ComponentDescriptor::archetype`] to the given one iff it's not already set.
     ///
@@ -335,7 +398,8 @@ impl ComponentDescriptorExt for ComponentDescriptor {
     }
 
     #[inline]
-    fn with_builtin_archetype(mut self, archetype: ArchetypeName) -> Self {
+    fn with_builtin_archetype(mut self, archetype: impl Into<ArchetypeName>) -> Self {
+        let archetype = archetype.into();
         {
             let field_name = self.archetype_field_name();
             self.component = with_field(archetype, field_name);

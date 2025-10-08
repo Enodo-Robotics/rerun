@@ -141,9 +141,8 @@ sensor_views = [
         name=sensor_name,
         origin=f"world/ego_vehicle/{sensor_name}",
         # Set the image plane distance to 5m for all camera visualizations.
-        defaults=[rr.components.ImagePlaneDistance(5.0)],
-        # TODO(#6670): Can't specify rr.components.FillMode.MajorWireframe right now, need to use batch type instead.
-        overrides={"world/anns": [rr.components.FillModeBatch("solid")]},
+        defaults=[rr.Pinhole.from_fields(image_plane_distance=5.0)],
+        overrides={"world/anns": rr.Boxes3D.from_fields(fill_mode="solid")},
     )
     for sensor_name in nuscene_sensor_names(nusc, args.scene_name)
 ]
@@ -173,7 +172,7 @@ We programmatically create one view per sensor and arrange them in a grid layout
 
 
 ## Run the code
-To run this example, make sure you have Python version at least 3.9, the Rerun repository checked out and the latest SDK installed:
+To run this example, make sure you have the [required Python version](https://ref.rerun.io/docs/python/main/common#supported-python-versions), the Rerun repository checked out and the latest SDK installed:
 ```bash
 pip install --upgrade rerun-sdk  # install the latest Rerun SDK
 git clone git@github.com:rerun-io/rerun.git  # Clone the repository

@@ -16,7 +16,6 @@
 #include "../components/radius.hpp"
 #include "../components/show_labels.hpp"
 #include "../components/text.hpp"
-#include "../indicator_component.hpp"
 #include "../result.hpp"
 
 #include <cstdint>
@@ -97,6 +96,8 @@ namespace rerun::archetypes {
         std::optional<ComponentBatch> quaternions;
 
         /// Optional colors for the cylinders.
+        ///
+        /// Alpha channel is used for transparency for solid fill-mode.
         std::optional<ComponentBatch> colors;
 
         /// Optional radii for the lines used when the cylinder is rendered as a wireframe.
@@ -120,11 +121,6 @@ namespace rerun::archetypes {
         std::optional<ComponentBatch> class_ids;
 
       public:
-        static constexpr const char IndicatorComponentType[] =
-            "rerun.components.Cylinders3DIndicator";
-
-        /// Indicator component, used to identify the archetype when converting to a list of components.
-        using IndicatorComponent = rerun::components::IndicatorComponent<IndicatorComponentType>;
         /// The name of the archetype as used in `ComponentDescriptor`s.
         static constexpr const char ArchetypeName[] = "rerun.archetypes.Cylinders3D";
 
@@ -257,6 +253,8 @@ namespace rerun::archetypes {
         }
 
         /// Optional colors for the cylinders.
+        ///
+        /// Alpha channel is used for transparency for solid fill-mode.
         Cylinders3D with_colors(const Collection<rerun::components::Color>& _colors) && {
             colors = ComponentBatch::from_loggable(_colors, Descriptor_colors).value_or_throw();
             return std::move(*this);

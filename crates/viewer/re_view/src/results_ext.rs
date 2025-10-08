@@ -109,9 +109,7 @@ impl HybridLatestAtResults<'_> {
 
 pub enum HybridResults<'a> {
     LatestAt(LatestAtQuery, HybridLatestAtResults<'a>),
-
-    // Boxed because of size difference between variants
-    Range(RangeQuery, Box<HybridRangeResults<'a>>),
+    Range(RangeQuery, HybridRangeResults<'a>),
 }
 
 impl HybridResults<'_> {
@@ -192,7 +190,7 @@ impl<'a> From<(LatestAtQuery, HybridLatestAtResults<'a>)> for HybridResults<'a> 
 impl<'a> From<(RangeQuery, HybridRangeResults<'a>)> for HybridResults<'a> {
     #[inline]
     fn from((query, results): (RangeQuery, HybridRangeResults<'a>)) -> Self {
-        Self::Range(query, Box::new(results))
+        Self::Range(query, results)
     }
 }
 
@@ -216,7 +214,6 @@ pub trait RangeResultsExt {
     ///
     /// For results that are aware of the blueprint, overrides, store results, and defaults will be
     /// considered.
-    // TODO(#6889): Take descriptor instead of name.
     fn get_optional_chunks(&self, component_descriptor: ComponentDescriptor) -> Cow<'_, [Chunk]>;
 
     /// Returns a zero-copy iterator over all the results for the given `(timeline, component)` pair.

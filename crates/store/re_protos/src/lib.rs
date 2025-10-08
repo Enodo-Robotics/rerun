@@ -9,6 +9,8 @@ pub mod external {
     pub use prost;
 }
 
+pub mod headers;
+
 // This extra module is needed, because of how imports from different packages are resolved.
 // For example, `rerun.remote_store.v1alpha1.EncoderVersion` is resolved to `super::super::remote_store::v1alpha1::EncoderVersion`.
 // We need an extra module in the path to `common` to make that work.
@@ -20,12 +22,6 @@ mod v1alpha1 {
     // Note: `allow(clippy::all)` does NOT allow all lints
     #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
-    #[path = "./rerun.catalog.v1alpha1.rs"]
-    pub mod rerun_catalog_v1alpha1;
-
-    #[path = "./rerun.catalog.v1alpha1.ext.rs"]
-    pub mod rerun_catalog_v1alpha1_ext;
-
     #[path = "./rerun.common.v1alpha1.rs"]
     pub mod rerun_common_v1alpha1;
 
@@ -35,26 +31,17 @@ mod v1alpha1 {
     #[path = "./rerun.log_msg.v1alpha1.rs"]
     pub mod rerun_log_msg_v1alpha1;
 
+    #[path = "./rerun.log_msg.v1alpha1.ext.rs"]
+    pub mod rerun_log_msg_v1alpha1_ext;
+
     #[path = "./rerun.sdk_comms.v1alpha1.rs"]
     pub mod rerun_sdk_comms_v1alpha1;
 
-    #[path = "./rerun.manifest_registry.v1alpha1.rs"]
-    pub mod rerun_manifest_registry_v1alpha1;
+    #[path = "./rerun.cloud.v1alpha1.rs"]
+    pub mod rerun_cloud_v1alpha1;
 
-    #[path = "./rerun.manifest_registry.v1alpha1.ext.rs"]
-    pub mod rerun_manifest_registry_v1alpha1_ext;
-
-    #[path = "./rerun.frontend.v1alpha1.rs"]
-    pub mod rerun_frontend_v1alpha1;
-
-    #[path = "./rerun.frontend.v1alpha1.ext.rs"]
-    pub mod rerun_frontend_v1alpha1_ext;
-
-    #[path = "./rerun.redap_tasks.v1alpha1.rs"]
-    pub mod rerun_redap_tasks_v1alpha1;
-
-    #[path = "./rerun.redap_tasks.v1alpha1.ext.rs"]
-    pub mod rerun_redap_tasks_v1alpha1_ext;
+    #[path = "./rerun.cloud.v1alpha1.ext.rs"]
+    pub mod rerun_cloud_v1alpha1_ext;
 }
 
 pub mod common {
@@ -69,15 +56,18 @@ pub mod common {
 pub mod log_msg {
     pub mod v1alpha1 {
         pub use crate::v1alpha1::rerun_log_msg_v1alpha1::*;
+        pub mod ext {
+            pub use crate::v1alpha1::rerun_log_msg_v1alpha1::*;
+        }
     }
 }
 
-pub mod manifest_registry {
+pub mod cloud {
     #[rustfmt::skip] // keep these constants single line for easy sorting
     pub mod v1alpha1 {
-        pub use crate::v1alpha1::rerun_manifest_registry_v1alpha1::*;
+        pub use crate::v1alpha1::rerun_cloud_v1alpha1::*;
         pub mod ext {
-            pub use crate::v1alpha1::rerun_manifest_registry_v1alpha1_ext::*;
+            pub use crate::v1alpha1::rerun_cloud_v1alpha1_ext::*;
         }
 
         /// `DatasetManifest` mandatory field names. All mandatory metadata fields are prefixed
@@ -91,33 +81,9 @@ pub mod manifest_registry {
     }
 }
 
-pub mod catalog {
-    pub mod v1alpha1 {
-        pub use crate::v1alpha1::rerun_catalog_v1alpha1::*;
-        pub mod ext {
-            pub use crate::v1alpha1::rerun_catalog_v1alpha1_ext::*;
-        }
-    }
-}
-
-pub mod frontend {
-    pub mod v1alpha1 {
-        pub use crate::v1alpha1::rerun_frontend_v1alpha1::*;
-        pub mod ext {
-            pub use crate::v1alpha1::rerun_frontend_v1alpha1_ext::*;
-        }
-    }
-}
-
 pub mod sdk_comms {
     pub mod v1alpha1 {
         pub use crate::v1alpha1::rerun_sdk_comms_v1alpha1::*;
-    }
-}
-
-pub mod redap_tasks {
-    pub mod v1alpha1 {
-        pub use crate::v1alpha1::rerun_redap_tasks_v1alpha1::*;
     }
 }
 
@@ -157,6 +123,13 @@ pub enum TypeConversionError {
 
     #[error("could not parse url: {0}")]
     UrlParseError(#[from] url::ParseError),
+
+    #[error("internal error: {0}")]
+    InternalError(String),
+
+    //TODO(#10730): delete when removing 0.24 back compat
+    #[error("unexpected legacy `StoreId`: {0}")]
+    LegacyStoreIdError(String),
 }
 
 impl TypeConversionError {
@@ -196,6 +169,7 @@ impl From<TypeConversionError> for pyo3::PyErr {
     }
 }
 
+/// Create [`TypeConversionError::MissingField`]
 #[macro_export]
 macro_rules! missing_field {
     ($type:ty, $field:expr $(,)?) => {
@@ -203,6 +177,7 @@ macro_rules! missing_field {
     };
 }
 
+/// Create [`TypeConversionError::InvalidField`]
 #[macro_export]
 macro_rules! invalid_field {
     ($type:ty, $field:expr, $reason:expr $(,)?) => {
@@ -262,15 +237,15 @@ mod sizes {
     impl SizeBytes for crate::log_msg::v1alpha1::StoreInfo {
         #[inline]
         fn heap_size_bytes(&self) -> u64 {
+            #[expect(deprecated)]
             let Self {
-                application_id,
+                application_id: _,
                 store_id,
                 store_source,
                 store_version,
             } = self;
 
-            application_id.heap_size_bytes()
-                + store_id.heap_size_bytes()
+            store_id.heap_size_bytes()
                 + store_source.heap_size_bytes()
                 + store_version.heap_size_bytes()
         }
@@ -288,9 +263,15 @@ mod sizes {
     impl SizeBytes for crate::common::v1alpha1::StoreId {
         #[inline]
         fn heap_size_bytes(&self) -> u64 {
-            let Self { kind, id } = self;
+            let Self {
+                kind,
+                recording_id,
+                application_id,
+            } = self;
 
-            kind.heap_size_bytes() + id.heap_size_bytes()
+            kind.heap_size_bytes()
+                + recording_id.heap_size_bytes()
+                + application_id.heap_size_bytes()
         }
     }
 
@@ -340,6 +321,7 @@ mod sizes {
                 uncompressed_size,
                 encoding,
                 payload,
+                is_static: _,
             } = self;
 
             store_id.heap_size_bytes()

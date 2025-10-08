@@ -1,12 +1,13 @@
 use egui::{NumExt as _, Ui};
 
 use re_chunk::Timeline;
-use re_log_types::{EntityPath, ResolvedTimeRange, TimeType, TimelineName};
+use re_log_types::{AbsoluteTimeRange, EntityPath, TimeType, TimelineName};
 use re_types::{
     Archetype as _,
     blueprint::{archetypes as blueprint_archetypes, components::VisibleTimeRange},
     datatypes::{TimeInt, TimeRange, TimeRangeBoundary},
 };
+use re_ui::list_item::ListItemContentButtonsExt as _;
 use re_ui::{TimeDragValue, UiExt as _};
 use re_viewer_context::{QueryRange, ViewClass, ViewState, ViewerContext};
 use re_viewport_blueprint::{ViewBlueprint, entity_path_for_view_property};
@@ -166,22 +167,21 @@ fn query_range_ui(
 This feature controls the time range used to display data in the view.
 
 Notes:
-- The settings are inherited from the parent entity or enclosing view if not overridden.
+- The settings are inherited from the enclosing view if not overridden.
 - Visible time range properties are stored on a per-timeline basis.
 - The data current as of the time range starting time is included.";
 
     let collapsing_response = ui
         .section_collapsing_header("Visible time range")
         .default_open(true)
-        .help_markdown(markdown)
+        .with_help_markdown(markdown)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.re_radio_value(has_individual_time_range, false, "Default")
                     .on_hover_text(if is_view {
                         "Default query range settings for this kind of view"
                     } else {
-                        "Query range settings inherited from parent entity or enclosing \
-                        view"
+                        "Query range settings inherited from enclosing view"
                     });
                 ui.re_radio_value(has_individual_time_range, true, "Override")
                     .on_hover_text(if is_view {
@@ -252,14 +252,13 @@ Notes:
             .body_response
             .is_some_and(|r| r.hovered());
 
-    if should_display_visible_time_range {
-        if let Some(current_time) = time_ctrl.time_int() {
-            if let QueryRange::TimeRange(time_range) = &query_range {
-                let absolute_time_range =
-                    ResolvedTimeRange::from_relative_time_range(time_range, current_time);
-                ctx.rec_cfg.time_ctrl.write().highlighted_range = Some(absolute_time_range);
-            }
-        }
+    if should_display_visible_time_range
+        && let Some(current_time) = time_ctrl.time_int()
+        && let QueryRange::TimeRange(time_range) = &query_range
+    {
+        let absolute_time_range =
+            AbsoluteTimeRange::from_relative_time_range(time_range, current_time);
+        ctx.rec_cfg.time_ctrl.write().highlighted_range = Some(absolute_time_range);
     }
 }
 
@@ -355,7 +354,7 @@ fn current_range_ui(
     time_type: TimeType,
     time_range: &TimeRange,
 ) {
-    let absolute_range = ResolvedTimeRange::from_relative_time_range(time_range, current_time);
+    let absolute_range = AbsoluteTimeRange::from_relative_time_range(time_range, current_time);
     let from_formatted = time_type.format(absolute_range.min(), ctx.app_options().timestamp_format);
     let to_formatted = time_type.format(absolute_range.max(), ctx.app_options().timestamp_format);
 

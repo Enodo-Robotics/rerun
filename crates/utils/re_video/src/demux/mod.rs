@@ -12,6 +12,7 @@ use std::{collections::BTreeMap, ops::Range};
 use bit_vec::BitVec;
 use itertools::Itertools as _;
 use re_span::Span;
+use web_time::Instant;
 
 use super::{Time, Timescale};
 
@@ -114,6 +115,36 @@ pub type GopIndex = usize;
 /// Index used for referencing into [`VideoDataDescription::samples`].
 pub type SampleIndex = usize;
 
+/// Distinguishes static videos from potentially ongoing video streams.
+#[derive(Clone)]
+pub enum VideoDeliveryMethod {
+    /// A static video with a fixed, known duration which won't be updated further.
+    Static { duration: Time },
+
+    /// A stream that *may* be periodically updated.
+    ///
+    /// Video streams may drop samples at the beginning and add new samples at the end.
+    /// The last sample's duration is treated as unknown.
+    /// However, it is typically assumed to be as long as the average sample duration.
+    Stream {
+        /// Last time we added/removed samples from the [`VideoDataDescription`].
+        ///
+        /// This is used solely as a heuristic input for how the player schedules work to decoders.
+        /// For live streams, even those that stopped, this is expected to be wallclock time of when a sample was
+        /// added do this datastructure. *Not* when the sample was first recorded.
+        last_time_updated_samples: Instant,
+    },
+}
+
+impl VideoDeliveryMethod {
+    #[inline]
+    pub fn new_stream() -> Self {
+        Self::Stream {
+            last_time_updated_samples: Instant::now(),
+        }
+    }
+}
+
 /// Description of video data.
 ///
 /// Store various metadata about a video.
@@ -137,10 +168,8 @@ pub struct VideoDataDescription {
     /// This happens for streams logged on a non-temporal timeline.
     pub timescale: Option<Timescale>,
 
-    /// Duration of the video, in time units if known.
-    ///
-    /// For open ended video streams rather than video files this is generally unknown.
-    pub duration: Option<Time>,
+    /// Whether this is a finite video or a stream.
+    pub delivery_method: VideoDeliveryMethod,
 
     /// We split video into GOPs, each beginning with a key frame,
     /// followed by any number of delta frames.
@@ -169,6 +198,26 @@ pub struct VideoDataDescription {
     ///
     /// Can be nice to show in a UI.
     pub mp4_tracks: BTreeMap<TrackId, Option<TrackKind>>,
+}
+
+impl re_byte_size::SizeBytes for VideoDataDescription {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            codec: _,
+            encoding_details: _,
+            timescale: _,
+            delivery_method: _,
+            gops,
+            samples,
+            samples_statistics,
+            mp4_tracks,
+        } = self;
+
+        gops.heap_size_bytes()
+            + samples.heap_size_bytes()
+            + samples_statistics.heap_size_bytes()
+            + mp4_tracks.len() as u64 * std::mem::size_of::<(TrackId, Option<TrackKind>)>() as u64
+    }
 }
 
 impl VideoDataDescription {
@@ -261,14 +310,14 @@ impl VideoDataDescription {
         }
 
         // The last GOP includes the last sample.
-        if let Some(front_gop) = self.gops.back() {
-            if front_gop.sample_range.end != self.samples.next_index() {
-                return Err(format!(
-                    "Last GOP sample range {:?} does not include the last sample {}.",
-                    front_gop.sample_range,
-                    self.samples.next_index() - 1
-                ));
-            }
+        if let Some(front_gop) = self.gops.back()
+            && front_gop.sample_range.end != self.samples.next_index()
+        {
+            return Err(format!(
+                "Last GOP sample range {:?} does not include the last sample {}.",
+                front_gop.sample_range,
+                self.samples.next_index() - 1
+            ));
         }
         // Note that this isn't true vice versa!
         // The first GOP may not include the first few samples.
@@ -339,16 +388,6 @@ pub struct VideoEncodingDetails {
     pub stsd: Option<re_mp4::StsdBox>,
 }
 
-impl VideoEncodingDetails {
-    /// Get the AVCC box from the stsd box if any.
-    pub fn avcc(&self) -> Option<&re_mp4::Avc1Box> {
-        self.stsd.as_ref().and_then(|stsd| match &stsd.contents {
-            re_mp4::StsdBoxContent::Avc1(avc1) => Some(avc1),
-            _ => None,
-        })
-    }
-}
-
 /// Meta informationa about the video samples.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SamplesStatistics {
@@ -364,6 +403,18 @@ pub struct SamplesStatistics {
     /// TODO(andreas): We don't have a mechanism for shrinking this bitvec when dropping samples, i.e. it will keep growing.
     /// ([`StableIndexDeque`] makes sure that indices in the bitvec will still match up with the samples even when samples are dropped from the front.)
     pub has_sample_highest_pts_so_far: Option<BitVec>,
+}
+
+impl re_byte_size::SizeBytes for SamplesStatistics {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            dts_always_equal_pts: _,
+            has_sample_highest_pts_so_far,
+        } = self;
+        has_sample_highest_pts_so_far
+            .as_ref()
+            .map_or(0, |bitvec| bitvec.capacity() as u64 / 8)
+    }
 }
 
 impl SamplesStatistics {
@@ -414,6 +465,10 @@ impl VideoDataDescription {
         media_type: &str,
         debug_name: &str,
     ) -> Result<Self, VideoLoadError> {
+        if data.is_empty() {
+            return Err(VideoLoadError::ZeroBytes);
+        }
+
         re_tracing::profile_function!();
         match media_type {
             "video/mp4" => Self::load_mp4(data, debug_name),
@@ -430,18 +485,6 @@ impl VideoDataDescription {
                 }
             }
         }
-    }
-
-    /// Length of the video if known.
-    ///
-    /// NOTE: This includes the duration of the final frame too!
-    ///
-    /// For video streams (as opposed to video files) this is generally unknown.
-    #[inline]
-    pub fn duration(&self) -> Option<std::time::Duration> {
-        let timescale = self.timescale?;
-        let duration = self.duration?;
-        Some(duration.duration(timescale))
     }
 
     /// The codec used to encode the video.
@@ -471,6 +514,51 @@ impl VideoDataDescription {
     #[inline]
     pub fn num_samples(&self) -> usize {
         self.samples.num_elements()
+    }
+
+    /// Duration of all present samples.
+    ///
+    /// Returns `None` iff the video has no timescale.
+    /// Other special cases like zero samples or single sample with unknown duration will return a zero duration.
+    ///
+    /// Since this is only about present samples and not historical or future data,
+    /// the duration may shrink as samples are dropped and grow as new samples are added.
+    // TODO(andreas): This makes it somewhat unsuitable for various usecases in the viewer. We should probably accumulate the max duration somewhere.
+    pub fn duration(&self) -> Option<std::time::Duration> {
+        let timescale = self.timescale?;
+
+        Some(match &self.delivery_method {
+            VideoDeliveryMethod::Static { duration } => duration.duration(timescale),
+
+            VideoDeliveryMethod::Stream { .. } => match self.samples.num_elements() {
+                0 => std::time::Duration::ZERO,
+                1 => {
+                    let first = self.samples.front()?;
+                    first
+                        .duration
+                        .map_or(std::time::Duration::ZERO, |d| d.duration(timescale))
+                }
+                _ => {
+                    // TODO(#10090): This is only correct because there's no b-frames on streams right now.
+                    // If there are b-frames determining the last timestamp is a bit more complicated.
+                    let first = self.samples.front()?;
+                    let last = self.samples.back()?;
+
+                    let last_sample_duration = last.duration.map_or_else(
+                        || {
+                            // Use average duration of all samples so far.
+                            (last.presentation_timestamp - first.presentation_timestamp)
+                                .duration(timescale)
+                                / (last.frame_nr - first.frame_nr)
+                        },
+                        |d| d.duration(timescale),
+                    );
+
+                    (last.presentation_timestamp - first.presentation_timestamp).duration(timescale)
+                        + last_sample_duration
+                }
+            },
+        })
     }
 
     /// `num_frames / duration`.
@@ -590,12 +678,12 @@ impl VideoDataDescription {
     /// and that sample presented immediately prior to the given sample may have a higher decode timestamp.
     /// Therefore, this may be a jump on sample index.
     pub fn previous_presented_sample(&self, sample: &SampleMetadata) -> Option<&SampleMetadata> {
-        Self::latest_sample_index_at_presentation_timestamp_internal(
+        let idx = Self::latest_sample_index_at_presentation_timestamp_internal(
             &self.samples,
             &self.samples_statistics,
             sample.presentation_timestamp - Time::new(1),
-        )
-        .and_then(|idx| self.samples.get(idx))
+        )?;
+        self.samples.get(idx)
     }
 
     /// For a given decode (!) timestamp, return the index of the group of pictures (GOP) index containing the given timestamp.
@@ -633,6 +721,16 @@ pub struct GroupOfPictures {
     // TODO(andreas): sample ranges between GOPs are guaranteed to be contiguous.
     // So we could actually just read the second part of the range by looking at the next gop.
     pub sample_range: Range<SampleIndex>,
+}
+
+impl re_byte_size::SizeBytes for GroupOfPictures {
+    fn heap_size_bytes(&self) -> u64 {
+        0
+    }
+
+    fn is_pod() -> bool {
+        true
+    }
 }
 
 /// A single sample in a video.
@@ -696,6 +794,16 @@ pub struct SampleMetadata {
     pub byte_span: Span<u32>,
 }
 
+impl re_byte_size::SizeBytes for SampleMetadata {
+    fn heap_size_bytes(&self) -> u64 {
+        0
+    }
+
+    fn is_pod() -> bool {
+        true
+    }
+}
+
 impl SampleMetadata {
     /// Read the sample from the video data.
     ///
@@ -725,7 +833,10 @@ impl SampleMetadata {
 /// Errors that can occur when loading a video.
 #[derive(thiserror::Error, Debug)]
 pub enum VideoLoadError {
-    #[error("Failed to determine media type from data: {0}")]
+    #[error("The video file is empty (zero bytes)")]
+    ZeroBytes,
+
+    #[error("MP4 error: {0}")]
     ParseMp4(#[from] re_mp4::Error),
 
     #[error("Video file has no video tracks")]
@@ -773,7 +884,6 @@ impl std::fmt::Debug for VideoDataDescription {
             .field("codec", &self.codec)
             .field("encoding_details", &self.encoding_details)
             .field("timescale", &self.timescale)
-            .field("duration", &self.duration)
             .field("gops", &self.gops)
             .field("samples", &self.samples.iter_indexed().collect::<Vec<_>>())
             .finish()

@@ -6,22 +6,23 @@ use egui::{
     Color32, CursorIcon, Modifiers, NumExt as _, Painter, PointerButton, Rect, Response, RichText,
     Shape, Ui, Vec2, pos2, scroll_area::ScrollSource,
 };
-
 use re_context_menu::{SelectionUpdateBehavior, context_menu_ui_for_item_with_context};
 use re_data_ui::DataUi as _;
 use re_data_ui::item_ui::guess_instance_path_icon;
 use re_entity_db::{EntityDb, InstancePath};
 use re_log_types::{
-    ApplicationId, ComponentPath, EntityPath, ResolvedTimeRange, TimeInt, TimeReal,
+    AbsoluteTimeRange, ApplicationId, ComponentPath, EntityPath, TimeInt, TimeReal,
 };
 use re_types::blueprint::components::PanelState;
 use re_types::reflection::ComponentDescriptorExt as _;
 use re_types_core::ComponentDescriptor;
-use re_ui::{ContextExt as _, Help, UiExt as _, filter_widget, icons, list_item};
+use re_ui::{ContextExt as _, DesignTokens, Help, UiExt as _, filter_widget, icons, list_item};
 use re_ui::{IconText, filter_widget::format_matching_text};
+use re_viewer_context::open_url::ViewerOpenUrl;
 use re_viewer_context::{
-    CollapseScope, HoverHighlight, Item, ItemCollection, ItemContext, RecordingConfig, TimeControl,
-    TimeView, UiLayout, ViewerContext, VisitorControlFlow,
+    CollapseScope, HoverHighlight, Item, ItemCollection, ItemContext, RecordingConfig,
+    SystemCommand, SystemCommandSender as _, TimeControl, TimeView, UiLayout, ViewerContext,
+    VisitorControlFlow,
 };
 use re_viewport_blueprint::ViewportBlueprint;
 
@@ -205,9 +206,9 @@ impl TimePanel {
         let tokens = ui.tokens();
 
         // Invalidate the filter widget if the store id has changed.
-        if self.filter_state_app_id.as_ref() != Some(&ctx.store_context.app_id) {
+        if self.filter_state_app_id.as_ref() != Some(ctx.store_context.application_id()) {
             self.filter_state = Default::default();
-            self.filter_state_app_id = Some(ctx.store_context.app_id.clone());
+            self.filter_state_app_id = Some(ctx.store_context.application_id().clone());
         }
 
         self.data_density_graph_painter.begin_frame(ui.ctx());
@@ -295,6 +296,7 @@ impl TimePanel {
         let tokens = ui.tokens();
 
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.5;
             // Add back the margin we removed from the panel:
             let mut top_row_frame = egui::Frame::default();
             let margin = tokens.bottom_panel_margin();
@@ -348,9 +350,7 @@ impl TimePanel {
             ui.vertical(|ui| {
                 if has_more_than_one_time_point {
                     ui.horizontal(|ui| {
-                        let times_per_timeline = entity_db.times_per_timeline();
-                        self.time_control_ui
-                            .play_pause_ui(time_ctrl, times_per_timeline, ui);
+                        self.time_control_ui.play_pause_ui(ctx, time_ctrl, ui);
 
                         self.time_control_ui.playback_speed_ui(time_ctrl, ui);
                         self.time_control_ui.fps_ui(time_ctrl, ui);
@@ -370,8 +370,7 @@ impl TimePanel {
             let times_per_timeline = entity_db.times_per_timeline();
 
             if has_more_than_one_time_point {
-                self.time_control_ui
-                    .play_pause_ui(time_ctrl, times_per_timeline, ui);
+                self.time_control_ui.play_pause_ui(ctx, time_ctrl, ui);
             }
 
             self.time_control_ui
@@ -433,14 +432,12 @@ impl TimePanel {
             ),
             time_ctrl.time_view(),
         );
-        let full_y_range = Rangef::new(ui.min_rect().bottom(), ui.max_rect().bottom());
+        let full_y_range = Rangef::new(ui.max_rect().top(), ui.max_rect().bottom());
 
         let timeline_rect = {
             let top = ui.min_rect().bottom();
 
-            ui.add_space(-4.0); // hack to vertically center the text
-
-            let size = egui::vec2(self.prev_col_width, 27.0);
+            let size = egui::vec2(self.prev_col_width, DesignTokens::list_item_height());
             ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 ui.set_min_size(size);
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -490,7 +487,7 @@ impl TimePanel {
         }
 
         ui.painter().hline(
-            0.0..=ui.max_rect().right(),
+            timeline_rect.left()..=ui.max_rect().right(),
             timeline_rect.bottom(),
             ui.visuals().widgets.noninteractive.bg_stroke,
         );
@@ -571,6 +568,7 @@ impl TimePanel {
             &self.time_ranges_ui,
             time_ctrl,
             ui,
+            ctx,
             Some(&time_area_response),
             &time_area_painter,
             &timeline_rect,
@@ -1053,19 +1051,17 @@ impl TimePanel {
         if ctx
             .egui_ctx()
             .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+            && let Some(collapse_id) = self.collapse_scope().item(item.clone())
         {
-            if let Some(collapse_id) = self.collapse_scope().item(item.clone()) {
-                collapse_id.set_open(ctx.egui_ctx(), true);
-            }
+            collapse_id.set_open(ctx.egui_ctx(), true);
         }
 
         if ctx
             .egui_ctx()
             .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+            && let Some(collapse_id) = self.collapse_scope().item(item.clone())
         {
-            if let Some(collapse_id) = self.collapse_scope().item(item.clone()) {
-                collapse_id.set_open(ctx.egui_ctx(), false);
-            }
+            collapse_id.set_open(ctx.egui_ctx(), false);
         }
 
         if ctx
@@ -1099,7 +1095,8 @@ impl TimePanel {
             });
 
             if let ControlFlow::Break(Some(item)) = result {
-                ctx.selection_state().set_selection(item.clone());
+                ctx.command_sender()
+                    .send_system(SystemCommand::SetSelection(item.clone().into()));
                 self.scroll_to_me_item = Some(item.clone());
                 self.range_selection_anchor_item = Some(item);
             }
@@ -1130,7 +1127,8 @@ impl TimePanel {
             });
 
             if let ControlFlow::Break(Some(item)) = result {
-                ctx.selection_state().set_selection(item.clone());
+                ctx.command_sender()
+                    .send_system(SystemCommand::SetSelection(item.clone().into()));
                 self.scroll_to_me_item = Some(item.clone());
                 self.range_selection_anchor_item = Some(item);
             }
@@ -1181,9 +1179,14 @@ impl TimePanel {
                     );
 
                     if modifiers.command {
-                        ctx.selection_state.extend_selection(items);
+                        // We extend into the current selection to append new items at the end.
+                        let mut selection = ctx.selection().clone();
+                        selection.extend(items);
+                        ctx.command_sender()
+                            .send_system(SystemCommand::SetSelection(selection));
                     } else {
-                        ctx.selection_state.set_selection(items);
+                        ctx.command_sender()
+                            .send_system(SystemCommand::SetSelection(items));
                     }
                 }
             }
@@ -1209,7 +1212,7 @@ impl TimePanel {
         let mut found_last_clicked_items = false;
         let mut found_shift_clicked_items = false;
 
-        streams_tree_data.visit(ctx, entity_db, |entity_or_component| {
+        let _ignored = streams_tree_data.visit(ctx, entity_db, |entity_or_component| {
             let item = entity_or_component.item();
 
             if &item == anchor_item {
@@ -1257,9 +1260,7 @@ impl TimePanel {
             // Responsive ui for narrow screens, e.g. mobile. Split the controls into two rows.
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    let times_per_timeline = entity_db.times_per_timeline();
-                    self.time_control_ui
-                        .play_pause_ui(time_ctrl, times_per_timeline, ui);
+                    self.time_control_ui.play_pause_ui(ctx, time_ctrl, ui);
                     self.time_control_ui.playback_speed_ui(time_ctrl, ui);
                     self.time_control_ui.fps_ui(time_ctrl, ui);
                 });
@@ -1281,8 +1282,7 @@ impl TimePanel {
             // One row:
             let times_per_timeline = entity_db.times_per_timeline();
 
-            self.time_control_ui
-                .play_pause_ui(time_ctrl, times_per_timeline, ui);
+            self.time_control_ui.play_pause_ui(ctx, time_ctrl, ui);
             self.time_control_ui
                 .timeline_selector_ui(time_ctrl, times_per_timeline, ui);
             self.time_control_ui.playback_speed_ui(time_ctrl, ui);
@@ -1359,6 +1359,14 @@ impl TimePanel {
                     );
                 }
 
+                time_selection_ui::collapsed_loop_selection_ui(
+                    time_ctrl,
+                    &painter,
+                    &time_ranges_ui,
+                    ui,
+                    time_range_rect,
+                );
+
                 painter.hline(
                     time_range_rect.x_range(),
                     time_range_rect.center().y,
@@ -1382,6 +1390,7 @@ impl TimePanel {
                     &time_ranges_ui,
                     time_ctrl,
                     ui,
+                    ctx,
                     None,
                     &painter,
                     &time_range_rect,
@@ -1398,7 +1407,9 @@ impl TimePanel {
         ui: &mut egui::Ui,
         time_ctrl: &mut TimeControl,
     ) {
-        if let Some(time_int) = time_ctrl.time_int() {
+        if let Some(time_int) = time_ctrl.time_int()
+            && let Some(time) = time_ctrl.time()
+        {
             let time_type = time_ctrl.time_type();
 
             let mut time_str = self
@@ -1420,11 +1431,11 @@ impl TimePanel {
                 }
                 self.time_edit_string = None;
             }
-            response
-                .on_hover_text(format!("Timestamp: {}", time_int.as_i64()))
-                .context_menu(|ui| {
-                    copy_time_properties_context_menu(ui, time_ctrl, None);
-                });
+            let response = response.on_hover_text(format!("Timestamp: {}", time_int.as_i64()));
+
+            response.context_menu(|ui| {
+                copy_time_properties_context_menu(ui, time);
+            });
         }
     }
 }
@@ -1477,24 +1488,18 @@ fn highlight_timeline_row(
 }
 
 fn paint_range_highlight(
-    highlighted_range: ResolvedTimeRange,
+    highlighted_range: AbsoluteTimeRange,
     time_ranges_ui: &TimeRangesUi,
     painter: &egui::Painter,
     rect: Rect,
 ) {
-    let x_from = time_ranges_ui.x_from_time_f32(highlighted_range.min().into());
-    let x_to = time_ranges_ui.x_from_time_f32(highlighted_range.max().into());
-
-    if let (Some(x_from), Some(x_to)) = (x_from, x_to) {
-        let visible_history_area_rect =
-            Rect::from_x_y_ranges(x_from..=x_to, rect.y_range()).intersect(rect);
-
-        painter.rect_filled(
-            visible_history_area_rect,
-            0.0,
-            painter.ctx().tokens().extreme_fg_color.gamma_multiply(0.1),
-        );
-    }
+    time_selection_ui::paint_timeline_range(
+        highlighted_range,
+        time_ranges_ui,
+        painter,
+        rect,
+        painter.ctx().tokens().extreme_fg_color.gamma_multiply(0.1),
+    );
 }
 
 fn help(os: egui::os::OperatingSystem) -> Help {
@@ -1681,11 +1686,13 @@ fn paint_time_ranges_gaps(
         let gap_edge = *segment.x.start() as f32;
 
         if zig_zag_first_and_last_edges {
+            // Careful with subtracting a too large number here. Nvidia @ Windows was observed not drawing the rect correctly for -100_000.0
             // Left side of first segment - paint as a very wide gap that we only see the right side of
-            paint_time_gap(gap_edge - 100_000.0, gap_edge);
+            paint_time_gap(gap_edge - 10_000.0, gap_edge);
         } else {
+            // Careful with subtracting a too large number here. Nvidia @ Windows was observed not drawing the rect correctly for -100_000.0
             painter.rect_filled(
-                Rect::from_min_max(pos2(gap_edge - 100_000.0, top), pos2(gap_edge, bottom)),
+                Rect::from_min_max(pos2(gap_edge - 10_000.0, top), pos2(gap_edge, bottom)),
                 0.0,
                 fill_color,
             );
@@ -1753,18 +1760,17 @@ fn interact_with_streams_rect(
         zoom_factor *= (response.drag_delta().y * 0.01).exp();
     }
 
-    if delta_x != 0.0 {
-        if let Some(new_view_range) = time_ranges_ui.pan(-delta_x) {
-            time_ctrl.set_time_view(new_view_range);
-        }
+    if delta_x != 0.0
+        && let Some(new_view_range) = time_ranges_ui.pan(-delta_x)
+    {
+        time_ctrl.set_time_view(new_view_range);
     }
 
-    if zoom_factor != 1.0 {
-        if let Some(pointer_pos) = pointer_pos {
-            if let Some(new_view_range) = time_ranges_ui.zoom_at(pointer_pos.x, zoom_factor) {
-                time_ctrl.set_time_view(new_view_range);
-            }
-        }
+    if zoom_factor != 1.0
+        && let Some(pointer_pos) = pointer_pos
+        && let Some(new_view_range) = time_ranges_ui.zoom_at(pointer_pos.x, zoom_factor)
+    {
+        time_ctrl.set_time_view(new_view_range);
     }
 
     if response.double_clicked() {
@@ -1775,29 +1781,79 @@ fn interact_with_streams_rect(
 }
 
 /// Context menu that shows up when interacting with the streams rect.
-fn copy_time_properties_context_menu(
+fn copy_timeline_properties_context_menu(
     ui: &mut egui::Ui,
+    ctx: &ViewerContext<'_>,
     time_ctrl: &TimeControl,
-    hovered_time: Option<TimeReal>,
+    hovered_time: TimeReal,
 ) {
-    if let Some(time) = hovered_time {
-        if ui.button("Copy hovered timestamp").clicked() {
-            let time = format!("{}", time.floor().as_i64());
-            re_log::info!("Copied hovered timestamp: {}", time);
-            ui.ctx().copy_text(time);
-        };
-    } else if let Some(time) = time_ctrl.time_int() {
-        if ui.button("Copy current timestamp").clicked() {
-            let time = format!("{}", time.as_i64());
-            re_log::info!("Copied current timestamp: {}", time);
-            ui.ctx().copy_text(time);
-        };
+    let mut url = ViewerOpenUrl::from_context(ctx);
+    if let Some(selected_time_range) = time_ctrl.active_loop_selection()
+        && selected_time_range.contains(hovered_time)
+    {
+        let has_time_range = url.as_mut().is_ok_and(|url| url.fragment_mut().is_some());
+        let copy_command = url.and_then(|url| url.copy_url_command());
+        if ui
+            .add_enabled(
+                copy_command.is_ok() && has_time_range,
+                egui::Button::new("Copy link to trimmed range"),
+            )
+            .on_disabled_hover_text(if copy_command.is_err() {
+                "Can't share links to the current recording"
+            } else {
+                "The current recording doesn't support time range links"
+            })
+            .clicked()
+            && let Ok(copy_command) = copy_command
+        {
+            ctx.command_sender().send_system(copy_command);
+        }
+    } else {
+        let has_fragment = url.as_mut().is_ok_and(|url| {
+            if let Some(fragment) = url.fragment_mut() {
+                fragment.when = Some((
+                    *time_ctrl.timeline().name(),
+                    re_log_types::TimeCell {
+                        typ: time_ctrl.time_type(),
+                        value: hovered_time.floor().into(),
+                    },
+                ));
+                true
+            } else {
+                false
+            }
+        });
+        let copy_command = url.and_then(|url| url.copy_url_command());
+
+        if ui
+            .add_enabled(
+                copy_command.is_ok() && has_fragment,
+                egui::Button::new("Copy link to timestamp"),
+            )
+            .on_disabled_hover_text(if copy_command.is_err() {
+                "Can't share links to the current recording"
+            } else {
+                "The current recording doesn't support time stamp links"
+            })
+            .clicked()
+            && let Ok(copy_command) = copy_command
+        {
+            ctx.command_sender().send_system(copy_command);
+        }
     }
 
-    if ui.button("Copy current timeline name").clicked() {
-        let timeline = format!("{}", time_ctrl.timeline().name());
-        re_log::info!("Copied current timeline: {}", timeline);
-        ui.ctx().copy_text(timeline);
+    if ui.button("Copy timestamp").clicked() {
+        let time = format!("{}", hovered_time.floor().as_i64());
+        re_log::info!("Copied hovered timestamp: {}", time);
+        ui.ctx().copy_text(time);
+    }
+}
+
+fn copy_time_properties_context_menu(ui: &mut egui::Ui, time: TimeReal) {
+    if ui.button("Copy timestamp").clicked() {
+        let time = format!("{}", time.floor().as_i64());
+        re_log::info!("Copied hovered timestamp: {}", time);
+        ui.ctx().copy_text(time);
     }
 }
 
@@ -1806,6 +1862,7 @@ fn time_marker_ui(
     time_ranges_ui: &TimeRangesUi,
     time_ctrl: &mut TimeControl,
     ui: &egui::Ui,
+    ctx: &ViewerContext<'_>,
     time_area_response: Option<&egui::Response>,
     time_area_painter: &egui::Painter,
     timeline_rect: &Rect,
@@ -1823,45 +1880,42 @@ fn time_marker_ui(
     let mut is_hovering_time_cursor = false;
 
     // show current time as a line:
-    if let Some(time) = time_ctrl.time() {
-        if let Some(mut x) = time_ranges_ui.x_from_time_f32(time) {
-            if timeline_rect.x_range().contains(x) {
-                let line_rect =
-                    Rect::from_x_y_ranges(x..=x, timeline_rect.top()..=ui.max_rect().bottom())
-                        .expand(interact_radius);
+    if let Some(time) = time_ctrl.time()
+        && let Some(mut x) = time_ranges_ui.x_from_time_f32(time)
+        && timeline_rect.x_range().contains(x)
+    {
+        let line_rect = Rect::from_x_y_ranges(x..=x, timeline_rect.top()..=ui.max_rect().bottom())
+            .expand(interact_radius);
 
-                let sense = if time_area_double_clicked {
-                    egui::Sense::hover()
-                } else {
-                    egui::Sense::drag()
-                };
+        let sense = if time_area_double_clicked {
+            egui::Sense::hover()
+        } else {
+            egui::Sense::drag()
+        };
 
-                let response = ui
-                    .interact(line_rect, time_drag_id, sense)
-                    .on_hover_and_drag_cursor(timeline_cursor_icon);
+        let response = ui
+            .interact(line_rect, time_drag_id, sense)
+            .on_hover_and_drag_cursor(timeline_cursor_icon);
 
-                is_hovering_time_cursor = response.hovered();
+        is_hovering_time_cursor = response.hovered();
 
-                if response.dragged() {
-                    if let Some(pointer_pos) = pointer_pos {
-                        if let Some(time) = time_ranges_ui.time_from_x_f32(pointer_pos.x) {
-                            let time = time_ranges_ui.clamp_time(time);
-                            time_ctrl.set_time(time);
-                            time_ctrl.pause();
+        if response.dragged()
+            && let Some(pointer_pos) = pointer_pos
+            && let Some(time) = time_ranges_ui.time_from_x_f32(pointer_pos.x)
+        {
+            let time = time_ranges_ui.clamp_time(time);
+            time_ctrl.set_time(time);
+            time_ctrl.pause();
 
-                            x = pointer_pos.x; // avoid frame-delay
-                        }
-                    }
-                }
-
-                ui.paint_time_cursor(
-                    time_area_painter,
-                    &response,
-                    x,
-                    Rangef::new(timeline_rect.top(), ui.max_rect().bottom()),
-                );
-            }
+            x = pointer_pos.x; // avoid frame-delay
         }
+
+        ui.paint_time_cursor(
+            time_area_painter,
+            &response,
+            x,
+            Rangef::new(timeline_rect.top(), ui.max_rect().bottom()),
+        );
     }
 
     // "click here to view time here"
@@ -1871,19 +1925,38 @@ fn time_marker_ui(
         let is_pointer_in_timeline_rect =
             ui.ui_contains_pointer() && timeline_rect.contains(pointer_pos);
 
-        // Show preview?
-        if !is_hovering_time_cursor
+        let hovered_ctx_id = egui::Id::new("hovered timestamp context");
+
+        let on_timeline = !is_hovering_time_cursor
             && !time_area_double_clicked
             && is_pointer_in_time_area_rect
             && !is_anything_being_dragged
-            && !is_hovering_the_loop_selection
+            && !is_hovering_the_loop_selection;
+
+        if on_timeline {
+            ui.ctx().set_cursor_icon(timeline_cursor_icon);
+        }
+
+        // Show a preview bar at this position, if we have right-clicked
+        // on the time panel we want to still draw the line at the
+        // original position.
+        let hovered_x_pos = if let Some(hovered_time) =
+            ui.ctx().memory(|mem| mem.data.get_temp(hovered_ctx_id))
+            && let Some(x) = time_ranges_ui.x_from_time_f32(hovered_time)
         {
+            Some(x)
+        } else if on_timeline {
+            Some(pointer_pos.x)
+        } else {
+            None
+        };
+
+        if let Some(x) = hovered_x_pos {
             time_area_painter.vline(
-                pointer_pos.x,
+                x,
                 timeline_rect.top()..=ui.max_rect().bottom(),
                 ui.visuals().widgets.noninteractive.fg_stroke,
             );
-            ui.ctx().set_cursor_icon(timeline_cursor_icon); // preview!
         }
 
         // Click to move time here:
@@ -1922,12 +1995,29 @@ fn time_marker_ui(
             }
         }
 
-        time_area_response
-            .context_menu(|ui| copy_time_properties_context_menu(ui, time_ctrl, hovered_time));
+        if let Some(hovered_time) = ui
+            .ctx()
+            .memory(|mem| mem.data.get_temp(hovered_ctx_id))
+            .or(hovered_time)
+        {
+            if egui::Popup::context_menu(&time_area_response)
+                .width(300.0)
+                .show(|ui| {
+                    copy_timeline_properties_context_menu(ui, ctx, time_ctrl, hovered_time);
+                })
+                .is_some()
+            {
+                ui.ctx()
+                    .memory_mut(|mem| mem.data.insert_temp(hovered_ctx_id, hovered_time));
+            } else {
+                ui.ctx()
+                    .memory_mut(|mem| mem.data.remove::<TimeReal>(hovered_ctx_id));
+            }
+        }
     }
 }
 
 #[test]
 fn test_help_view() {
-    re_viewer_context::test_context::TestContext::test_help_view(help);
+    re_test_context::TestContext::test_help_view(help);
 }

@@ -6,8 +6,8 @@ pub mod decoder;
 #[cfg(feature = "encoder")]
 pub mod encoder;
 
+mod app_id_injector;
 pub mod codec;
-
 pub mod protobuf_conversions;
 
 #[cfg(feature = "encoder")]
@@ -17,11 +17,20 @@ mod file_sink;
 #[cfg(feature = "stream_from_http")]
 pub mod stream_rrd_from_http;
 
+pub mod external {
+    #[cfg(feature = "decoder")]
+    pub use lz4_flex;
+}
+
 // ---------------------------------------------------------------------
+
+pub use app_id_injector::{
+    ApplicationIdInjector, CachingApplicationIdInjector, DummyApplicationIdInjector,
+};
 
 #[cfg(feature = "encoder")]
 #[cfg(not(target_arch = "wasm32"))]
-pub use file_sink::{FileSink, FileSinkError};
+pub use file_sink::{FileFlushError, FileSink, FileSinkError};
 
 // ----------------------------------------------------------------------------
 

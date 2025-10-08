@@ -44,7 +44,8 @@ jobs:
     runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
-        toolchain: ["nightly-2025-02-05"]
+        # We have to use a nightly version because rustdoc json format is unstable.
+        toolchain: ["nightly-2025-09-16"]
     needs: [get-version]
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +75,8 @@ jobs:
           #   We already test with `-D warnings` elsewhere, and the output is really noisy with the nightly warnings.
           # - The web viewer server - we don't want to waste time building the web viewer,
           #   because it is not actually going to run
-          RUSTFLAGS: "-Awarnings --cfg disable_web_viewer_server"
+          RUSTFLAGS: "-Awarnings"
+          RERUN_DISABLE_WEB_VIEWER_SERVER: "1"
         run: |
           pixi run search-index build \
             landing \

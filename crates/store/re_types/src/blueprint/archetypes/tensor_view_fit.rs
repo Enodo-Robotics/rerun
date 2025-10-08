@@ -40,46 +40,26 @@ impl TensorViewFit {
             component_type: Some("rerun.blueprint.components.ViewFit".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.blueprint.components.TensorViewFitIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [TensorViewFit::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [TensorViewFit::descriptor_scaling()]);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [TensorViewFit::descriptor_scaling()]);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            TensorViewFit::descriptor_indicator(),
-            TensorViewFit::descriptor_scaling(),
-        ]
-    });
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [TensorViewFit::descriptor_scaling()]);
 
 impl TensorViewFit {
-    /// The total number of components in the archetype: 0 required, 1 recommended, 1 optional
-    pub const NUM_COMPONENTS: usize = 2usize;
+    /// The total number of components in the archetype: 0 required, 0 recommended, 1 optional
+    pub const NUM_COMPONENTS: usize = 1usize;
 }
 
-/// Indicator component for the [`TensorViewFit`] [`::re_types_core::Archetype`]
-pub type TensorViewFitIndicator = ::re_types_core::GenericIndicatorComponent<TensorViewFit>;
-
 impl ::re_types_core::Archetype for TensorViewFit {
-    type Indicator = TensorViewFitIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.blueprint.archetypes.TensorViewFit".into()
@@ -88,14 +68,6 @@ impl ::re_types_core::Archetype for TensorViewFit {
     #[inline]
     fn display_name() -> &'static str {
         "Tensor view fit"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        TensorViewFitIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -136,10 +108,7 @@ impl ::re_types_core::AsComponents for TensorViewFit {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [Some(Self::indicator()), self.scaling.clone()]
-            .into_iter()
-            .flatten()
-            .collect()
+        std::iter::once(self.scaling.clone()).flatten().collect()
     }
 }
 

@@ -9,7 +9,7 @@ use re_byte_size::SizeBytes;
 use web_time::Instant;
 
 use re_chunk::{Chunk, ChunkId, TimelineName};
-use re_log_types::{EntityPath, ResolvedTimeRange, TimeInt};
+use re_log_types::{AbsoluteTimeRange, EntityPath, TimeInt};
 use re_types_core::ComponentDescriptor;
 
 use crate::{
@@ -54,7 +54,7 @@ pub struct GarbageCollectionOptions {
     pub protect_latest: usize,
 
     /// Do not remove any data within these time ranges.
-    pub protected_time_ranges: IntMap<TimelineName, ResolvedTimeRange>,
+    pub protected_time_ranges: IntMap<TimelineName, AbsoluteTimeRange>,
 }
 
 impl GarbageCollectionOptions {
@@ -70,10 +70,10 @@ impl GarbageCollectionOptions {
     /// If true, we cannot remove this chunk.
     pub fn is_chunk_protected(&self, chunk: &Chunk) -> bool {
         for (timeline, protected_time_range) in &self.protected_time_ranges {
-            if let Some(time_column) = chunk.timelines().get(timeline) {
-                if time_column.time_range().intersects(*protected_time_range) {
-                    return true;
-                }
+            if let Some(time_column) = chunk.timelines().get(timeline)
+                && time_column.time_range().intersects(*protected_time_range)
+            {
+                return true;
             }
         }
         false
@@ -284,7 +284,6 @@ impl ChunkStore {
             for chunk_id in self
                 .chunk_ids_per_min_row_id
                 .values()
-                .flatten()
                 .filter(|chunk_id| !protected_chunk_ids.contains(chunk_id))
             {
                 if let Some(chunk) = self.chunks_per_chunk_id.get(chunk_id) {
@@ -373,10 +372,8 @@ impl ChunkStore {
             if !chunk_ids_dangling.is_empty() {
                 re_tracing::profile_scope!("dangling");
 
-                chunk_ids_per_min_row_id.retain(|_row_id, chunk_ids| {
-                    chunk_ids.retain(|chunk_id| !chunk_ids_dangling.contains(chunk_id));
-                    !chunk_ids.is_empty()
-                });
+                chunk_ids_per_min_row_id
+                    .retain(|_row_id, chunk_id| !chunk_ids_dangling.contains(chunk_id));
 
                 // Component-less indices
                 for temporal_chunk_ids_per_timeline in temporal_chunk_ids_per_entity.values_mut() {
@@ -460,6 +457,8 @@ impl ChunkStore {
     ///
     /// See also [`ChunkStore::remove_chunks`].
     pub(crate) fn remove_chunk(&mut self, chunk_id: ChunkId) -> Vec<ChunkStoreDiff> {
+        re_tracing::profile_function!();
+
         let Some(chunk) = self.chunks_per_chunk_id.get(&chunk_id) else {
             return Vec::new();
         };
@@ -518,6 +517,8 @@ impl ChunkStore {
         // before we had time to clean the other.
 
         for (entity_path, chunk_ids_to_be_removed) in chunk_ids_to_be_removed {
+            re_tracing::profile_scope!("chunk-id");
+
             let HashMapEntry::Occupied(mut temporal_chunk_ids_per_timeline) = self
                 .temporal_chunk_ids_per_entity_per_component
                 .entry(entity_path.clone())
@@ -532,6 +533,7 @@ impl ChunkStore {
             };
 
             for (timeline, chunk_ids_to_be_removed) in chunk_ids_to_be_removed {
+                re_tracing::profile_scope!("timeline");
                 // Component-less indices
                 {
                     let HashMapEntry::Occupied(mut temporal_chunk_ids_per_time_componentless) =
@@ -581,10 +583,10 @@ impl ChunkStore {
                             chunk_ids_removed.extend(chunk_ids);
                         }
 
-                        if let Some((start_time, time_budget)) = time_budget {
-                            if start_time.elapsed() >= time_budget {
-                                break;
-                            }
+                        if let Some((start_time, time_budget)) = time_budget
+                            && start_time.elapsed() >= time_budget
+                        {
+                            break;
                         }
                     }
 
@@ -676,18 +678,31 @@ impl ChunkStore {
             }
         }
 
-        self.chunk_ids_per_min_row_id.retain(|_row_id, chunk_ids| {
-            chunk_ids.retain(|chunk_id| !chunk_ids_removed.contains(chunk_id));
-            !chunk_ids.is_empty()
-        });
+        {
+            let min_row_ids_removed = chunk_ids_removed.iter().filter_map(|chunk_id| {
+                let chunk = self.chunks_per_chunk_id.get(chunk_id)?;
+                chunk.row_id_range().map(|(min, _)| min)
+            });
+            for row_id in min_row_ids_removed {
+                if self.chunk_ids_per_min_row_id.remove(&row_id).is_none() {
+                    re_log::warn!(
+                        %row_id,
+                        "Row ID marked for removal was not found, there's bug in the Chunk Store"
+                    );
+                }
+            }
+        }
 
-        chunk_ids_removed
-            .into_iter()
-            .filter_map(|chunk_id| self.chunks_per_chunk_id.remove(&chunk_id))
-            .inspect(|chunk| {
-                self.temporal_chunks_stats -= ChunkStoreChunkStats::from_chunk(chunk);
-            })
-            .map(ChunkStoreDiff::deletion)
-            .collect()
+        {
+            re_tracing::profile_scope!("last collect");
+            chunk_ids_removed
+                .into_iter()
+                .filter_map(|chunk_id| self.chunks_per_chunk_id.remove(&chunk_id))
+                .inspect(|chunk| {
+                    self.temporal_chunks_stats -= ChunkStoreChunkStats::from_chunk(chunk);
+                })
+                .map(ChunkStoreDiff::deletion)
+                .collect()
+        }
     }
 }

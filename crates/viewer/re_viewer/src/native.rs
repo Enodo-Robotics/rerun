@@ -14,6 +14,12 @@ pub fn run_native_app(
     app_creator: AppCreator,
     force_wgpu_backend: Option<&str>,
 ) -> eframe::Result {
+    if crate::docker_detection::is_docker() {
+        re_log::warn_once!(
+            "It looks like you are running the Rerun Viewer inside a Docker container. This is not officially supported, and may lead to performance issues and bugs. See https://github.com/rerun-io/rerun/issues/6835 for more.",
+        );
+    }
+
     let native_options = eframe_options(force_wgpu_backend);
 
     let window_title = "Rerun Viewer";
@@ -29,17 +35,18 @@ pub fn run_native_app(
 
 pub fn eframe_options(force_wgpu_backend: Option<&str>) -> eframe::NativeOptions {
     re_tracing::profile_function!();
+    let os = egui::os::OperatingSystem::default();
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id(APP_ID) // Controls where on disk the app state is persisted
             .with_decorations(!re_ui::CUSTOM_WINDOW_DECORATIONS) // Maybe hide the OS-specific "chrome" around the window
-            .with_fullsize_content_view(re_ui::FULLSIZE_CONTENT)
+            .with_fullsize_content_view(re_ui::fullsize_content(os))
             .with_icon(icon_data())
             .with_inner_size([1600.0, 1200.0])
             .with_min_inner_size([320.0, 450.0]) // Should be high enough to fit the rerun menu
-            .with_title_shown(!re_ui::FULLSIZE_CONTENT)
+            .with_title_shown(!re_ui::fullsize_content(os))
             .with_titlebar_buttons_shown(!re_ui::CUSTOM_WINDOW_DECORATIONS)
-            .with_titlebar_shown(!re_ui::FULLSIZE_CONTENT)
+            .with_titlebar_shown(!re_ui::fullsize_content(os))
             .with_transparent(re_ui::CUSTOM_WINDOW_DECORATIONS), // To have rounded corners without decorations we need transparency
 
         renderer: eframe::Renderer::Wgpu,
@@ -88,7 +95,7 @@ pub fn run_native_viewer_with_messages(
     app_env: crate::AppEnvironment,
     startup_options: crate::StartupOptions,
     log_messages: Vec<LogMsg>,
-    connection_registry: Option<re_grpc_client::ConnectionRegistryHandle>,
+    connection_registry: Option<re_redap_client::ConnectionRegistryHandle>,
     async_runtime: AsyncRuntimeHandle,
 ) -> eframe::Result {
     let (tx, rx) = re_smart_channel::smart_channel(
@@ -106,7 +113,7 @@ pub fn run_native_viewer_with_messages(
             let mut app = crate::App::new(
                 main_thread_token,
                 build_info,
-                &app_env,
+                app_env,
                 startup_options,
                 cc,
                 connection_registry,

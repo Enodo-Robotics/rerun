@@ -1,6 +1,8 @@
 mod chunk_decoder;
 mod player;
 
+pub use player::PlayerConfiguration;
+
 use std::collections::hash_map::Entry;
 
 use ahash::HashMap;
@@ -31,7 +33,7 @@ pub enum VideoPlayerError {
     #[error("Failed to decode video chunk: {0}")]
     DecodeChunk(String),
 
-    /// e.g. unsupported codec
+    /// Various errors that can occur during video decoding.
     #[error("Failed to decode video: {0}")]
     Decoding(#[from] re_video::DecodeError),
 
@@ -47,6 +49,25 @@ pub enum VideoPlayerError {
 
     #[error("Failed to create gpu texture from decoded video data: {0}")]
     ImageDataToTextureError(#[from] crate::resource_managers::ImageDataToTextureError),
+
+    #[error("Decoder unexpectedly exited")]
+    DecoderUnexpectedlyExited,
+}
+
+const _: () = assert!(
+    std::mem::size_of::<VideoPlayerError>() <= 64,
+    "Error type is too large. Try to reduce its size by boxing some of its variants.",
+);
+
+impl VideoPlayerError {
+    pub fn should_request_more_frames(&self) -> bool {
+        // Decoders often (not always!) recover from errors and will succeed eventually.
+        // Gotta keep trying!
+        match self {
+            Self::Decoding(err) => err.should_request_more_frames(),
+            _ => false,
+        }
+    }
 }
 
 pub type FrameDecodingResult = Result<VideoFrameTexture, VideoPlayerError>;
@@ -57,25 +78,49 @@ pub enum DecoderDelayState {
     /// The decoder is caught up with the most recent requested frame.
     UpToDate,
 
+    /// We're not up to date, but we're close enough to the newest content of a live stream that we're ok.
+    ///
+    /// The leading edge of livestreams is treated specially since we don't want to show the waiting indicator
+    /// as readily.
+    /// Furthermore, it mitigates problems with some decoders not emitting the last few frames until
+    /// we signal the end of the video (after which we have to restart the decoder).
+    ///
+    /// I.e. the video texture may be quite a bit behind, but it's better than not showing new frames.
+    /// Unlike with [`DecoderDelayState::UpToDateWithinTolerance`], we won't show a loading spinner.
+    ///
+    /// The tolerance value used for this is the sum of
+    /// [`PlayerConfiguration::tolerated_output_delay_in_num_frames`] and
+    /// [`re_video::AsyncDecoder::min_num_samples_to_enqueue_ahead`].
+    UpToDateToleratedEdgeOfLiveStream,
+
     /// The decoder is caught up within a certain tolerance.
     ///
     /// I.e. the video texture is not the most recently requested frame, but it's quite close.
+    ///
+    /// The tolerance value used for this is [`PlayerConfiguration::tolerated_output_delay_in_num_frames`].
     UpToDateWithinTolerance,
 
     /// The decoder is catching up after a long seek.
     ///
     /// The video texture is no longer updated until the decoder has caught up.
     /// This state will only be left after reaching [`DecoderDelayState::UpToDate`] again.
+    ///
+    /// The tolerance value used for this is [`PlayerConfiguration::tolerated_output_delay_in_num_frames`].
     Behind,
 }
 
 impl DecoderDelayState {
     /// Whether a user of a video player should keep requesting a more up to date video frame even
     /// if the requested time has not changed.
-    pub fn should_rerequest_frame(&self) -> bool {
+    pub fn should_request_more_frames(&self) -> bool {
         match self {
             Self::UpToDate => false,
-            Self::UpToDateWithinTolerance | Self::Behind => true,
+
+            // Everything that isn't up-to-date means that we have to request more frames
+            // since the frame that is displayed right now is the one that was requested.
+            Self::UpToDateWithinTolerance
+            | Self::Behind
+            | Self::UpToDateToleratedEdgeOfLiveStream => true,
         }
     }
 }
@@ -108,12 +153,32 @@ pub struct VideoFrameTexture {
 
 pub struct VideoPlayerStreamId(pub u64);
 
+impl re_byte_size::SizeBytes for VideoPlayerStreamId {
+    fn heap_size_bytes(&self) -> u64 {
+        0
+    }
+
+    fn is_pod() -> bool {
+        true
+    }
+}
+
 struct PlayerEntry {
     player: player::VideoPlayer,
 
     /// Was this used last frame?
     /// This is reset every frame, and used to determine whether to purge the player.
     used_last_frame: bool,
+}
+
+impl re_byte_size::SizeBytes for PlayerEntry {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            player,
+            used_last_frame: _,
+        } = self;
+        player.heap_size_bytes()
+    }
 }
 
 /// Video data + decoder(s).
@@ -124,6 +189,20 @@ pub struct Video {
     video_description: re_video::VideoDataDescription,
     players: Mutex<HashMap<VideoPlayerStreamId, PlayerEntry>>,
     decode_settings: DecodeSettings,
+}
+
+impl re_byte_size::SizeBytes for Video {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            debug_name,
+            video_description,
+            players,
+            decode_settings: _,
+        } = self;
+        debug_name.heap_size_bytes()
+            + video_description.heap_size_bytes()
+            + players.lock().heap_size_bytes()
+    }
 }
 
 impl Drop for Video {

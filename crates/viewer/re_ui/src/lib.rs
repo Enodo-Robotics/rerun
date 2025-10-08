@@ -1,5 +1,7 @@
 //! Rerun GUI theme and helpers, built around [`egui`](https://www.egui.rs/).
 
+#![warn(clippy::iter_over_hash_type)] //  TODO(#6198): enable everywhere
+
 pub mod alert;
 mod color_table;
 mod command;
@@ -26,14 +28,15 @@ use egui::NumExt as _;
 
 pub use self::{
     command::{UICommand, UICommandSender},
-    command_palette::CommandPalette,
+    command_palette::{CommandPalette, CommandPaletteAction, CommandPaletteUrl},
     context_ext::ContextExt,
-    design_tokens::DesignTokens,
+    design_tokens::{DesignTokens, TableStyle},
     help::*,
     hot_reload_design_tokens::design_tokens_of,
     icon_text::*,
     icons::Icon,
     markdown_utils::*,
+    notifications::Link,
     section_collapsing_header::SectionCollapsingHeader,
     syntax_highlighting::SyntaxHighlighting,
     time_drag_value::TimeDragValue,
@@ -41,19 +44,16 @@ pub use self::{
     ui_layout::UiLayout,
 };
 
-#[cfg(feature = "arrow")]
-mod arrow_ui;
 pub mod menu;
 pub mod time;
-
-#[cfg(feature = "arrow")]
-pub use self::arrow_ui::arrow_ui;
 
 // ---------------------------------------------------------------------------
 
 /// If true, we fill the entire window, except for the close/maximize/minimize buttons in the top-left.
 /// See <https://github.com/emilk/egui/pull/2049>
-pub const FULLSIZE_CONTENT: bool = cfg!(target_os = "macos");
+pub fn fullsize_content(os: egui::os::OperatingSystem) -> bool {
+    os == egui::os::OperatingSystem::Mac
+}
 
 /// If true, we hide the native window decoration
 /// (the top bar with app title, close button etc),
@@ -62,7 +62,9 @@ pub const CUSTOM_WINDOW_DECORATIONS: bool = false; // !FULLSIZE_CONTENT; // TODO
 
 /// If true, we show the native window decorations/chrome with the
 /// close/maximize/minimize buttons and app title.
-pub const NATIVE_WINDOW_BAR: bool = !FULLSIZE_CONTENT && !CUSTOM_WINDOW_DECORATIONS;
+pub fn native_window_bar(os: egui::os::OperatingSystem) -> bool {
+    !fullsize_content(os) && !CUSTOM_WINDOW_DECORATIONS
+}
 
 // ----------------------------------------------------------------------------
 
@@ -95,6 +97,28 @@ pub fn design_tokens_of_visuals(visuals: &egui::Visuals) -> &'static DesignToken
         design_tokens_of(egui::Theme::Dark)
     } else {
         design_tokens_of(egui::Theme::Light)
+    }
+}
+
+pub trait HasDesignTokens {
+    fn tokens(&self) -> &'static DesignTokens;
+}
+
+impl HasDesignTokens for egui::Context {
+    fn tokens(&self) -> &'static DesignTokens {
+        design_tokens_of(self.theme())
+    }
+}
+
+impl HasDesignTokens for egui::Style {
+    fn tokens(&self) -> &'static DesignTokens {
+        design_tokens_of_visuals(&self.visuals)
+    }
+}
+
+impl HasDesignTokens for egui::Visuals {
+    fn tokens(&self) -> &'static DesignTokens {
+        design_tokens_of_visuals(self)
     }
 }
 
@@ -167,11 +191,11 @@ fn format_with_decimals_in_range(
         // to round-trip the number.
         for decimals in min_decimals..max_decimals {
             let text = format_with_decimals(value, decimals);
-            if let Some(parsed) = re_format::parse_f64(&text) {
-                if egui::emath::almost_equal(parsed as f32, value as f32, epsilon) {
-                    // Enough precision to show the value accurately - good!
-                    return text;
-                }
+            if let Some(parsed) = re_format::parse_f64(&text)
+                && egui::emath::almost_equal(parsed as f32, value as f32, epsilon)
+            {
+                // Enough precision to show the value accurately - good!
+                return text;
             }
         }
         // The value has more precision than we expected.

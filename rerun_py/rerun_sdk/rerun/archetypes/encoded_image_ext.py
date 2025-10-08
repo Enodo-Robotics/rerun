@@ -3,13 +3,13 @@ from __future__ import annotations
 import pathlib
 from typing import IO, TYPE_CHECKING, Any, Union
 
-import numpy as np
-import numpy.typing as npt
-
-from .. import datatypes
 from ..error_utils import catch_and_log_exceptions
 
 if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+
+    from .. import datatypes
     from ..datatypes import Float32Like
 
     ImageLike = Union[
@@ -64,7 +64,7 @@ class EncodedImageExt:
             If the media type cannot be guessed, the viewer won't be able to render the asset.
 
         opacity:
-            Opacity of the image, useful for layering several images.
+            Opacity of the image, useful for layering several media.
             Defaults to 1.0 (fully opaque).
 
         draw_order:

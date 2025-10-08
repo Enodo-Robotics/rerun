@@ -23,12 +23,12 @@ cd rerun
 
 Now install the `pixi` package manager: <https://github.com/prefix-dev/pixi?tab=readme-ov-file#installation>
 
-Make sure `cargo --version` prints `1.85.0` once you are done.
+Make sure `cargo --version` prints `1.88.0` once you are done.
 
 If you are using an Apple-silicon Mac (M1, M2), make sure `rustc -vV` outputs `host: aarch64-apple-darwin`. If not, this should fix it:
 
 ```sh
-rustup set default-host aarch64-apple-darwin && rustup install 1.85.0
+rustup set default-host aarch64-apple-darwin && rustup install 1.88.0
 ```
 
 ## Git-lfs
@@ -45,6 +45,27 @@ See the many resources available online more details.
 You can ensure that everything is correctly installed by running `git lfs ls-files` from the repository root.
 It should list some test snapshot files.
 
+### Useful git-lfs commands
+```
+# Install git-lfs in the repo (installs git hooks)
+git lfs install
+
+# Move a file to git lfs
+git lfs track "path/to/file/or/pattern" # OR manually edit .gitattributes
+git add --renormalize . # Moves already added files to lfs (according to .gitattributes)
+
+# Move a file from lfs to regular git
+git lfs untrack "path/to/file/or/pattern" # OR manually edit .gitattributes
+git add --renormalize . # Moves already added files to regular git (according to .gitattributes)
+
+# Push to a contributor remote (see https://github.com/cli/cli/discussions/8794#discussioncomment-8695076)
+git push --no-verify
+
+# Push git lfs files to contributor remote:
+git push origin $(git branch --show-current) && git push --no-verify && git push origin --delete $(git branch --show-current)
+```
+
+See also [this section in the egui docs](https://github.com/emilk/egui/blob/eceb0b11c9f8e68d96c33c1f4af0335b3e66376d/CONTRIBUTING.md#working-with-git-lfs).
 
 ## Validating your environment
 You can validate your environment is set up correctly by running:

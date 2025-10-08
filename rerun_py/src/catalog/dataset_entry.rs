@@ -1,35 +1,40 @@
 use std::sync::Arc;
 
-use arrow::array::{RecordBatch, StringArray};
+use arrow::array::{RecordBatch, RecordBatchOptions, StringArray};
 use arrow::datatypes::{Field, Schema as ArrowSchema};
 use arrow::pyarrow::PyArrowType;
+use pyo3::Bound;
+use pyo3::types::PyAnyMethods as _;
 use pyo3::{
-    Py, PyAny, PyRef, PyRefMut, PyResult, Python, exceptions::PyRuntimeError, pyclass, pymethods,
+    Py, PyAny, PyRef, PyRefMut, PyResult, Python, exceptions::PyRuntimeError,
+    exceptions::PyValueError, pyclass, pymethods,
 };
 use tokio_stream::StreamExt as _;
 use tracing::instrument;
 
 use re_chunk_store::{ChunkStore, ChunkStoreHandle};
 use re_datafusion::{PartitionTableProvider, SearchResultsTableProvider};
-use re_grpc_client::get_chunks_response_to_chunk_and_partition_id;
 use re_log_encoding::codec::wire::encoder::Encode as _;
 use re_log_types::{StoreId, StoreInfo, StoreKind, StoreSource};
-use re_protos::catalog::v1alpha1::ext::DatasetDetails;
-use re_protos::common::v1alpha1::IfDuplicateBehavior;
-use re_protos::common::v1alpha1::ext::DatasetHandle;
-use re_protos::frontend::v1alpha1::{CreateIndexRequest, GetChunksRequest, SearchDatasetRequest};
-use re_protos::manifest_registry::v1alpha1::ext::IndexProperties;
-use re_protos::manifest_registry::v1alpha1::{
+use re_protos::cloud::v1alpha1::ext::DatasetDetails;
+use re_protos::cloud::v1alpha1::ext::IndexProperties;
+use re_protos::cloud::v1alpha1::{CreateIndexRequest, GetChunksRequest, SearchDatasetRequest};
+use re_protos::cloud::v1alpha1::{
     IndexConfig, IndexQueryProperties, InvertedIndexQuery, VectorIndexQuery, index_query_properties,
 };
+use re_protos::common::v1alpha1::IfDuplicateBehavior;
+use re_protos::common::v1alpha1::ext::DatasetHandle;
+use re_protos::headers::RerunHeadersInjectorExt as _;
+use re_redap_client::get_chunks_response_to_chunk_and_partition_id;
 use re_sorbet::{SorbetColumnDescriptors, TimeColumnSelector};
+
+use crate::dataframe::{AnyComponentColumn, PyIndexColumnSelector, PyRecording, PySchema};
+use crate::utils::wait_for_future;
 
 use super::{
     PyDataFusionTable, PyEntry, PyEntryId, VectorDistanceMetricLike, VectorLike,
     dataframe_query::PyDataframeQueryView, task::PyTasks, to_py_err,
 };
-use crate::dataframe::{AnyComponentColumn, PyIndexColumnSelector, PyRecording, PySchema};
-use crate::utils::wait_for_future;
 
 /// A dataset entry in the catalog.
 #[pyclass(name = "DatasetEntry", extends=PyEntry)]
@@ -161,20 +166,87 @@ impl PyDatasetEntry {
     }
 
     /// Return the URL for the given partition.
-    fn partition_url(self_: PyRef<'_, Self>, partition_id: String) -> String {
+    ///
+    /// Parameters
+    /// ----------
+    /// partition_id: str
+    ///     The ID of the partition to get the URL for.
+    ///
+    /// timeline: str | None
+    ///     The name of the timeline to display.
+    ///
+    /// start: int | datetime | None
+    ///     The start time for the partition.
+    ///     Integer for ticks, or datetime/nanoseconds for timestamps.
+    ///
+    /// end: int | datetime | None
+    ///     The end time for the partition.
+    ///     Integer for ticks, or datetime/nanoseconds for timestamps.
+    ///
+    /// Examples
+    /// --------
+    /// # With ticks
+    /// >>> start_tick, end_time = 0, 10
+    /// >>> dataset.partition_url("some_id", "log_tick", start_tick, end_time)
+    ///
+    /// # With timestamps
+    /// >>> start_time, end_time = datetime.now() - timedelta(seconds=4), datetime.now()
+    /// >>> dataset.partition_url("some_id", "real_time", start_time, end_time)
+    ///
+    /// Returns
+    /// -------
+    /// str
+    ///     The URL for the given partition.
+    ///
+    #[pyo3(signature = (partition_id, timeline=None, start=None, end=None))]
+    fn partition_url(
+        self_: PyRef<'_, Self>,
+        py: Python<'_>,
+        partition_id: String,
+        timeline: Option<&str>,
+        start: Option<Bound<'_, PyAny>>,
+        end: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
         let super_ = self_.as_super();
         let connection = super_.client.borrow(self_.py()).connection().clone();
 
-        re_uri::DatasetDataUri {
+        // Timeline with default name and no limits overrides blueprint timeline settings
+        // only override if timeline is selected
+        if timeline.is_none() && (start.is_some() || end.is_some()) {
+            return Err(PyValueError::new_err(
+                "If `start` or `end` is specified, `timeline` must also be specified.",
+            ));
+        }
+
+        // Convert Python objects to i64
+        let start_i64 = start
+            .as_ref()
+            .map(|s| py_object_to_i64(py, s))
+            .transpose()?;
+        let end_i64 = end.as_ref().map(|e| py_object_to_i64(py, e)).transpose()?;
+
+        let time_range: Option<re_uri::TimeSelection> =
+            timeline.map(|name| re_uri::TimeSelection {
+                timeline: re_chunk::Timeline::new_timestamp(name),
+                range: re_log_types::AbsoluteTimeRange::new(
+                    start_i64
+                        .map(|start| start.try_into().expect("start time must be valid"))
+                        .unwrap_or(re_log_types::NonMinI64::MIN),
+                    end_i64
+                        .map(|end| end.try_into().expect("end time must be valid"))
+                        .unwrap_or(re_log_types::NonMinI64::MAX),
+                ),
+            });
+        Ok(re_uri::DatasetPartitionUri {
             origin: connection.origin().clone(),
             dataset_id: super_.details.id.id,
             partition_id,
 
-            //TODO(ab): add support for these two
-            time_range: None,
+            time_range,
+            //TODO(ab): add support for this
             fragment: Default::default(),
         }
-        .to_string()
+        .to_string())
     }
 
     /// Register a RRD URI to the dataset and wait for completion.
@@ -185,7 +257,10 @@ impl PyDatasetEntry {
     /// Parameters
     /// ----------
     /// recording_uri: str
-    ///     The URI of the RRD to register
+    ///     The URI of the RRD to register.
+    ///
+    /// recording_layer: str
+    ///     The layer to which the recording will be registered to.
     ///
     /// timeout_secs: int
     ///     The timeout after which this method raises a `TimeoutError` if the task is not completed.
@@ -194,11 +269,14 @@ impl PyDatasetEntry {
     /// -------
     /// partition_id: str
     ///     The partition ID of the registered RRD.
-    ///
-    #[pyo3(signature = (recording_uri, timeout_secs = 60))]
+    #[pyo3(signature = (recording_uri, *, recording_layer = "base".to_owned(), timeout_secs = 60))]
+    #[pyo3(
+        text_signature = "(self, /, recording_uri, *, recording_layer = 'base', timeout_secs = 60)"
+    )]
     fn register(
         self_: PyRef<'_, Self>,
         recording_uri: String,
+        recording_layer: String,
         timeout_secs: u64,
     ) -> PyResult<String> {
         let register_timeout = std::time::Duration::from_secs(timeout_secs);
@@ -206,8 +284,12 @@ impl PyDatasetEntry {
         let connection = super_.client.borrow(self_.py()).connection().clone();
         let dataset_id = super_.details.id;
 
-        let mut results =
-            connection.register_with_dataset(self_.py(), dataset_id, vec![recording_uri])?;
+        let mut results = connection.register_with_dataset(
+            self_.py(),
+            dataset_id,
+            vec![recording_uri],
+            vec![recording_layer],
+        )?;
 
         let Some(task_descriptor) = results.pop() else {
             return Err(PyRuntimeError::new_err(
@@ -228,15 +310,37 @@ impl PyDatasetEntry {
     /// Parameters
     /// ----------
     /// recording_uris: list[str]
-    ///     The URIs of the RRDs to register
+    ///     The URIs of the RRDs to register.
+    ///
+    /// recording_layers: list[str]
+    ///     The layers to which the recordings will be registered to:
+    ///     * When empty, this defaults to `["base"]`.
+    ///     * If longer than `recording_uris`, `recording_layers` will be truncated.
+    ///     * If shorter than `recording_uris`, `recording_layers` will be extended by repeating its last value.
+    ///       I.e. an empty `recording_layers` will result in `"base"` begin repeated `len(recording_layers)` times.
     #[allow(rustdoc::broken_intra_doc_links)]
+    #[pyo3(signature = (
+        recording_uris,
+        *,
+        recording_layers = vec![],
+    ))]
+    #[pyo3(text_signature = "(self, /, recording_uris, *, recording_layers = [])")]
     // TODO(ab): it might be useful to return partition ids directly since we have them
-    fn register_batch(self_: PyRef<'_, Self>, recording_uris: Vec<String>) -> PyResult<PyTasks> {
+    fn register_batch(
+        self_: PyRef<'_, Self>,
+        recording_uris: Vec<String>,
+        recording_layers: Vec<String>,
+    ) -> PyResult<PyTasks> {
         let super_ = self_.as_super();
         let connection = super_.client.borrow(self_.py()).connection().clone();
         let dataset_id = super_.details.id;
 
-        let results = connection.register_with_dataset(self_.py(), dataset_id, recording_uris)?;
+        let results = connection.register_with_dataset(
+            self_.py(),
+            dataset_id,
+            recording_uris,
+            recording_layers,
+        )?;
 
         Ok(PyTasks::new(
             super_.client.clone_ref(self_.py()),
@@ -275,9 +379,8 @@ impl PyDatasetEntry {
                 .map_err(to_py_err)?
                 .into_inner();
 
-            let store_id = StoreId::from_string(StoreKind::Recording, partition_id.clone());
+            let store_id = StoreId::new(StoreKind::Recording, dataset_name, partition_id.clone());
             let store_info = StoreInfo {
-                application_id: dataset_name.into(),
                 store_id: store_id.clone(),
                 cloned_from: None,
                 store_source: StoreSource::Unknown,
@@ -353,10 +456,6 @@ impl PyDatasetEntry {
     ///     Whether to include columns that are semantically empty, by default `False`.
     ///
     ///     Semantically empty columns are components that are `null` or empty `[]` for every row in the recording.
-    /// include_indicator_columns : bool, optional
-    ///     Whether to include indicator columns, by default `False`.
-    ///
-    ///     Indicator columns are components used to represent the presence of an archetype within an entity.
     /// include_tombstone_columns : bool, optional
     ///     Whether to include tombstone columns, by default `False`.
     ///
@@ -367,13 +466,11 @@ impl PyDatasetEntry {
     /// -------
     /// DataframeQueryView
     ///     The view of the dataset.
-    #[expect(clippy::fn_params_excessive_bools)]
     #[pyo3(signature = (
         *,
         index,
         contents,
         include_semantically_empty_columns = false,
-        include_indicator_columns = false,
         include_tombstone_columns = false,
     ))]
     fn dataframe_query_view(
@@ -381,7 +478,6 @@ impl PyDatasetEntry {
         index: Option<String>,
         contents: Py<PyAny>,
         include_semantically_empty_columns: bool,
-        include_indicator_columns: bool,
         include_tombstone_columns: bool,
         py: Python<'_>,
     ) -> PyResult<PyDataframeQueryView> {
@@ -390,7 +486,6 @@ impl PyDatasetEntry {
             index,
             contents,
             include_semantically_empty_columns,
-            include_indicator_columns,
             include_tombstone_columns,
             py,
         )
@@ -426,9 +521,8 @@ impl PyDatasetEntry {
         };
 
         let request = CreateIndexRequest {
-            dataset_id: Some(dataset_id.into()),
-
             partition_ids: vec![],
+            partition_layers: vec![],
 
             config: Some(IndexConfig {
                 properties: Some(properties.into()),
@@ -444,7 +538,11 @@ impl PyDatasetEntry {
                 .client()
                 .await?
                 .inner()
-                .create_index(request)
+                .create_index(
+                    tonic::Request::new(request)
+                        .with_entry_id(dataset_id)
+                        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
+                )
                 .await
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
@@ -479,7 +577,7 @@ impl PyDatasetEntry {
         let schema = Self::fetch_schema(&self_)?;
         let component_descriptor = schema.column_for_selector(column)?;
 
-        let distance_metric: re_protos::manifest_registry::v1alpha1::VectorDistanceMetric =
+        let distance_metric: re_protos::cloud::v1alpha1::VectorDistanceMetric =
             distance_metric.try_into()?;
 
         let properties = IndexProperties::VectorIvfPq {
@@ -489,9 +587,8 @@ impl PyDatasetEntry {
         };
 
         let request = CreateIndexRequest {
-            dataset_id: Some(dataset_id.into()),
-
             partition_ids: vec![],
+            partition_layers: vec![],
 
             config: Some(IndexConfig {
                 properties: Some(properties.into()),
@@ -507,7 +604,11 @@ impl PyDatasetEntry {
                 .client()
                 .await?
                 .inner()
-                .create_index(request)
+                .create_index(
+                    tonic::Request::new(request)
+                        .with_entry_id(dataset_id)
+                        .map_err(|err| PyRuntimeError::new_err(err.to_string()))?,
+                )
                 .await
                 .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
@@ -534,18 +635,18 @@ impl PyDatasetEntry {
             Default::default(),
         );
 
-        let query = RecordBatch::try_new(
+        let query = RecordBatch::try_new_with_options(
             Arc::new(schema),
             vec![Arc::new(StringArray::from_iter_values([query]))],
+            &RecordBatchOptions::default().with_row_count(Some(1)),
         )
         .map_err(|err| PyRuntimeError::new_err(err.to_string()))?;
 
         let request = SearchDatasetRequest {
-            dataset_id: Some(dataset_id.into()),
             column: Some(component_descriptor.0.into()),
             properties: Some(IndexQueryProperties {
                 props: Some(
-                    re_protos::manifest_registry::v1alpha1::index_query_properties::Props::Inverted(
+                    re_protos::cloud::v1alpha1::index_query_properties::Props::Inverted(
                         InvertedIndexQuery {},
                     ),
                 ),
@@ -559,7 +660,7 @@ impl PyDatasetEntry {
         };
 
         let provider = wait_for_future(self_.py(), async move {
-            SearchResultsTableProvider::new(connection.client().await?, request)
+            SearchResultsTableProvider::new(connection.client().await?, dataset_id, request)
                 .map_err(to_py_err)?
                 .into_provider()
                 .await
@@ -594,7 +695,6 @@ impl PyDatasetEntry {
         let query = query.to_record_batch()?;
 
         let request = SearchDatasetRequest {
-            dataset_id: Some(dataset_id.into()),
             column: Some(component_descriptor.0.into()),
             properties: Some(IndexQueryProperties {
                 props: Some(index_query_properties::Props::Vector(VectorIndexQuery {
@@ -610,7 +710,7 @@ impl PyDatasetEntry {
         };
 
         let provider = wait_for_future(self_.py(), async move {
-            SearchResultsTableProvider::new(connection.client().await?, request)
+            SearchResultsTableProvider::new(connection.client().await?, dataset_id, request)
                 .map_err(to_py_err)?
                 .into_provider()
                 .await
@@ -626,6 +726,55 @@ impl PyDatasetEntry {
             provider,
         })
     }
+
+    /// Perform maintenance tasks on the datasets.
+    #[pyo3(signature = (
+            optimize_indexes = false,
+            retrain_indexes = false,
+            compact_fragments = false,
+            cleanup_before = None,
+            unsafe_allow_recent_cleanup = false,
+    ))]
+    #[instrument(skip_all, err)]
+    #[allow(clippy::fn_params_excessive_bools)]
+    fn do_maintenance(
+        self_: PyRef<'_, Self>,
+        py: Python<'_>,
+        optimize_indexes: bool,
+        retrain_indexes: bool,
+        compact_fragments: bool,
+        cleanup_before: Option<Bound<'_, PyAny>>,
+        unsafe_allow_recent_cleanup: bool,
+    ) -> PyResult<()> {
+        let super_ = self_.as_super();
+        let connection = super_.client.borrow(self_.py()).connection().clone();
+        let dataset_id = super_.details.id;
+
+        let cleanup_before_nanos = cleanup_before
+            .as_ref()
+            .map(|s| py_object_to_i64(py, s))
+            .transpose()?;
+
+        let cleanup_before = cleanup_before_nanos
+            .map(|ts_nanos| {
+                jiff::Timestamp::from_nanosecond(ts_nanos as i128).map_err(|err| {
+                    PyRuntimeError::new_err(format!(
+                        "failed converting cleanup_before timestamp: {err}"
+                    ))
+                })
+            })
+            .transpose()?;
+
+        connection.do_maintenance(
+            py,
+            dataset_id,
+            optimize_indexes,
+            retrain_indexes,
+            compact_fragments,
+            cleanup_before,
+            unsafe_allow_recent_cleanup,
+        )
+    }
 }
 
 impl PyDatasetEntry {
@@ -639,12 +788,49 @@ impl PyDatasetEntry {
     }
 
     pub fn fetch_schema(self_: &PyRef<'_, Self>) -> PyResult<PySchema> {
-        Self::fetch_arrow_schema(self_).and_then(|arrow_schema| {
-            let schema =
-                SorbetColumnDescriptors::try_from_arrow_fields(None, arrow_schema.fields())
-                    .map_err(to_py_err)?;
+        let arrow_schema = Self::fetch_arrow_schema(self_)?;
+        let schema = SorbetColumnDescriptors::try_from_arrow_fields(None, arrow_schema.fields())
+            .map_err(to_py_err)?;
 
-            Ok(PySchema { schema })
-        })
+        Ok(PySchema { schema })
     }
+}
+
+/// Helper function to convert a Python object to i64.
+///
+/// This function attempts to convert various Python types to i64, including:
+/// - Python int
+/// - numpy datetime64 (via timestamp conversion)
+/// - Any object with an `__int__` method
+/// - Any object that can be converted to int via Python's `int()` function
+fn py_object_to_i64(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<i64> {
+    // First try direct extraction as i64
+    if let Ok(value) = obj.extract::<i64>() {
+        return Ok(value);
+    }
+
+    // Try to extract as Python int first
+    if let Ok(value) = obj.extract::<i32>() {
+        return Ok(value as i64);
+    }
+
+    // Check if it's a numpy datetime64 and try to get timestamp
+    if obj.hasattr("timestamp")? {
+        let timestamp = obj.call_method0("timestamp")?;
+        if let Ok(ts_float) = timestamp.extract::<f64>() {
+            // Convert seconds to nanoseconds (assuming timestamp is in seconds)
+            return Ok((ts_float * 1_000_000_000.0) as i64);
+        }
+    }
+
+    // Try calling __int__ method if it exists
+    if obj.hasattr("__int__")? {
+        let int_result = obj.call_method0("__int__")?;
+        return int_result.extract::<i64>();
+    }
+
+    // As a last resort, try to convert via Python's int() function
+    let int_builtin = py.import("builtins")?.getattr("int")?;
+    let converted = int_builtin.call1((obj,))?;
+    converted.extract::<i64>()
 }

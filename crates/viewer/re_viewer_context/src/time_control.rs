@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use re_chunk::TimelineName;
-use re_entity_db::{TimeCounts, TimesPerTimeline};
+use re_entity_db::{TimeCounts, TimelineStats, TimesPerTimeline};
 use re_log_types::{
-    Duration, ResolvedTimeRange, ResolvedTimeRangeF, TimeInt, TimeReal, TimeType, Timeline,
+    AbsoluteTimeRange, AbsoluteTimeRangeF, Duration, TimeCell, TimeInt, TimeReal, TimeType,
+    Timeline,
 };
 
 use crate::NeedsRepaint;
@@ -22,8 +23,8 @@ pub struct TimeView {
     pub time_spanned: f64,
 }
 
-impl From<ResolvedTimeRange> for TimeView {
-    fn from(value: ResolvedTimeRange) -> Self {
+impl From<AbsoluteTimeRange> for TimeView {
+    fn from(value: AbsoluteTimeRange) -> Self {
         Self {
             min: value.min().into(),
             time_spanned: value.abs_length() as f64,
@@ -42,7 +43,7 @@ struct TimeState {
 
     /// Selected time range, if any.
     #[serde(default)]
-    loop_selection: Option<ResolvedTimeRangeF>,
+    loop_selection: Option<AbsoluteTimeRangeF>,
 
     /// The time range we are currently zoomed in on.
     ///
@@ -165,7 +166,7 @@ pub struct TimeControl {
     ///
     /// This is used during UI interactions. E.g. to show visual history range that's highlighted.
     #[serde(skip)]
-    pub highlighted_range: Option<ResolvedTimeRange>,
+    pub highlighted_range: Option<AbsoluteTimeRange>,
 }
 
 impl Default for TimeControl {
@@ -291,10 +292,10 @@ impl TimeControl {
                     }
                 }
 
-                if let Some(loop_range) = loop_range {
-                    if loop_range.max < state.current.time {
-                        state.current.time = loop_range.min; // loop!
-                    }
+                if let Some(loop_range) = loop_range
+                    && loop_range.max < state.current.time
+                {
+                    state.current.time = loop_range.min; // loop!
                 }
 
                 NeedsRepaint::Yes
@@ -470,11 +471,11 @@ impl TimeControl {
     }
 
     pub fn restart(&mut self, times_per_timeline: &TimesPerTimeline) {
-        if let Some(stats) = times_per_timeline.get(self.timeline.name()) {
-            if let Some(state) = self.states.get_mut(self.timeline.name()) {
-                state.current.time = min(&stats.per_time).into();
-                self.following = false;
-            }
+        if let Some(stats) = times_per_timeline.get(self.timeline.name())
+            && let Some(state) = self.states.get_mut(self.timeline.name())
+        {
+            state.current.time = min(&stats.per_time).into();
+            self.following = false;
         }
     }
 
@@ -506,15 +507,14 @@ impl TimeControl {
             // the beginning in play mode.
 
             // Start from beginning if we are at the end:
-            if let Some(stats) = times_per_timeline.get(self.timeline.name()) {
-                if let Some(state) = self.states.get_mut(self.timeline.name()) {
-                    if max(&stats.per_time) <= state.current.time {
-                        state.current.time = min(&stats.per_time).into();
-                        self.playing = true;
-                        self.following = false;
-                        return;
-                    }
-                }
+            if let Some(stats) = times_per_timeline.get(self.timeline.name())
+                && let Some(state) = self.states.get_mut(self.timeline.name())
+                && max(&stats.per_time) <= state.current.time
+            {
+                state.current.time = min(&stats.per_time).into();
+                self.playing = true;
+                self.following = false;
+                return;
             }
 
             if self.following {
@@ -564,7 +564,8 @@ impl TimeControl {
         if matches!(self.timeline, ActiveTimeline::Auto(_))
             || !is_timeline_valid(self.timeline(), times_per_timeline)
         {
-            self.timeline = ActiveTimeline::Auto(default_timeline(times_per_timeline.timelines()));
+            self.timeline =
+                ActiveTimeline::Auto(default_timeline(times_per_timeline.timelines_with_stats()));
         }
     }
 
@@ -590,6 +591,12 @@ impl TimeControl {
             .map(|state| state.current.time)
     }
 
+    /// The current time & timeline.
+    pub fn time_cell(&self) -> Option<TimeCell> {
+        self.time()
+            .map(|t| TimeCell::new(self.timeline().typ(), t.floor().as_i64()))
+    }
+
     /// The current time.
     pub fn time_int(&self) -> Option<TimeInt> {
         self.time().map(|t| t.floor())
@@ -608,8 +615,8 @@ impl TimeControl {
         )
     }
 
-    /// The current loop range, iff selection looping is turned on.
-    pub fn active_loop_selection(&self) -> Option<ResolvedTimeRangeF> {
+    /// The current loop range, if selection looping is turned on.
+    pub fn active_loop_selection(&self) -> Option<AbsoluteTimeRangeF> {
         if self.looping == Looping::Selection {
             self.states
                 .get(self.timeline().name())?
@@ -621,7 +628,7 @@ impl TimeControl {
     }
 
     /// The full range of times for the current timeline
-    pub fn full_range(&self, times_per_timeline: &TimesPerTimeline) -> Option<ResolvedTimeRange> {
+    pub fn full_range(&self, times_per_timeline: &TimesPerTimeline) -> Option<AbsoluteTimeRange> {
         times_per_timeline
             .get(self.timeline().name())
             .map(|stats| range(&stats.per_time))
@@ -630,7 +637,7 @@ impl TimeControl {
     /// The selected slice of time that is called the "loop selection".
     ///
     /// This can still return `Some` even if looping is currently off.
-    pub fn loop_selection(&self) -> Option<ResolvedTimeRangeF> {
+    pub fn loop_selection(&self) -> Option<AbsoluteTimeRangeF> {
         self.states
             .get(self.timeline().name())?
             .current
@@ -638,7 +645,7 @@ impl TimeControl {
     }
 
     /// Set the current loop selection without enabling looping.
-    pub fn set_loop_selection(&mut self, selection: ResolvedTimeRangeF) {
+    pub fn set_loop_selection(&mut self, selection: AbsoluteTimeRangeF) {
         self.states
             .entry(*self.timeline.name())
             .or_insert_with(|| TimeStateEntry::new(selection.min))
@@ -730,27 +737,30 @@ fn max(values: &TimeCounts) -> TimeInt {
     *values.keys().next_back().unwrap_or(&TimeInt::MIN)
 }
 
-fn range(values: &TimeCounts) -> ResolvedTimeRange {
-    ResolvedTimeRange::new(min(values), max(values))
+fn range(values: &TimeCounts) -> AbsoluteTimeRange {
+    AbsoluteTimeRange::new(min(values), max(values))
 }
 
-/// Pick the timeline that should be the default, prioritizing user-defined ones.
-fn default_timeline<'a>(timelines: impl IntoIterator<Item = &'a Timeline>) -> Timeline {
-    let mut found_log_tick = false;
-    let mut found_log_time = false;
+/// Pick the timeline that should be the default, by number of elements and prioritizing user-defined ones.
+fn default_timeline<'a>(timelines: impl IntoIterator<Item = &'a TimelineStats>) -> Timeline {
+    re_tracing::profile_function!();
 
-    for timeline in timelines {
-        if timeline == &Timeline::log_tick() {
-            found_log_tick = true;
-        } else if timeline == &Timeline::log_time() {
-            found_log_time = true;
-        } else {
-            return *timeline;
+    // Helper function that acts as a tie-breaker.
+    fn timeline_priority(timeline: &Timeline) -> u8 {
+        match timeline {
+            t if *t == Timeline::log_tick() => 0, // lowest priority
+            t if *t == Timeline::log_time() => 1, // medium priority
+            _ => 2,                               // user-defined, highest priority
         }
     }
+    let most_events = timelines.into_iter().max_by(|a, b| {
+        a.num_events()
+            .cmp(&b.num_events())
+            .then_with(|| timeline_priority(&a.timeline).cmp(&timeline_priority(&b.timeline)))
+    });
 
-    if found_log_tick && !found_log_time {
-        Timeline::log_tick()
+    if let Some(most_events) = most_events {
+        most_events.timeline
     } else {
         Timeline::log_time()
     }
@@ -781,7 +791,7 @@ fn step_back_time(time: TimeReal, values: &TimeCounts) -> TimeInt {
 fn step_fwd_time_looped(
     time: TimeReal,
     values: &TimeCounts,
-    loop_range: &ResolvedTimeRangeF,
+    loop_range: &AbsoluteTimeRangeF,
 ) -> TimeReal {
     if time < loop_range.min || loop_range.max <= time {
         loop_range.min
@@ -801,7 +811,7 @@ fn step_fwd_time_looped(
 fn step_back_time_looped(
     time: TimeReal,
     values: &TimeCounts,
-    loop_range: &ResolvedTimeRangeF,
+    loop_range: &AbsoluteTimeRangeF,
 ) -> TimeReal {
     if time <= loop_range.min || loop_range.max < time {
         loop_range.max
@@ -817,50 +827,62 @@ fn step_back_time_looped(
 mod tests {
     use super::*;
 
+    fn with_events(timeline: Timeline, num: u64) -> TimelineStats {
+        TimelineStats {
+            timeline,
+            // Dummy `TimeInt` because were only interested in the counts.
+            per_time: std::iter::once((TimeInt::ZERO, num)).collect(),
+            total_count: num,
+        }
+    }
+
     #[test]
     fn test_default_timeline() {
-        let log_time = Timeline::log_time();
-        let log_tick = Timeline::log_tick();
-        let custom_timeline0 = Timeline::new("my_timeline0", TimeType::DurationNs);
-        let custom_timeline1 = Timeline::new("my_timeline1", TimeType::DurationNs);
+        let log_time = with_events(Timeline::log_time(), 42);
+        let log_tick = with_events(Timeline::log_tick(), 42);
+        let custom_timeline0 = with_events(Timeline::new("my_timeline0", TimeType::DurationNs), 42);
+        let custom_timeline1 = with_events(Timeline::new("my_timeline1", TimeType::DurationNs), 43);
 
-        assert_eq!(default_timeline([]), log_time);
-        assert_eq!(default_timeline([&log_tick]), log_tick);
-        assert_eq!(default_timeline([&log_time]), log_time);
-        assert_eq!(default_timeline([&log_time, &log_tick]), log_time);
+        assert_eq!(default_timeline([]), log_time.timeline);
+        assert_eq!(default_timeline([&log_tick]), log_tick.timeline);
+        assert_eq!(default_timeline([&log_time]), log_time.timeline);
+        assert_eq!(default_timeline([&log_time, &log_tick]), log_time.timeline);
         assert_eq!(
             default_timeline([&log_time, &log_tick, &custom_timeline0]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
         assert_eq!(
             default_timeline([&custom_timeline0, &log_time, &log_tick]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
         assert_eq!(
             default_timeline([&log_time, &custom_timeline0, &log_tick]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
         assert_eq!(
             default_timeline([&custom_timeline0, &log_time]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
         assert_eq!(
             default_timeline([&custom_timeline0, &log_tick]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
         assert_eq!(
             default_timeline([&log_time, &custom_timeline0]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
         assert_eq!(
             default_timeline([&log_tick, &custom_timeline0]),
-            custom_timeline0
+            custom_timeline0.timeline
         );
 
         assert_eq!(
             default_timeline([&custom_timeline0, &custom_timeline1]),
-            custom_timeline0
+            custom_timeline1.timeline
         );
-        assert_eq!(default_timeline([&custom_timeline0]), custom_timeline0);
+        assert_eq!(
+            default_timeline([&custom_timeline0]),
+            custom_timeline0.timeline
+        );
     }
 }

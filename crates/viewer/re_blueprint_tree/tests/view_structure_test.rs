@@ -1,10 +1,10 @@
-//! Snapshot testTest suite dedicated to snapshot the way we present various kinds of blueprint tree structures
+//! Snapshot test suite dedicated to snapshot the way we present various kinds of blueprint tree structures
 //! with a focus on various view contents and filter configuration.
 
 #![cfg(feature = "testing")]
 
 use egui::Vec2;
-use egui_kittest::{SnapshotError, SnapshotOptions};
+use egui_kittest::{OsThreshold, SnapshotError, SnapshotOptions};
 use itertools::Itertools as _;
 
 use re_blueprint_tree::BlueprintTree;
@@ -12,11 +12,11 @@ use re_blueprint_tree::data::BlueprintTreeData;
 use re_chunk_store::RowId;
 use re_chunk_store::external::re_chunk::ChunkBuilder;
 use re_log_types::{EntityPath, Timeline, build_frame_nr};
+use re_test_context::TestContext;
+use re_test_viewport::TestContextExt as _;
 use re_types::archetypes::Points3D;
 use re_ui::filter_widget::FilterState;
-use re_viewer_context::test_context::TestContext;
 use re_viewer_context::{RecommendedView, ViewClass as _, ViewId};
-use re_viewport::test_context_ext::TestContextExt as _;
 use re_viewport_blueprint::{ViewBlueprint, ViewportBlueprint};
 
 const VIEW_ID: &str = "this-is-a-view-id";
@@ -210,12 +210,18 @@ fn run_test_case(test_case: &TestCase, filter_query: Option<&str>) -> Result<(),
 
     harness.run();
 
-    let options = SnapshotOptions::default().output_path(format!(
-        "tests/snapshots/view_structure_test/{}",
-        filter_query
-            .map(|query| format!("query-{}", query.replace(' ', ",").replace('/', "_")))
-            .unwrap_or("no-query".to_owned())
-    ));
+    let options = SnapshotOptions::new()
+        .output_path(format!(
+            "tests/snapshots/view_structure_test/{}",
+            filter_query
+                .map(|query| format!("query-{}", query.replace(' ', ",").replace('/', "_")))
+                .unwrap_or("no-query".to_owned())
+        ))
+        // @wumpf's Windows machine needs a bit of a higher threshold to pass this test due to discrepancies in text rendering.
+        // (Software Rasterizer on CI seems fine with the default).
+        .threshold(OsThreshold::new(SnapshotOptions::default().threshold).windows(0.8))
+        .failed_pixel_count_threshold(OsThreshold::new(0).windows(15));
+
     harness.try_snapshot_options(test_case.name, &options)
 }
 

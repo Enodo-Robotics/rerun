@@ -10,7 +10,6 @@
 #include "../components/draw_order.hpp"
 #include "../components/media_type.hpp"
 #include "../components/opacity.hpp"
-#include "../indicator_component.hpp"
 #include "../result.hpp"
 
 #include <cstdint>
@@ -61,7 +60,7 @@ namespace rerun::archetypes {
         /// If it cannot guess, it won't be able to render the asset.
         std::optional<ComponentBatch> media_type;
 
-        /// Opacity of the image, useful for layering several images.
+        /// Opacity of the image, useful for layering several media.
         ///
         /// Defaults to 1.0 (fully opaque).
         std::optional<ComponentBatch> opacity;
@@ -72,11 +71,6 @@ namespace rerun::archetypes {
         std::optional<ComponentBatch> draw_order;
 
       public:
-        static constexpr const char IndicatorComponentType[] =
-            "rerun.components.EncodedImageIndicator";
-
-        /// Indicator component, used to identify the archetype when converting to a list of components.
-        using IndicatorComponent = rerun::components::IndicatorComponent<IndicatorComponentType>;
         /// The name of the archetype as used in `ComponentDescriptor`s.
         static constexpr const char ArchetypeName[] = "rerun.archetypes.EncodedImage";
 
@@ -177,7 +171,7 @@ namespace rerun::archetypes {
             return std::move(*this);
         }
 
-        /// Opacity of the image, useful for layering several images.
+        /// Opacity of the image, useful for layering several media.
         ///
         /// Defaults to 1.0 (fully opaque).
         EncodedImage with_opacity(const rerun::components::Opacity& _opacity) && {

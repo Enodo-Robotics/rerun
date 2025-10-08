@@ -128,28 +128,13 @@ class Archetype(AsComponents):
     def archetype_short_name(cls) -> str:
         return cls.archetype().rsplit(".", 1)[-1]
 
-    @classmethod
-    def indicator(cls) -> DescribedComponentBatch:
-        """
-        Creates a `DescribedComponentBatch` out of the associated indicator component.
-
-        This allows for associating arbitrary indicator components with arbitrary data.
-        """
-        from ._log import IndicatorComponentBatch
-
-        indicator = IndicatorComponentBatch(cls.archetype())
-        return DescribedComponentBatch(indicator, indicator.component_descriptor())
-
-    def as_component_batches(self, *, include_indicators: bool = True) -> list[DescribedComponentBatch]:
+    def as_component_batches(self) -> list[DescribedComponentBatch]:
         """
         Return all the component batches that make up the archetype.
 
         Part of the `AsComponents` logging interface.
         """
-        if include_indicators:
-            batches = [self.indicator()]
-        else:
-            batches = []
+        batches = []
 
         for fld in fields(type(self)):
             if "component" in fld.metadata:
@@ -326,23 +311,15 @@ class ComponentColumn:
         self.descriptor = descriptor
         self.component_batch = component_batch
 
-        if "Indicator" in descriptor.component:
-            if lengths is None:
-                # Indicator component, no lengths -> zero-sized batches by default
-                self.lengths = np.zeros(len(component_batch.as_arrow_array()), dtype=np.int32)
-            else:
-                # Normal component, lengths specified -> respect outer length, but enforce zero-sized batches still
-                self.lengths = np.zeros(len(np.array(lengths)), dtype=np.int32)
+        if lengths is None:
+            # Normal component, no lengths -> unit-sized batches by default
+            self.lengths = np.ones(len(component_batch.as_arrow_array()), dtype=np.int32)
         else:
-            if lengths is None:
-                # Normal component, no lengths -> unit-sized batches by default
-                self.lengths = np.ones(len(component_batch.as_arrow_array()), dtype=np.int32)
-            else:
-                # Normal component, lengths specified -> follow instructions
-                lengths = np.array(lengths)
-                if lengths.ndim != 1:
-                    raise ValueError("Lengths must be a 1D array.")
-                self.lengths = lengths.flatten().astype(np.int32)
+            # Normal component, lengths specified -> follow instructions
+            lengths = np.array(lengths)
+            if lengths.ndim != 1:
+                raise ValueError("Lengths must be a 1D array.")
+            self.lengths = lengths.flatten().astype(np.int32)
 
     def component_descriptor(self) -> ComponentDescriptor:
         """

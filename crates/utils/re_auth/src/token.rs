@@ -7,9 +7,15 @@ pub enum TokenError {
 }
 
 /// A JWT token that is used to authenticate the client.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Jwt(pub(crate) String);
+
+impl Jwt {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl TryFrom<String> for Jwt {
     type Error = TokenError;

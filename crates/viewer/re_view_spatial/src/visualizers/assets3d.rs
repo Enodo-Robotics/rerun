@@ -1,5 +1,3 @@
-use arrow::buffer::ScalarBuffer;
-
 use re_chunk_store::RowId;
 use re_log_types::{Instance, TimeInt, hash::Hash64};
 use re_renderer::renderer::GpuMeshInstance;
@@ -32,7 +30,7 @@ struct Asset3DComponentData<'a> {
     index: (TimeInt, RowId),
     query_result_hash: Hash64,
 
-    blob: ScalarBuffer<u8>,
+    blob: re_types::datatypes::Blob,
     media_type: Option<ArrowString>,
     albedo_factor: Option<&'a AlbedoFactor>,
 }
@@ -97,14 +95,14 @@ impl Asset3DVisualizer {
                             picking_layer_id: re_view::picking_layer_id_from_instance_path_hash(
                                 picking_instance_hash,
                             ),
-                            additive_tint: re_renderer::Color32::TRANSPARENT,
+                            additive_tint: re_renderer::Color32::BLACK,
                         }
                     }));
 
                     self.0
                         .add_bounding_box(entity_path.hash(), mesh.bbox(), world_from_pose);
                 }
-            };
+            }
         }
     }
 }
@@ -167,7 +165,7 @@ impl VisualizerSystem for Asset3DVisualizer {
                     blobs.first().map(|blob| Asset3DComponentData {
                         index,
                         query_result_hash,
-                        blob: blob.clone(),
+                        blob: blob.clone().into(),
                         media_type: media_types
                             .and_then(|media_types| media_types.first().cloned()),
                         albedo_factor: albedo_factors

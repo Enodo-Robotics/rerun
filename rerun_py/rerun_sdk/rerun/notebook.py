@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Callable, Literal
 
-import numpy as np
 import pyarrow
 import pyarrow.ipc as ipc
 from pyarrow import RecordBatch
@@ -15,17 +13,27 @@ from .error_utils import deprecated_param
 from .time import to_nanos, to_nanos_since_epoch
 
 if TYPE_CHECKING:
+    from datetime import datetime, timedelta
+
+    import numpy as np
+
     from .blueprint import BlueprintLike
 
 
 from rerun import bindings
-from rerun_notebook import ErrorWidget as _ErrorWidget, Viewer as _Viewer
+from rerun.error_utils import RerunMissingDependencyError
 
 from .event import (
     ViewerEvent as ViewerEvent,
     _viewer_event_from_json_str,
 )
 from .recording_stream import RecordingStream, get_data_recording
+
+HAS_NOTEBOOK = True
+try:
+    from rerun_notebook import ErrorWidget as _ErrorWidget, Viewer as _Viewer
+except ModuleNotFoundError:
+    HAS_NOTEBOOK = False
 
 _default_width = 640
 _default_height = 480
@@ -66,8 +74,8 @@ class Viewer:
     def __init__(
         self,
         *,
-        width: int | None = None,
-        height: int | None = None,
+        width: int | Literal["auto"] | None = None,
+        height: int | Literal["auto"] | None = None,
         url: str | None = None,
         blueprint: BlueprintLike | None = None,
         recording: RecordingStream | None = None,
@@ -83,10 +91,14 @@ class Viewer:
 
         Parameters
         ----------
-        width : int
-            The width of the viewer in pixels.
-        height : int
-            The height of the viewer in pixels.
+        width:
+            The width of the viewer in pixels, or "auto".
+
+            When set to "auto", scales to 100% of the notebook cell's width.
+        height:
+            The height of the viewer in pixels, or "auto".
+
+            When set to "auto", scales using a 16:9 aspect ratio with `width`.
         url:
             Optional URL passed to the viewer for displaying its contents.
         recording:
@@ -107,7 +119,8 @@ class Viewer:
             Defaults to `False` if `url` is provided, and `True` otherwise.
 
         """
-
+        if not HAS_NOTEBOOK:
+            raise RerunMissingDependencyError("rerun-notebook", "notebook")
         self._error_widget = _ErrorWidget()
         self._viewer = _Viewer(
             width=width if width is not None else _default_width,
@@ -359,6 +372,42 @@ class Viewer:
         """
 
         self._viewer.set_active_recording(recording_id)
+
+    def open_url(
+        self,
+        url: str,
+    ) -> None:
+        """
+        Open a URL in the viewer.
+
+        Parameters
+        ----------
+        url: str
+            The URL to open.
+
+            Must point to a valid data source.
+
+        """
+
+        self._viewer.open_url(url)
+
+    def close_url(
+        self,
+        url: str,
+    ) -> None:
+        """
+        Close an open URL in the viewer.
+
+        Does nothing if the URL is not open.
+
+        Parameters
+        ----------
+        url: str
+            The URL to close.
+
+        """
+
+        self._viewer.close_url(url)
 
     @deprecated_param("nanoseconds", use_instead="duration or timestamp", since="0.23.0")
     @deprecated_param("seconds", use_instead="duration or timestamp", since="0.23.0")

@@ -43,7 +43,10 @@ pub(crate) fn view_space_origin_widget_ui(
             let mut space_origin_string = view.space_origin.to_string();
             let output = egui::TextEdit::singleline(&mut space_origin_string).show(ui);
 
-            if output.response.gained_focus() {
+            // Delay opening the popup until the click is finished, otherwise the popup will close
+            // immediately because the popup thinks this is a clicked_elsewhere.
+            let click_finished = ui.ctx().input(|i| !i.pointer.any_down());
+            if output.response.has_focus() && click_finished {
                 state = SpaceOriginEditState::Editing(EditState {
                     origin_string: space_origin_string,
                     entered_editing: true,
@@ -136,14 +139,13 @@ fn view_space_origin_widget_editing_ui(
 
     let enter_key_hit = ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-    if let Some(selected_suggestion) = state.selected_suggestion {
-        if enter_key_hit {
-            if let Some(suggestion) = filtered_view_suggestions.get(selected_suggestion) {
-                let origin = &suggestion.space_origin;
-                state.origin_string = origin.to_string();
-                control_flow = ControlFlow::Break(Some(origin.clone()));
-            }
-        }
+    if let Some(selected_suggestion) = state.selected_suggestion
+        && enter_key_hit
+        && let Some(suggestion) = filtered_view_suggestions.get(selected_suggestion)
+    {
+        let origin = &suggestion.space_origin;
+        state.origin_string = origin.to_string();
+        control_flow = ControlFlow::Break(Some(origin.clone()));
     }
 
     //
@@ -174,7 +176,7 @@ fn view_space_origin_widget_editing_ui(
     //
 
     if output.response.has_focus() {
-        ui.memory_mut(|mem| mem.open_popup(popup_id));
+        egui::Popup::open_id(ui.ctx(), popup_id);
     }
 
     let suggestions_ui = |ui: &mut egui::Ui| {
@@ -208,11 +210,11 @@ fn view_space_origin_widget_editing_ui(
         }
     };
 
-    ui.list_item_popup(popup_id, &output.response, 4.0, suggestions_ui);
+    ui.list_item_popup(popup_id, &output.response, suggestions_ui);
 
-    if control_flow.is_continue() && !ui.memory(|mem| mem.is_popup_open(popup_id)) {
+    if control_flow.is_continue() && !egui::Popup::is_id_open(ui.ctx(), popup_id) {
         control_flow = ControlFlow::Break(None);
-    };
+    }
 
     control_flow
 }

@@ -107,9 +107,9 @@ use ::re_types_core::{DeserializationError, DeserializationResult};
 ///
 ///     // New image with Separate Y/U/V planes with 4:2:2 chroma downsampling
 ///     let mut yuv_bytes = Vec::with_capacity(256 * 256 + 128 * 256 * 2);
-///     yuv_bytes.extend(std::iter::repeat(128).take(256 * 256)); // Fixed value for Y.
+///     yuv_bytes.extend(std::iter::repeat_n(128, 256 * 256)); // Fixed value for Y.
 ///     yuv_bytes.extend((0..256).flat_map(|_y| (0..128).map(|x| x * 2))); // Gradient for U.
-///     yuv_bytes.extend((0..256).flat_map(|y| std::iter::repeat(y as u8).take(128))); // Gradient for V.
+///     yuv_bytes.extend((0..256).flat_map(|y| std::iter::repeat_n(y as u8, 128))); // Gradient for V.
 ///     rec.log(
 ///         "image_yuv422",
 ///         &rerun::Image::from_pixel_format(
@@ -139,7 +139,7 @@ pub struct Image {
     /// The format of the image.
     pub format: Option<SerializedComponentBatch>,
 
-    /// Opacity of the image, useful for layering several images.
+    /// Opacity of the image, useful for layering several media.
     ///
     /// Defaults to 1.0 (fully opaque).
     pub opacity: Option<SerializedComponentBatch>,
@@ -199,49 +199,33 @@ impl Image {
             component_type: Some("rerun.components.DrawOrder".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.ImageIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| [Image::descriptor_buffer(), Image::descriptor_format()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| [Image::descriptor_buffer(), Image::descriptor_format()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Image::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| [Image::descriptor_opacity(), Image::descriptor_draw_order()]);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| [Image::descriptor_opacity(), Image::descriptor_draw_order()]);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 4usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Image::descriptor_buffer(),
             Image::descriptor_format(),
-            Image::descriptor_indicator(),
             Image::descriptor_opacity(),
             Image::descriptor_draw_order(),
         ]
     });
 
 impl Image {
-    /// The total number of components in the archetype: 2 required, 1 recommended, 2 optional
-    pub const NUM_COMPONENTS: usize = 5usize;
+    /// The total number of components in the archetype: 2 required, 0 recommended, 2 optional
+    pub const NUM_COMPONENTS: usize = 4usize;
 }
 
-/// Indicator component for the [`Image`] [`::re_types_core::Archetype`]
-pub type ImageIndicator = ::re_types_core::GenericIndicatorComponent<Image>;
-
 impl ::re_types_core::Archetype for Image {
-    type Indicator = ImageIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Image".into()
@@ -250,14 +234,6 @@ impl ::re_types_core::Archetype for Image {
     #[inline]
     fn display_name() -> &'static str {
         "Image"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        ImageIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -315,7 +291,6 @@ impl ::re_types_core::AsComponents for Image {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.buffer.clone(),
             self.format.clone(),
             self.opacity.clone(),
@@ -406,12 +381,7 @@ impl Image {
                 .map(|draw_order| draw_order.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -432,7 +402,7 @@ impl Image {
             .or(len_opacity)
             .or(len_draw_order)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The raw image data.
@@ -475,7 +445,7 @@ impl Image {
         self
     }
 
-    /// Opacity of the image, useful for layering several images.
+    /// Opacity of the image, useful for layering several media.
     ///
     /// Defaults to 1.0 (fully opaque).
     #[inline]

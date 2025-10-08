@@ -10,7 +10,7 @@ mod tensor_stats_cache;
 mod video_asset_cache;
 mod video_stream_cache;
 
-pub use caches::{Cache, Caches};
+pub use caches::{Cache, CacheMemoryReport, CacheMemoryReportItem, Caches};
 
 // TODO(andreas): Do we _really_ have to have all these caches in `re_viewer_context`?
 // Caches are fully dynamic and registration based, so they can be added at runtime by any crate.
@@ -27,7 +27,7 @@ pub use video_stream_cache::{
 // ----
 
 fn filter_blob_removed_events(
-    events: &[re_chunk_store::ChunkStoreEvent],
+    events: &[&re_chunk_store::ChunkStoreEvent],
 ) -> ahash::HashSet<crate::StoredBlobCacheKey> {
     use re_types::Component as _;
 

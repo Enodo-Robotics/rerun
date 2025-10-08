@@ -10,7 +10,7 @@ To show an entire video, a video frame reference for each frame of the video sho
 
 See <https://rerun.io/docs/reference/video> for details of what is and isn't supported.
 
-TODO(#10422): [`archetypes.VideoFrameReference`](https://rerun.io/docs/reference/types/archetypes/video_frame_reference) does not yet work with [`archetypes.VideoStream`](https://rerun.io/docs/reference/types/archetypes/video_stream?speculative-link).
+TODO(#10422): [`archetypes.VideoFrameReference`](https://rerun.io/docs/reference/types/archetypes/video_frame_reference) does not yet work with [`archetypes.VideoStream`](https://rerun.io/docs/reference/types/archetypes/video_stream).
 
 ## Fields
 ### Required
@@ -18,6 +18,7 @@ TODO(#10422): [`archetypes.VideoFrameReference`](https://rerun.io/docs/reference
 
 ### Optional
 * `video_reference`: [`EntityPath`](../components/entity_path.md)
+* `opacity`: [`Opacity`](../components/opacity.md)
 * `draw_order`: [`DrawOrder`](../components/draw_order.md)
 
 

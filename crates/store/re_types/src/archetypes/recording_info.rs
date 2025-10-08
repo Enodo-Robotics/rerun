@@ -55,52 +55,36 @@ impl RecordingInfo {
             component_type: Some("rerun.components.Name".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.RecordingInfoIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [RecordingInfo::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             RecordingInfo::descriptor_start_time(),
             RecordingInfo::descriptor_name(),
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
-            RecordingInfo::descriptor_indicator(),
             RecordingInfo::descriptor_start_time(),
             RecordingInfo::descriptor_name(),
         ]
     });
 
 impl RecordingInfo {
-    /// The total number of components in the archetype: 0 required, 1 recommended, 2 optional
-    pub const NUM_COMPONENTS: usize = 3usize;
+    /// The total number of components in the archetype: 0 required, 0 recommended, 2 optional
+    pub const NUM_COMPONENTS: usize = 2usize;
 }
 
-/// Indicator component for the [`RecordingInfo`] [`::re_types_core::Archetype`]
-pub type RecordingInfoIndicator = ::re_types_core::GenericIndicatorComponent<RecordingInfo>;
-
 impl ::re_types_core::Archetype for RecordingInfo {
-    type Indicator = RecordingInfoIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.RecordingInfo".into()
@@ -109,14 +93,6 @@ impl ::re_types_core::Archetype for RecordingInfo {
     #[inline]
     fn display_name() -> &'static str {
         "Recording info"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        RecordingInfoIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -162,14 +138,10 @@ impl ::re_types_core::AsComponents for RecordingInfo {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [
-            Some(Self::indicator()),
-            self.start_time.clone(),
-            self.name.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [self.start_time.clone(), self.name.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -233,12 +205,7 @@ impl RecordingInfo {
                 .map(|name| name.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -252,7 +219,7 @@ impl RecordingInfo {
         let len_start_time = self.start_time.as_ref().map(|b| b.array.len());
         let len_name = self.name.as_ref().map(|b| b.array.len());
         let len = None.or(len_start_time).or(len_name).unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// When the recording started.

@@ -1,32 +1,31 @@
+use std::str::FromStr as _;
+
 use ahash::HashMap;
 use egui::{NumExt as _, Ui, text_edit::TextEditState, text_selection::LabelSelectionState};
 
 use re_chunk::TimelineName;
 use re_chunk_store::LatestAtQuery;
 use re_entity_db::EntityDb;
-use re_grpc_client::ConnectionRegistryHandle;
-use re_log_types::{LogMsg, ResolvedTimeRangeF, StoreId, TableId};
+use re_log_types::{AbsoluteTimeRangeF, LogMsg, StoreId, TableId};
 use re_redap_browser::RedapServers;
+use re_redap_client::ConnectionRegistryHandle;
 use re_smart_channel::ReceiveSet;
 use re_types::blueprint::components::PanelState;
 use re_ui::{ContextExt as _, UiExt as _};
-use re_uri::Origin;
 use re_viewer_context::{
     AppOptions, ApplicationSelectionState, AsyncRuntimeHandle, BlueprintUndoState, CommandSender,
     ComponentUiRegistry, DisplayMode, DragAndDropManager, GlobalContext, Item, PlayState,
     RecordingConfig, SelectionChange, StorageContext, StoreContext, StoreHub, SystemCommand,
     SystemCommandSender as _, TableStore, ViewClassRegistry, ViewStates, ViewerContext,
-    blueprint_timeline,
+    blueprint_timeline, open_url,
 };
 use re_viewport::ViewportUi;
 use re_viewport_blueprint::ViewportBlueprint;
 use re_viewport_blueprint::ui::add_view_or_container_modal_ui;
 
 use crate::{
-    app_blueprint::AppBlueprint,
-    event::ViewerEventDispatcher,
-    navigation::Navigation,
-    ui::{recordings_panel_ui, settings_screen_ui},
+    app::web_viewer_base_url, app_blueprint::AppBlueprint, event::ViewerEventDispatcher,
+    navigation::Navigation, ui::settings_screen_ui,
 };
 
 const WATERMARK: bool = false; // Nice for recording media material
@@ -42,6 +41,7 @@ pub struct AppState {
     pub blueprint_cfg: RecordingConfig,
 
     /// Maps blueprint id to the current undo state for it.
+    #[serde(skip)]
     pub blueprint_undo_state: HashMap<StoreId, BlueprintUndoState>,
 
     selection_panel: re_selection_panel::SelectionPanel,
@@ -59,6 +59,11 @@ pub struct AppState {
     /// Redap server catalogs and browser UI
     pub(crate) redap_servers: RedapServers,
 
+    #[serde(skip)]
+    pub(crate) open_url_modal: crate::ui::OpenUrlModal,
+    #[serde(skip)]
+    pub(crate) share_modal: crate::ui::ShareModal,
+
     /// A stack of display modes that represents tab-like navigation of the user.
     #[serde(skip)]
     pub(crate) navigation: Navigation,
@@ -71,6 +76,13 @@ pub struct AppState {
     view_states: ViewStates,
 
     /// Selection & hovering state.
+    ///
+    /// Not serialized since on startup we have to typically discard it anyways since
+    /// whatever data was selected before is no longer accessible.
+    ///
+    /// For dataplatform use-cases this can even be rather irritating:
+    /// if previously a server was selected, then starting with a URL should no longer select it.
+    #[serde(skip)]
     pub selection_state: ApplicationSelectionState,
 
     /// Item that got focused on the last frame if any.
@@ -95,6 +107,8 @@ impl Default for AppState {
             welcome_screen: Default::default(),
             datastore_ui: Default::default(),
             redap_servers: Default::default(),
+            open_url_modal: Default::default(),
+            share_modal: Default::default(),
             navigation: Default::default(),
             view_states: Default::default(),
             selection_state: Default::default(),
@@ -104,8 +118,8 @@ impl Default for AppState {
 }
 
 pub(crate) struct WelcomeScreenState {
-    /// The normal welcome screen should be hidden. Show a fallback "no data ui" instead.
-    pub hide: bool,
+    /// The normal examples screen should be hidden. Show a fallback "no data ui" instead.
+    pub hide_examples: bool,
 
     /// The opacity of the welcome screen during fade-in.
     pub opacity: f32,
@@ -124,27 +138,14 @@ impl AppState {
         &mut self.app_options
     }
 
-    pub fn add_redap_server(&self, command_sender: &CommandSender, origin: Origin) {
-        if !self.redap_servers.has_server(&origin) {
-            command_sender.send_system(SystemCommand::AddRedapServer(origin));
-        }
-    }
-
-    pub fn select_redap_entry(&self, command_sender: &CommandSender, uri: &re_uri::EntryUri) {
-        // make sure the server exists
-        self.add_redap_server(command_sender, uri.origin.clone());
-
-        command_sender.send_system(SystemCommand::SetSelection(Item::RedapEntry(uri.entry_id)));
-    }
-
     /// Currently selected section of time, if any.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn loop_selection(
         &self,
         store_context: Option<&StoreContext<'_>>,
-    ) -> Option<(TimelineName, ResolvedTimeRangeF)> {
+    ) -> Option<(TimelineName, AbsoluteTimeRangeF)> {
         let rec_id = store_context.as_ref()?.recording.store_id();
-        let rec_cfg = self.recording_configs.get(&rec_id)?;
+        let rec_cfg = self.recording_configs.get(rec_id)?;
 
         // is there an active loop selection?
         let time_ctrl = rec_cfg.time_ctrl.read();
@@ -156,6 +157,7 @@ impl AppState {
     #[expect(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
+        app_env: &crate::AppEnvironment,
         app_blueprint: &AppBlueprint<'_>,
         ui: &mut egui::Ui,
         render_ctx: &re_renderer::RenderContext,
@@ -167,7 +169,6 @@ impl AppState {
         rx_log: &ReceiveSet<LogMsg>,
         command_sender: &CommandSender,
         welcome_screen_state: &WelcomeScreenState,
-        is_history_enabled: bool,
         event_dispatcher: Option<&crate::event::ViewerEventDispatcher>,
         connection_registry: &ConnectionRegistryHandle,
         runtime: &AsyncRuntimeHandle,
@@ -175,7 +176,7 @@ impl AppState {
         re_tracing::profile_function!();
 
         // check state early, before the UI has a chance to close these popups
-        let is_any_popup_open = ui.memory(|m| m.any_popup_open());
+        let is_any_popup_open = egui::Popup::is_any_open(ui.ctx());
 
         match self.navigation.peek() {
             DisplayMode::Settings => {
@@ -242,10 +243,10 @@ impl AppState {
 
                 let selection_change = selection_state.on_frame_start(
                     |item| {
-                        if let Item::StoreId(store_id) = item {
-                            if store_id.is_empty_recording() {
-                                return false;
-                            }
+                        if let Item::StoreId(store_id) = item
+                            && store_id.is_empty_recording()
+                        {
+                            return false;
                         }
 
                         viewport_ui.blueprint.is_item_valid(storage_context, item)
@@ -253,14 +254,14 @@ impl AppState {
                     Some(Item::StoreId(store_context.recording.store_id().clone())),
                 );
 
-                if let SelectionChange::SelectionChanged(selection) = selection_change {
-                    if let Some(event_dispatcher) = event_dispatcher {
-                        event_dispatcher.on_selection_change(
-                            store_context.recording,
-                            selection,
-                            &viewport_ui.blueprint,
-                        );
-                    }
+                if let SelectionChange::SelectionChanged(selection) = selection_change
+                    && let Some(event_dispatcher) = event_dispatcher
+                {
+                    event_dispatcher.on_selection_change(
+                        store_context.recording,
+                        selection,
+                        &viewport_ui.blueprint,
+                    );
                 }
 
                 // The root container cannot be dragged.
@@ -270,9 +271,9 @@ impl AppState {
                 let recording = store_context.recording;
 
                 let maybe_visualizable_entities_per_visualizer = view_class_registry
-                    .maybe_visualizable_entities_for_visualizer_systems(&recording.store_id());
+                    .maybe_visualizable_entities_for_visualizer_systems(recording.store_id());
                 let indicated_entities_per_visualizer =
-                    view_class_registry.indicated_entities_per_visualizer(&recording.store_id());
+                    view_class_registry.indicated_entities_per_visualizer(recording.store_id());
 
                 // Execute the queries for every `View`
                 let mut query_results = {
@@ -313,7 +314,7 @@ impl AppState {
                 let display_mode = self.navigation.peek();
                 let ctx = ViewerContext {
                     global_context: GlobalContext {
-                        is_test: false,
+                        is_test: app_env.is_test(),
 
                         app_options,
                         reflection,
@@ -394,7 +395,7 @@ impl AppState {
                 // it's just a bunch of refs so not really that big of a deal in practice.
                 let ctx = ViewerContext {
                     global_context: GlobalContext {
-                        is_test: false,
+                        is_test: app_env.is_test(),
 
                         app_options,
                         reflection,
@@ -565,19 +566,19 @@ impl AppState {
                                         .default_height(210.0)
                                         .max_height(ui.available_height() - min_height_each)
                                         .show_inside(ui, |ui| {
-                                            recordings_panel_ui(
+                                            re_recording_panel::recordings_panel_ui(
                                                 &ctx,
                                                 ui,
-                                                welcome_screen_state,
                                                 redap_servers,
+                                                welcome_screen_state.hide_examples,
                                             );
                                         });
                                 } else {
-                                    recordings_panel_ui(
+                                    re_recording_panel::recordings_panel_ui(
                                         &ctx,
                                         ui,
-                                        welcome_screen_state,
                                         redap_servers,
+                                        welcome_screen_state.hide_examples,
                                     );
                                 }
 
@@ -589,7 +590,7 @@ impl AppState {
                             }
 
                             DisplayMode::ChunkStoreBrowser | DisplayMode::Settings => {} // handled above
-                        };
+                        }
                     },
                 );
 
@@ -620,7 +621,9 @@ impl AppState {
                             DisplayMode::LocalRecordings => {
                                 // If we are here and the "default" app id is selected,
                                 // we should instead switch to the welcome screen.
-                                if ctx.store_context.app_id == StoreHub::welcome_screen_app_id() {
+                                if ctx.store_context.application_id()
+                                    == &StoreHub::welcome_screen_app_id()
+                                {
                                     ctx.command_sender().send_system(
                                         SystemCommand::ChangeDisplayMode(DisplayMode::RedapServer(
                                             re_redap_browser::EXAMPLES_ORIGIN.clone(),
@@ -631,17 +634,12 @@ impl AppState {
                             }
 
                             DisplayMode::RedapEntry(entry) => {
-                                redap_servers.entry_ui(&ctx, ui, *entry);
+                                redap_servers.entry_ui(&ctx, ui, entry.entry_id);
                             }
 
                             DisplayMode::RedapServer(origin) => {
                                 if origin == &*re_redap_browser::EXAMPLES_ORIGIN {
-                                    welcome_screen.ui(
-                                        ui,
-                                        command_sender,
-                                        welcome_screen_state,
-                                        is_history_enabled,
-                                    );
+                                    welcome_screen.ui(ui, welcome_screen_state, &rx_log.sources());
                                 } else {
                                     redap_servers.server_central_panel_ui(&ctx, ui, origin);
                                 }
@@ -658,6 +656,9 @@ impl AppState {
                 viewport_ui.save_to_blueprint_store(&ctx);
 
                 self.redap_servers.modals_ui(&ctx.global_context, ui);
+                self.open_url_modal.ui(ui);
+                self.share_modal
+                    .ui(&ctx, ui, web_viewer_base_url().as_ref());
             }
         }
 
@@ -670,11 +671,11 @@ impl AppState {
         }
 
         // This must run after any ui code, or other code that tells egui to open an url:
-        check_for_clicked_hyperlinks(ui.ctx(), command_sender, &self.selection_state);
+        check_for_clicked_hyperlinks(ui.ctx(), command_sender);
 
         // Deselect on ESC. Must happen after all other UI code to let them capture ESC if needed.
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) && !is_any_popup_open {
-            self.selection_state.clear_selection();
+            command_sender.send_system(SystemCommand::clear_selection());
         }
 
         // If there's no text edit or label selected, and the user triggers a copy command, copy a description of the current selection.
@@ -694,7 +695,6 @@ impl AppState {
         self.focused_item = None;
     }
 
-    #[cfg(target_arch = "wasm32")] // Only used in Wasm
     pub fn recording_config(&self, rec_id: &StoreId) -> Option<&RecordingConfig> {
         self.recording_configs.get(rec_id)
     }
@@ -863,40 +863,27 @@ pub(crate) fn recording_config_entry<'cfgs>(
         .or_insert_with(|| new_recording_config(entity_db))
 }
 
-/// We allow linking to entities and components via hyperlinks,
-/// e.g. in embedded markdown. We also have a custom `rerun://` scheme to be handled by the viewer.
-///
-/// Detect and handle that here.
+/// Handles all kind of links that can be opened within the viewer.
 ///
 /// Must run after any ui code, or other code that tells egui to open an url.
 ///
 /// See [`re_ui::UiExt::re_hyperlink`] for displaying hyperlinks in the UI.
-fn check_for_clicked_hyperlinks(
-    egui_ctx: &egui::Context,
-    command_sender: &CommandSender,
-    selection_state: &ApplicationSelectionState,
-) {
-    let recording_scheme = "recording://";
-
-    let mut recording_path = None;
+fn check_for_clicked_hyperlinks(egui_ctx: &egui::Context, command_sender: &CommandSender) {
+    let follow_if_http = false;
 
     egui_ctx.output_mut(|o| {
         o.commands.retain_mut(|command| {
             if let egui::OutputCommand::OpenUrl(open_url) = command {
-                if let Ok(uri) = open_url.url.parse::<re_uri::RedapUri>() {
-                    command_sender.send_system(SystemCommand::LoadDataSource(
-                        re_data_source::DataSource::RerunGrpcStream {
-                            uri,
-                            select_when_loaded: !open_url.new_tab,
-                        },
-                    ));
+                if let Ok(url) = open_url::ViewerOpenUrl::from_str(&open_url.url) {
+                    let select_redap_source_when_loaded = !open_url.new_tab;
+                    url.open(
+                        egui_ctx,
+                        follow_if_http,
+                        select_redap_source_when_loaded,
+                        command_sender,
+                    );
 
-                    // NOTE: we do NOT change the display mode here.
-                    // Instead we rely on `select_when_loaded` to trigger the selection… once the data is loaded.
-
-                    return false;
-                } else if let Some(path_str) = open_url.url.strip_prefix(recording_scheme) {
-                    recording_path = Some(path_str.to_owned());
+                    // We handled the URL, therefore egui shouldn't do anything anymore with it.
                     return false;
                 } else {
                     // Open all links in a new tab (https://github.com/rerun-io/rerun/issues/4105)
@@ -906,17 +893,6 @@ fn check_for_clicked_hyperlinks(
             true
         });
     });
-
-    if let Some(path) = recording_path {
-        match path.parse::<Item>() {
-            Ok(item) => {
-                selection_state.set_selection(item);
-            }
-            Err(err) => {
-                re_log::warn!("Failed to parse entity path {path:?}: {err}");
-            }
-        }
-    }
 }
 
 pub fn default_blueprint_panel_width(screen_width: f32) -> f32 {

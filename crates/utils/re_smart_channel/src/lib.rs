@@ -17,6 +17,16 @@ pub use sender::Sender;
 
 // --- Source ---
 
+/// An error that can occur when flushing.
+#[derive(Debug, thiserror::Error)]
+pub enum FlushError {
+    #[error("Received closed before flushing completed")]
+    Closed,
+
+    #[error("Flush timed out - not all messages were sent.")]
+    Timeout,
+}
+
 /// Identifies in what context this smart channel was created, and who/what is holding its
 /// receiving end.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
@@ -29,6 +39,7 @@ pub enum SmartChannelSource {
     /// The channel was created in the context of loading an `.rrd` file over http.
     ///
     /// The `follow` flag indicates whether the viewer should open the stream in `Following` mode rather than `Playing` mode.
+    // TODO(andreas): having follow in here is a bit weird. This should be part of the link fragments instead.
     RrdHttpStream { url: String, follow: bool },
 
     /// The channel was created in the context of loading an `.rrd` file from a `postMessage`
@@ -53,7 +64,7 @@ pub enum SmartChannelSource {
 
     /// The data is streaming in directly from a Rerun Data Platform server, over gRPC.
     RedapGrpcStream {
-        uri: re_uri::DatasetDataUri,
+        uri: re_uri::DatasetPartitionUri,
 
         /// Switch to this recording once it has been loaded?
         select_when_loaded: bool,
@@ -118,6 +129,77 @@ impl SmartChannelSource {
             | Self::JsChannel { .. } => None,
         }
     }
+
+    /// Same as [`Self::redap_uri`], but strips any extra query or fragment from the uri.
+    pub fn stripped_redap_uri(&self) -> Option<RedapUri> {
+        self.redap_uri().map(|uri| match uri {
+            RedapUri::Catalog(_) | RedapUri::Entry(_) | RedapUri::Proxy(_) => uri,
+            RedapUri::DatasetData(uri) => RedapUri::DatasetData(uri.without_query_and_fragment()),
+        })
+    }
+
+    /// Loading text for sources that load data from a specific source (e.g. a file or a URL).
+    ///
+    /// Returns `None` for any source that receives data dynamically through SDK calls or similar.
+    /// For a status string that applies to all sources, see [`Self::status_string`].
+    pub fn loading_string(&self) -> Option<String> {
+        match self {
+            // We only show things we know are very-soon-to-be recordings:
+            Self::File(path) => Some(format!("Loading {}…", path.display())),
+            Self::RrdHttpStream { url, .. } => Some(format!("Loading {url}…")),
+            Self::RedapGrpcStream { uri, .. } => Some(format!("Loading {uri}…")),
+
+            Self::RrdWebEventListener
+            | Self::JsChannel { .. }
+            | Self::MessageProxy { .. }
+            | Self::Sdk
+            | Self::Stdin => {
+                // For all of these sources we're not actively loading data, but rather waiting for data to be sent.
+                // These show up in the top panel - see `top_panel.rs`.
+                None
+            }
+        }
+    }
+
+    /// Status string describing waiting or loading status for a source.
+    pub fn status_string(&self) -> String {
+        match self {
+            Self::File(path) => {
+                format!("Loading {}…", path.display())
+            }
+            Self::Stdin => "Loading stdin…".to_owned(),
+            Self::RrdHttpStream { url, .. } => {
+                format!("Waiting for data on {url}…")
+            }
+            Self::MessageProxy(uri) => {
+                format!("Waiting for data on {uri}…")
+            }
+            Self::RedapGrpcStream { uri, .. } => {
+                format!(
+                    "Waiting for data on {}…",
+                    uri.clone().without_query_and_fragment()
+                )
+            }
+            Self::RrdWebEventListener | Self::JsChannel { .. } => {
+                "Waiting for logging data…".to_owned()
+            }
+            Self::Sdk => "Waiting for logging data from SDK".to_owned(),
+        }
+    }
+
+    /// Compares two channel sources but ignores any URI fragments and other selection/state only guides
+    /// that don't affect what data is loaded.
+    pub fn is_same_ignoring_uri_fragments(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::RedapGrpcStream { uri: uri1, .. }, Self::RedapGrpcStream { uri: uri2, .. }) => {
+                uri1.clone().without_fragment() == uri2.clone().without_fragment()
+            }
+            (Self::RrdHttpStream { url: url1, .. }, Self::RrdHttpStream { url: url2, .. }) => {
+                url1 == url2
+            }
+            _ => self == other,
+        }
+    }
 }
 
 /// Identifies who/what sent a particular message in a smart channel.
@@ -160,7 +242,7 @@ pub enum SmartMessageSource {
 
     /// A file on a Rerun Data Platform server, over `rerun://` gRPC interface.
     RedapGrpcStream {
-        uri: re_uri::DatasetDataUri,
+        uri: re_uri::DatasetPartitionUri,
 
         /// Switch to this recording once it has been loaded?
         select_when_loaded: bool,

@@ -59,6 +59,11 @@ pub struct VideoStream {
     /// See [`components::VideoCodec`][crate::components::VideoCodec] for codec specific requirements.
     pub sample: Option<SerializedComponentBatch>,
 
+    /// Opacity of the video stream, useful for layering several media.
+    ///
+    /// Defaults to 1.0 (fully opaque).
+    pub opacity: Option<SerializedComponentBatch>,
+
     /// An optional floating point value that specifies the 2D drawing order.
     ///
     /// Objects with higher values are drawn on top of those with lower values.
@@ -91,6 +96,18 @@ impl VideoStream {
         }
     }
 
+    /// Returns the [`ComponentDescriptor`] for [`Self::opacity`].
+    ///
+    /// The corresponding component is [`crate::components::Opacity`].
+    #[inline]
+    pub fn descriptor_opacity() -> ComponentDescriptor {
+        ComponentDescriptor {
+            archetype: Some("rerun.archetypes.VideoStream".into()),
+            component: "VideoStream:opacity".into(),
+            component_type: Some("rerun.components.Opacity".into()),
+        }
+    }
+
     /// Returns the [`ComponentDescriptor`] for [`Self::draw_order`].
     ///
     /// The corresponding component is [`crate::components::DrawOrder`].
@@ -102,53 +119,38 @@ impl VideoStream {
             component_type: Some("rerun.components.DrawOrder".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.VideoStreamIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [VideoStream::descriptor_codec()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [VideoStream::descriptor_codec()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [VideoStream::descriptor_sample()]);
+
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
-            VideoStream::descriptor_sample(),
-            VideoStream::descriptor_indicator(),
+            VideoStream::descriptor_opacity(),
+            VideoStream::descriptor_draw_order(),
         ]
     });
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [VideoStream::descriptor_draw_order()]);
-
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 4usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 4usize]> =
+    std::sync::LazyLock::new(|| {
         [
             VideoStream::descriptor_codec(),
             VideoStream::descriptor_sample(),
-            VideoStream::descriptor_indicator(),
+            VideoStream::descriptor_opacity(),
             VideoStream::descriptor_draw_order(),
         ]
     });
 
 impl VideoStream {
-    /// The total number of components in the archetype: 1 required, 2 recommended, 1 optional
+    /// The total number of components in the archetype: 1 required, 1 recommended, 2 optional
     pub const NUM_COMPONENTS: usize = 4usize;
 }
 
-/// Indicator component for the [`VideoStream`] [`::re_types_core::Archetype`]
-pub type VideoStreamIndicator = ::re_types_core::GenericIndicatorComponent<VideoStream>;
-
 impl ::re_types_core::Archetype for VideoStream {
-    type Indicator = VideoStreamIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.VideoStream".into()
@@ -157,14 +159,6 @@ impl ::re_types_core::Archetype for VideoStream {
     #[inline]
     fn display_name() -> &'static str {
         "Video stream"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        VideoStreamIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -200,6 +194,9 @@ impl ::re_types_core::Archetype for VideoStream {
         let sample = arrays_by_descr
             .get(&Self::descriptor_sample())
             .map(|array| SerializedComponentBatch::new(array.clone(), Self::descriptor_sample()));
+        let opacity = arrays_by_descr
+            .get(&Self::descriptor_opacity())
+            .map(|array| SerializedComponentBatch::new(array.clone(), Self::descriptor_opacity()));
         let draw_order = arrays_by_descr
             .get(&Self::descriptor_draw_order())
             .map(|array| {
@@ -208,6 +205,7 @@ impl ::re_types_core::Archetype for VideoStream {
         Ok(Self {
             codec,
             sample,
+            opacity,
             draw_order,
         })
     }
@@ -218,9 +216,9 @@ impl ::re_types_core::AsComponents for VideoStream {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.codec.clone(),
             self.sample.clone(),
+            self.opacity.clone(),
             self.draw_order.clone(),
         ]
         .into_iter()
@@ -238,6 +236,7 @@ impl VideoStream {
         Self {
             codec: try_serialize_field(Self::descriptor_codec(), [codec]),
             sample: None,
+            opacity: None,
             draw_order: None,
         }
     }
@@ -260,6 +259,10 @@ impl VideoStream {
             sample: Some(SerializedComponentBatch::new(
                 crate::components::VideoSample::arrow_empty(),
                 Self::descriptor_sample(),
+            )),
+            opacity: Some(SerializedComponentBatch::new(
+                crate::components::Opacity::arrow_empty(),
+                Self::descriptor_opacity(),
             )),
             draw_order: Some(SerializedComponentBatch::new(
                 crate::components::DrawOrder::arrow_empty(),
@@ -293,16 +296,14 @@ impl VideoStream {
             self.sample
                 .map(|sample| sample.partitioned(_lengths.clone()))
                 .transpose()?,
+            self.opacity
+                .map(|opacity| opacity.partitioned(_lengths.clone()))
+                .transpose()?,
             self.draw_order
                 .map(|draw_order| draw_order.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -315,13 +316,15 @@ impl VideoStream {
     ) -> SerializationResult<impl Iterator<Item = ::re_types_core::SerializedComponentColumn>> {
         let len_codec = self.codec.as_ref().map(|b| b.array.len());
         let len_sample = self.sample.as_ref().map(|b| b.array.len());
+        let len_opacity = self.opacity.as_ref().map(|b| b.array.len());
         let len_draw_order = self.draw_order.as_ref().map(|b| b.array.len());
         let len = None
             .or(len_codec)
             .or(len_sample)
+            .or(len_opacity)
             .or(len_draw_order)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The codec used to encode the video chunks.
@@ -385,6 +388,28 @@ impl VideoStream {
         self
     }
 
+    /// Opacity of the video stream, useful for layering several media.
+    ///
+    /// Defaults to 1.0 (fully opaque).
+    #[inline]
+    pub fn with_opacity(mut self, opacity: impl Into<crate::components::Opacity>) -> Self {
+        self.opacity = try_serialize_field(Self::descriptor_opacity(), [opacity]);
+        self
+    }
+
+    /// This method makes it possible to pack multiple [`crate::components::Opacity`] in a single component batch.
+    ///
+    /// This only makes sense when used in conjunction with [`Self::columns`]. [`Self::with_opacity`] should
+    /// be used when logging a single row's worth of data.
+    #[inline]
+    pub fn with_many_opacity(
+        mut self,
+        opacity: impl IntoIterator<Item = impl Into<crate::components::Opacity>>,
+    ) -> Self {
+        self.opacity = try_serialize_field(Self::descriptor_opacity(), opacity);
+        self
+    }
+
     /// An optional floating point value that specifies the 2D drawing order.
     ///
     /// Objects with higher values are drawn on top of those with lower values.
@@ -414,6 +439,7 @@ impl ::re_byte_size::SizeBytes for VideoStream {
     fn heap_size_bytes(&self) -> u64 {
         self.codec.heap_size_bytes()
             + self.sample.heap_size_bytes()
+            + self.opacity.heap_size_bytes()
             + self.draw_order.heap_size_bytes()
     }
 }

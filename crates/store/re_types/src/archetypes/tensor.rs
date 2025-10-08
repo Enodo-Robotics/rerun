@@ -94,47 +94,26 @@ impl Tensor {
             component_type: Some("rerun.components.ValueRange".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.TensorIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Tensor::descriptor_data()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Tensor::descriptor_data()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Tensor::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Tensor::descriptor_value_range()]);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Tensor::descriptor_value_range()]);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            Tensor::descriptor_data(),
-            Tensor::descriptor_indicator(),
-            Tensor::descriptor_value_range(),
-        ]
-    });
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| [Tensor::descriptor_data(), Tensor::descriptor_value_range()]);
 
 impl Tensor {
-    /// The total number of components in the archetype: 1 required, 1 recommended, 1 optional
-    pub const NUM_COMPONENTS: usize = 3usize;
+    /// The total number of components in the archetype: 1 required, 0 recommended, 1 optional
+    pub const NUM_COMPONENTS: usize = 2usize;
 }
 
-/// Indicator component for the [`Tensor`] [`::re_types_core::Archetype`]
-pub type TensorIndicator = ::re_types_core::GenericIndicatorComponent<Tensor>;
-
 impl ::re_types_core::Archetype for Tensor {
-    type Indicator = TensorIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Tensor".into()
@@ -143,14 +122,6 @@ impl ::re_types_core::Archetype for Tensor {
     #[inline]
     fn display_name() -> &'static str {
         "Tensor"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        TensorIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -196,14 +167,10 @@ impl ::re_types_core::AsComponents for Tensor {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [
-            Some(Self::indicator()),
-            self.data.clone(),
-            self.value_range.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [self.data.clone(), self.value_range.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -267,12 +234,7 @@ impl Tensor {
                 .map(|value_range| value_range.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -286,7 +248,7 @@ impl Tensor {
         let len_data = self.data.as_ref().map(|b| b.array.len());
         let len_value_range = self.value_range.as_ref().map(|b| b.array.len());
         let len = None.or(len_data).or(len_value_range).unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The tensor data

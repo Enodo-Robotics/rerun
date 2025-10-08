@@ -4,11 +4,11 @@ use egui::Vec2;
 
 use re_chunk_store::RowId;
 use re_log_types::TimePoint;
+use re_test_context::{TestContext, external::egui_kittest::SnapshotOptions};
+use re_test_viewport::TestContextExt as _;
 use re_types::archetypes;
 use re_view_graph::GraphView;
-use re_viewer_context::test_context::HarnessExt as _;
-use re_viewer_context::{ViewClass as _, test_context::TestContext};
-use re_viewport::test_context_ext::TestContextExt as _;
+use re_viewer_context::ViewClass as _;
 use re_viewport_blueprint::ViewBlueprint;
 
 #[test]
@@ -144,10 +144,13 @@ fn run_graph_view_and_save_snapshot(test_context: &mut TestContext, name: &str, 
         .setup_kittest_for_rendering()
         .with_size(size)
         .with_max_steps(256) // Give it some time to settle the graph.
-        .build(|ctx| {
-            test_context.run_with_single_view(ctx, view_id);
+        .build_ui(|ui| {
+            test_context.run_with_single_view(ui, view_id);
         });
 
     harness.run();
-    harness.snapshot_with_broken_pixels(name, 4);
+    harness.snapshot_options(
+        name,
+        &SnapshotOptions::new().failed_pixel_count_threshold(4),
+    );
 }

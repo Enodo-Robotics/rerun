@@ -162,52 +162,31 @@ impl AssetVideo {
             component_type: Some("rerun.components.MediaType".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.AssetVideoIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [AssetVideo::descriptor_blob()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [AssetVideo::descriptor_blob()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            AssetVideo::descriptor_media_type(),
-            AssetVideo::descriptor_indicator(),
-        ]
-    });
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [AssetVideo::descriptor_media_type()]);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             AssetVideo::descriptor_blob(),
             AssetVideo::descriptor_media_type(),
-            AssetVideo::descriptor_indicator(),
         ]
     });
 
 impl AssetVideo {
-    /// The total number of components in the archetype: 1 required, 2 recommended, 0 optional
-    pub const NUM_COMPONENTS: usize = 3usize;
+    /// The total number of components in the archetype: 1 required, 1 recommended, 0 optional
+    pub const NUM_COMPONENTS: usize = 2usize;
 }
 
-/// Indicator component for the [`AssetVideo`] [`::re_types_core::Archetype`]
-pub type AssetVideoIndicator = ::re_types_core::GenericIndicatorComponent<AssetVideo>;
-
 impl ::re_types_core::Archetype for AssetVideo {
-    type Indicator = AssetVideoIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.AssetVideo".into()
@@ -216,14 +195,6 @@ impl ::re_types_core::Archetype for AssetVideo {
     #[inline]
     fn display_name() -> &'static str {
         "Asset video"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        AssetVideoIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -269,14 +240,10 @@ impl ::re_types_core::AsComponents for AssetVideo {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [
-            Some(Self::indicator()),
-            self.blob.clone(),
-            self.media_type.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [self.blob.clone(), self.media_type.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -340,12 +307,7 @@ impl AssetVideo {
                 .map(|media_type| media_type.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -359,7 +321,7 @@ impl AssetVideo {
         let len_blob = self.blob.as_ref().map(|b| b.array.len());
         let len_media_type = self.media_type.as_ref().map(|b| b.array.len());
         let len = None.or(len_blob).or(len_media_type).unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The asset's bytes.

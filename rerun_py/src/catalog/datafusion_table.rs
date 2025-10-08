@@ -5,6 +5,7 @@ use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::PyAnyMethods as _;
 use pyo3::types::PyCapsule;
 use pyo3::{Bound, Py, PyAny, PyRef, PyResult, Python, pyclass, pymethods};
+use tracing::instrument;
 
 use crate::catalog::PyCatalogClientInternal;
 use crate::utils::get_tokio_runtime;
@@ -52,6 +53,19 @@ impl PyDataFusionTable {
         let df = ctx.call_method1("table", (name.clone(),))?;
 
         Ok(df)
+    }
+
+    /// Convert this table to a [`pyarrow.RecordBatchReader`][].
+    #[instrument(skip_all)]
+    fn to_arrow_reader<'py>(
+        self_: PyRef<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let df = Self::df(self_)?;
+
+        py.import("pyarrow")?
+            .getattr("RecordBatchReader")?
+            .call_method1("from_stream", (df,))
     }
 
     /// Name of this table.

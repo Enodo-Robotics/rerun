@@ -265,6 +265,7 @@ fn import_mesh(
         // https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#_material_pbrmetallicroughness_basecolorfactor
         let albedo_factor = {
             let [r, g, b, a] = pbr_material.base_color_factor();
+            #[expect(clippy::disallowed_methods)] // This is not a hard-coded color.
             crate::Rgba::from_rgba_unmultiplied(r, g, b, a)
         };
 
@@ -279,6 +280,8 @@ fn import_mesh(
         return Err(GltfImportError::NoTrianglePrimitives { mesh_name });
     }
 
+    let bbox = macaw::BoundingBox::from_points(vertex_positions.iter().copied());
+
     let mesh = CpuMesh {
         label: mesh.name().into(),
         triangle_indices,
@@ -287,6 +290,7 @@ fn import_mesh(
         vertex_normals,
         vertex_texcoords,
         materials,
+        bbox,
     };
 
     mesh.sanity_check()?;
@@ -325,12 +329,12 @@ fn gather_instances_recursive(
         gather_instances_recursive(instances, &child, &transform, meshes);
     }
 
-    if let Some(mesh) = node.mesh() {
-        if let Some(mesh_key) = meshes.get(&mesh.index()) {
-            instances.push(CpuMeshInstance {
-                mesh: *mesh_key,
-                world_from_mesh: transform,
-            });
-        }
+    if let Some(mesh) = node.mesh()
+        && let Some(mesh_key) = meshes.get(&mesh.index())
+    {
+        instances.push(CpuMeshInstance {
+            mesh: *mesh_key,
+            world_from_mesh: transform,
+        });
     }
 }

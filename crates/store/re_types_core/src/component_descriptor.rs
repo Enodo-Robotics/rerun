@@ -85,12 +85,6 @@ impl ComponentDescriptor {
         self.sanity_check();
         self.component.as_str()
     }
-
-    /// Is this an indicator component for an archetype?
-    // TODO(#8129): Remove when we remove tagging.
-    pub fn is_indicator_component(&self) -> bool {
-        self.component.ends_with("Indicator")
-    }
 }
 
 impl re_byte_size::SizeBytes for ComponentDescriptor {
@@ -184,7 +178,7 @@ impl From<arrow::datatypes::Field> for ComponentDescriptor {
                 .map(Into::into),
             component: md.get(FIELD_METADATA_KEY_COMPONENT).cloned().unwrap_or_else(|| {
                 re_log::debug!("Missing metadata field {FIELD_METADATA_KEY_COMPONENT}, resorting to field name: {}", field.name());
-                field.name().to_string()
+                field.name().clone()
             }).into(),
             component_type: md
                 .get(FIELD_METADATA_KEY_COMPONENT_TYPE)

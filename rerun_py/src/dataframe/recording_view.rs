@@ -8,7 +8,7 @@ use pyo3::types::PyTuple;
 use pyo3::{Bound, PyRef, PyResult, Python, pyclass, pymethods};
 
 use re_chunk_store::{QueryExpression, SparseFillStrategy};
-use re_log_types::ResolvedTimeRange;
+use re_log_types::AbsoluteTimeRange;
 use re_sorbet::{ColumnDescriptor, ColumnSelector};
 
 use super::{
@@ -223,9 +223,6 @@ impl PyRecordingView {
         // This is a static selection, so we clear the filtered index
         query_expression.filtered_index = None;
 
-        //TODO(#10327): this should not be necessary!
-        query_expression.sparse_fill_strategy = SparseFillStrategy::LatestAtGlobal;
-
         // If no columns provided, select all static columns
         let static_columns = Self::select_args(args, columns)
             .transpose()
@@ -291,14 +288,8 @@ impl PyRecordingView {
     ///
     ///     The original view will not be modified.
     fn filter_range_sequence(&self, start: i64, end: i64) -> PyResult<Self> {
+        // TODO(emilk): it would be nice to add a check here that the index type is indeed a sequence.
         match self.query_expression.filtered_index.as_ref() {
-            // TODO(#9084): do we need this check? If so, how can we accomplish it?
-            // Some(filtered_index) if filtered_index.typ() != TimeType::Sequence => {
-            //     return Err(PyValueError::new_err(format!(
-            //         "Index for {} is not a sequence.",
-            //         filtered_index.name()
-            //     )));
-            // }
             Some(_) => {}
 
             None => {
@@ -330,7 +321,7 @@ impl PyRecordingView {
             re_chunk::TimeInt::MAX
         };
 
-        let resolved = ResolvedTimeRange::new(start, end);
+        let resolved = AbsoluteTimeRange::new(start, end);
 
         let mut query_expression = self.query_expression.clone();
         query_expression.filtered_index_range = Some(resolved);
@@ -362,14 +353,8 @@ impl PyRecordingView {
     ///
     ///     The original view will not be modified.
     fn filter_range_secs(&self, start: f64, end: f64) -> PyResult<Self> {
+        // TODO(emilk): it would be nice to add a check here that the index type is indeed temporal.
         match self.query_expression.filtered_index.as_ref() {
-            // TODO(#9084): do we need this check? If so, how can we accomplish it?
-            // Some(filtered_index) if filtered_index.typ() != TimeType::Time => {
-            //     return Err(PyValueError::new_err(format!(
-            //         "Index for {} is not temporal.",
-            //         filtered_index.name()
-            //     )));
-            // }
             Some(_) => {}
 
             None => {
@@ -382,7 +367,7 @@ impl PyRecordingView {
         let start = re_log_types::Timestamp::from_secs_since_epoch(start);
         let end = re_log_types::Timestamp::from_secs_since_epoch(end);
 
-        let resolved = ResolvedTimeRange::new(start, end);
+        let resolved = AbsoluteTimeRange::new(start, end);
 
         let mut query_expression = self.query_expression.clone();
         query_expression.filtered_index_range = Some(resolved);
@@ -420,14 +405,8 @@ impl PyRecordingView {
     ///
     ///     The original view will not be modified.
     fn filter_range_nanos(&self, start: i64, end: i64) -> PyResult<Self> {
+        // TODO(emilk): it would be nice to add a check here that the index type is indeed temporal.
         match self.query_expression.filtered_index.as_ref() {
-            // TODO(#9084): do we need this?
-            // Some(filtered_index) if filtered_index.typ() != TimeType::Time => {
-            //     return Err(PyValueError::new_err(format!(
-            //         "Index for {} is not temporal.",
-            //         filtered_index.name()
-            //     )));
-            // }
             Some(_) => {}
 
             None => {
@@ -440,7 +419,7 @@ impl PyRecordingView {
         let start = re_log_types::Timestamp::from_nanos_since_epoch(start);
         let end = re_log_types::Timestamp::from_nanos_since_epoch(end);
 
-        let resolved = ResolvedTimeRange::new(start, end);
+        let resolved = AbsoluteTimeRange::new(start, end);
 
         let mut query_expression = self.query_expression.clone();
         query_expression.filtered_index_range = Some(resolved);

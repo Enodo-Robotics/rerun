@@ -443,26 +443,16 @@ impl Transform3D {
             component_type: Some("rerun.components.AxisLength".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Transform3DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Transform3D::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 7usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Transform3D::descriptor_translation(),
             Transform3D::descriptor_rotation_axis_angle(),
@@ -474,10 +464,9 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 8usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 7usize]> =
+    std::sync::LazyLock::new(|| {
         [
-            Transform3D::descriptor_indicator(),
             Transform3D::descriptor_translation(),
             Transform3D::descriptor_rotation_axis_angle(),
             Transform3D::descriptor_quaternion(),
@@ -489,16 +478,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 8usize]> =
     });
 
 impl Transform3D {
-    /// The total number of components in the archetype: 0 required, 1 recommended, 7 optional
-    pub const NUM_COMPONENTS: usize = 8usize;
+    /// The total number of components in the archetype: 0 required, 0 recommended, 7 optional
+    pub const NUM_COMPONENTS: usize = 7usize;
 }
 
-/// Indicator component for the [`Transform3D`] [`::re_types_core::Archetype`]
-pub type Transform3DIndicator = ::re_types_core::GenericIndicatorComponent<Transform3D>;
-
 impl ::re_types_core::Archetype for Transform3D {
-    type Indicator = Transform3DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Transform3D".into()
@@ -507,14 +491,6 @@ impl ::re_types_core::Archetype for Transform3D {
     #[inline]
     fn display_name() -> &'static str {
         "Transform 3D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Transform3DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -590,7 +566,6 @@ impl ::re_types_core::AsComponents for Transform3D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.translation.clone(),
             self.rotation_axis_angle.clone(),
             self.quaternion.clone(),
@@ -691,12 +666,7 @@ impl Transform3D {
                 .map(|axis_length| axis_length.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -723,7 +693,7 @@ impl Transform3D {
             .or(len_relation)
             .or(len_axis_length)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// Translation vector.

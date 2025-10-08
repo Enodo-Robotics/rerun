@@ -1,8 +1,8 @@
 use re_chunk_store::RowId;
 use re_log_types::TimePoint;
-use re_viewer_context::test_context::{HarnessExt as _, TestContext};
+use re_test_context::{TestContext, external::egui_kittest::SnapshotOptions};
+use re_test_viewport::TestContextExt as _;
 use re_viewer_context::{ViewClass as _, ViewId};
-use re_viewport::test_context_ext::TestContextExt as _;
 use re_viewport_blueprint::ViewBlueprint;
 
 #[test]
@@ -87,8 +87,8 @@ fn run_view_ui_and_save_snapshot(
     let mut harness = test_context
         .setup_kittest_for_rendering()
         .with_size(size)
-        .build(|ctx| {
-            test_context.run_with_single_view(ctx, view_id);
+        .build_ui(|ui| {
+            test_context.run_with_single_view(ui, view_id);
         });
 
     {
@@ -147,7 +147,11 @@ fn run_view_ui_and_save_snapshot(
                 .events
                 .push(egui::Event::PointerMoved((175.0, 450.).into()));
             harness.run();
-            harness.snapshot_with_broken_pixels(&name, 1);
+
+            harness.snapshot_options(
+                &name,
+                &SnapshotOptions::new().failed_pixel_count_threshold(1),
+            );
         }
 
         {

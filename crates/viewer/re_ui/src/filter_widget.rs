@@ -23,7 +23,7 @@ struct InnerState {
 impl Default for InnerState {
     fn default() -> Self {
         let mut random_bytes = [0u8; 8];
-        getrandom::getrandom(&mut random_bytes).expect("Couldn't get random bytes");
+        getrandom::fill(&mut random_bytes).expect("Couldn't get random bytes");
 
         Self {
             filter_query: String::new(),
@@ -88,9 +88,8 @@ impl FilterState {
     /// entities without filtering, so the collapse state is the same as when the filter is
     /// inactive.
     pub fn session_id(&self) -> Option<egui::Id> {
-        self.inner_state
-            .as_ref()
-            .and_then(|state| (!state.filter_query.is_empty()).then_some(state.session_id))
+        let state = self.inner_state.as_ref()?;
+        (!state.filter_query.is_empty()).then_some(state.session_id)
     }
 
     /// Return a filter matcher for the current query.
@@ -128,58 +127,64 @@ impl FilterState {
         let mut title_response = None;
 
         list_item::list_item_scope(ui, ui.next_auto_id(), |ui| {
-            ui.list_item().interactive(false).show_flat(
-                ui,
-                list_item::CustomContent::new(|ui, _| {
-                    if self.inner_state.is_some()
-                        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-                    {
-                        self.inner_state = None;
-                    }
-
-                    if let Some(inner_state) = self.inner_state.as_mut() {
-                        // we add additional spacing for aesthetic reasons (active text edits have a
-                        // fat border)
-                        ui.spacing_mut().text_edit_width =
-                            (ui.max_rect().width() - 10.0).at_least(0.0);
-
-                        // TODO(ab): ideally _all_ text edits would be styled this way, but we
-                        // require egui support for that (https://github.com/emilk/egui/issues/3284)
-                        ui.visuals_mut().widgets.hovered.expansion = 0.0;
-                        ui.visuals_mut().widgets.active.expansion = 0.0;
-                        ui.visuals_mut().widgets.open.expansion = 0.0;
-                        ui.visuals_mut().widgets.active.fg_stroke.width = 1.0;
-                        ui.visuals_mut().selection.stroke.width = 1.0;
-
-                        let response = egui::TextEdit::singleline(&mut inner_state.filter_query)
-                            .lock_focus(true)
-                            .ui(ui);
-
-                        if self.request_focus {
-                            self.request_focus = false;
-                            response.request_focus();
+            ui.list_item()
+                .interactive(false)
+                .force_background(ui.tokens().section_header_color)
+                .show_flat(
+                    ui,
+                    list_item::CustomContent::new(|ui, _| {
+                        if self.inner_state.is_some()
+                            && ui.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                            })
+                        {
+                            self.inner_state = None;
                         }
-                    } else {
-                        title_response = Some(ui.label(galley));
-                    }
-                })
-                .with_content_width(text_width)
-                .action_button(
-                    if is_searching {
-                        &icons::CLOSE
-                    } else {
-                        &icons::SEARCH
-                    },
-                    if is_searching {
-                        "Stop search"
-                    } else {
-                        "Search"
-                    },
-                    || {
-                        toggle_search_clicked = true;
-                    },
-                ),
-            );
+
+                        if let Some(inner_state) = self.inner_state.as_mut() {
+                            // we add additional spacing for aesthetic reasons (active text edits have a
+                            // fat border)
+                            ui.spacing_mut().text_edit_width =
+                                (ui.max_rect().width() - 10.0).at_least(0.0);
+
+                            // TODO(ab): ideally _all_ text edits would be styled this way, but we
+                            // require egui support for that (https://github.com/emilk/egui/issues/3284)
+                            ui.visuals_mut().widgets.hovered.expansion = 0.0;
+                            ui.visuals_mut().widgets.active.expansion = 0.0;
+                            ui.visuals_mut().widgets.open.expansion = 0.0;
+                            ui.visuals_mut().widgets.active.fg_stroke.width = 1.0;
+                            ui.visuals_mut().selection.stroke.width = 1.0;
+
+                            let response =
+                                egui::TextEdit::singleline(&mut inner_state.filter_query)
+                                    .lock_focus(true)
+                                    .ui(ui);
+
+                            if self.request_focus {
+                                self.request_focus = false;
+                                response.request_focus();
+                            }
+                        } else {
+                            title_response = Some(ui.label(galley));
+                        }
+                    })
+                    .with_content_width(text_width)
+                    .action_button(
+                        if is_searching {
+                            &icons::CLOSE
+                        } else {
+                            &icons::SEARCH
+                        },
+                        if is_searching {
+                            "Stop search"
+                        } else {
+                            "Search"
+                        },
+                        || {
+                            toggle_search_clicked = true;
+                        },
+                    ),
+                );
         });
 
         // defer button handling because we can't mutably borrow `self` in both closures above
@@ -424,6 +429,7 @@ pub struct PathRanges {
 impl PathRanges {
     /// Merge another [`Self`].
     pub fn merge(&mut self, other: Self) {
+        #[expect(clippy::iter_over_hash_type)] // We sort on remove
         for (part_index, part_ranges) in other.ranges {
             self.ranges
                 .entry(part_index)

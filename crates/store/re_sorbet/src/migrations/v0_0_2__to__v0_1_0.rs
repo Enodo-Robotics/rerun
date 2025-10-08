@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::{
-    array::{RecordBatch as ArrowRecordBatch, RecordBatchOptions as ArrowRecordBatchOptions},
-    datatypes::{Fields, Schema as ArrowSchema},
+    array::{RecordBatch, RecordBatchOptions},
+    datatypes::{Fields, Schema},
 };
 use re_log::ResultExt as _;
 
@@ -18,7 +18,7 @@ impl super::Migration for Migration {
     const SOURCE_VERSION: semver::Version = semver::Version::new(0, 0, 2);
     const TARGET_VERSION: semver::Version = semver::Version::new(0, 1, 0);
 
-    fn migrate(batch: ArrowRecordBatch) -> ArrowRecordBatch {
+    fn migrate(batch: RecordBatch) -> RecordBatch {
         let mut batch = rewire_tagged_components(&batch);
         port_recording_info(&mut batch);
         batch
@@ -27,7 +27,7 @@ impl super::Migration for Migration {
 
 /// Ensures that incoming data is properly tagged and rewires to our now component descriptor format.
 #[tracing::instrument(level = "trace", skip_all)]
-fn rewire_tagged_components(batch: &ArrowRecordBatch) -> ArrowRecordBatch {
+fn rewire_tagged_components(batch: &RecordBatch) -> RecordBatch {
     re_tracing::profile_function!();
 
     let needs_rewiring = batch
@@ -72,7 +72,6 @@ fn rewire_tagged_components(batch: &ArrowRecordBatch) -> ArrowRecordBatch {
 
             if field.name().ends_with("Indicator") {
                 let field_name = field.name();
-                // TODO(#8129): Remove indicator components
                 re_log::debug_once!(
                     "Moving indicator from field to component metadata field: {field_name}"
                 );
@@ -87,7 +86,7 @@ fn rewire_tagged_components(batch: &ArrowRecordBatch) -> ArrowRecordBatch {
                     metadata.insert("rerun:component".to_owned(), component);
                 } else if field_name.starts_with("rerun.") {
                     // Long name
-                    metadata.insert("rerun:component".to_owned(), field_name.to_string());
+                    metadata.insert("rerun:component".to_owned(), field_name.clone());
                 } else {
                     // Short name: expand it to be long
                     metadata.insert("rerun:component".to_owned(), format!("rerun.components.{field_name}"));
@@ -112,7 +111,6 @@ fn rewire_tagged_components(batch: &ArrowRecordBatch) -> ArrowRecordBatch {
                     }
                     (None, Some(archetype_field)) => (None, archetype_field, Some(component)),
                     (maybe_archetype, None) if component.ends_with("Indicator") => {
-                        // TODO(#8129): For now, this renames the indicator column metadata. Eventually, we want to remove the column altogether.
                         re_log::debug_once!(
                             "Moving indicator to component field: {component}"
                         );
@@ -174,30 +172,30 @@ fn rewire_tagged_components(batch: &ArrowRecordBatch) -> ArrowRecordBatch {
         })
         .collect();
 
-    let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
+    let schema = Arc::new(Schema::new_with_metadata(fields, metadata));
 
-    ArrowRecordBatch::try_new_with_options(
+    RecordBatch::try_new_with_options(
         schema.clone(),
         batch.columns().to_vec(),
-        &ArrowRecordBatchOptions::default().with_row_count(Some(batch.num_rows())),
+        &RecordBatchOptions::default().with_row_count(Some(batch.num_rows())),
     )
     .ok_or_log_error()
-    .unwrap_or_else(|| ArrowRecordBatch::new_empty(schema))
+    .unwrap_or_else(|| RecordBatch::new_empty(schema))
 }
 
 /// Look for old `RecordingProperties` at `/__properties/recording`
 /// and rename it to `RecordingInfo` and move it to `/__properties`.
 ///
 /// User properties are still on `/__properties/$FOO` with column name `property:$FOO:…` - no change there.
-fn port_recording_info(batch: &mut ArrowRecordBatch) {
+fn port_recording_info(batch: &mut RecordBatch) {
     re_tracing::profile_function!();
 
     // We renamed `RecordingProperties` to `RecordingInfo`,
     // and moved it from `/__properties/recording` to `/__properties`.
-    if let Some(entity_path) = batch.schema_metadata_mut().get_mut("rerun:entity_path") {
-        if entity_path == "/__properties/recording" {
-            *entity_path = "/__properties".to_owned();
-        }
+    if let Some(entity_path) = batch.schema_metadata_mut().get_mut("rerun:entity_path")
+        && entity_path == "/__properties/recording"
+    {
+        *entity_path = "/__properties".to_owned();
     }
 
     fn migrate_column_name(name: &str) -> String {
@@ -222,10 +220,10 @@ fn port_recording_info(batch: &mut ArrowRecordBatch) {
             .with_metadata(field.metadata().clone());
 
             // Migrate per-column entity paths (if any):
-            if let Some(entity_path) = field.metadata_mut().get_mut("rerun:entity_path") {
-                if entity_path == "/__properties/recording" {
-                    *entity_path = "/__properties".to_owned();
-                }
+            if let Some(entity_path) = field.metadata_mut().get_mut("rerun:entity_path")
+                && entity_path == "/__properties/recording"
+            {
+                *entity_path = "/__properties".to_owned();
             }
 
             // Rename `RecordingProperties` to `RecordingInfo` in metadata keys:
@@ -237,13 +235,13 @@ fn port_recording_info(batch: &mut ArrowRecordBatch) {
         })
         .collect();
 
-    *batch = ArrowRecordBatch::try_new_with_options(
-        Arc::new(ArrowSchema::new_with_metadata(
+    *batch = RecordBatch::try_new_with_options(
+        Arc::new(Schema::new_with_metadata(
             modified_fields,
             batch.schema().metadata().clone(),
         )),
         batch.columns().to_vec(),
-        &ArrowRecordBatchOptions::default().with_row_count(Some(batch.num_rows())),
+        &RecordBatchOptions::default().with_row_count(Some(batch.num_rows())),
     )
     .expect("Can't fail - we've only modified metadata");
 }

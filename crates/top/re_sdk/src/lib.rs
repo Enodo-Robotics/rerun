@@ -46,17 +46,9 @@ pub fn default_server_addr() -> std::net::SocketAddr {
     std::net::SocketAddr::from(([127, 0, 0, 1], DEFAULT_SERVER_PORT))
 }
 
-/// The default amount of time to wait for the gRPC connection to resume during a flush
-#[allow(clippy::unnecessary_wraps)]
-pub fn default_flush_timeout() -> Option<std::time::Duration> {
-    // NOTE: This is part of the SDK and meant to be used where we accept `Option<std::time::Duration>` values.
-    Some(std::time::Duration::from_secs(3))
-}
-
 pub use re_log_types::{
     ApplicationId, EntityPath, EntityPathPart, Instance, StoreId, StoreKind, entity_path,
 };
-pub use re_memory::MemoryLimit;
 pub use re_types::archetypes::RecordingInfo;
 
 pub use global::cleanup_if_forked_child;
@@ -68,8 +60,13 @@ impl crate::sink::LogSink for re_log_encoding::FileSink {
     }
 
     #[inline]
-    fn flush_blocking(&self) {
-        Self::flush_blocking(self);
+    fn flush_blocking(&self, timeout: std::time::Duration) -> Result<(), sink::SinkFlushError> {
+        use re_log_encoding::FileFlushError;
+
+        Self::flush_blocking(self, timeout).map_err(|err| match err {
+            FileFlushError::Failed { message } => sink::SinkFlushError::Failed { message },
+            FileFlushError::Timeout => sink::SinkFlushError::Timeout,
+        })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -88,7 +85,7 @@ pub mod sink {
     pub use crate::binary_stream_sink::{BinaryStreamSink, BinaryStreamStorage};
     pub use crate::log_sink::{
         BufferedSink, CallbackSink, IntoMultiSink, LogSink, MemorySink, MemorySinkStorage,
-        MultiSink,
+        MultiSink, SinkFlushError,
     };
 
     pub use crate::log_sink::{GrpcSink, GrpcSinkConnectionFailure, GrpcSinkConnectionState};
@@ -114,9 +111,9 @@ pub use time::{TimeCell, TimePoint, Timeline};
 
 pub use re_types::{
     Archetype, ArchetypeName, AsComponents, Component, ComponentBatch, ComponentDescriptor,
-    ComponentType, DatatypeName, DeserializationError, DeserializationResult,
-    GenericIndicatorComponent, Loggable, NamedIndicatorComponent, SerializationError,
-    SerializationResult, SerializedComponentBatch, SerializedComponentColumn,
+    ComponentIdentifier, ComponentType, DatatypeName, DeserializationError, DeserializationResult,
+    Loggable, SerializationError, SerializationResult, SerializedComponentBatch,
+    SerializedComponentColumn,
 };
 
 pub use re_byte_size::SizeBytes;
@@ -131,6 +128,9 @@ pub mod web_viewer;
 /// Method for spawning a gRPC server and streaming the SDK log stream to it.
 #[cfg(feature = "server")]
 pub mod grpc_server;
+
+#[cfg(feature = "server")]
+pub use re_grpc_server::{MemoryLimit, PlaybackBehavior, ServerOptions};
 
 /// Re-exports of other crates.
 pub mod external {
@@ -164,18 +164,17 @@ const RERUN_ENV_VAR: &str = "RERUN";
 
 /// Helper to get the value of the `RERUN` environment variable.
 fn get_rerun_env() -> Option<bool> {
-    std::env::var(RERUN_ENV_VAR)
-        .ok()
-        .and_then(|s| match s.to_lowercase().as_str() {
-            "0" | "false" | "off" => Some(false),
-            "1" | "true" | "on" => Some(true),
-            _ => {
-                re_log::warn!(
-                    "Invalid value for environment variable {RERUN_ENV_VAR}={s:?}. Expected 'on' or 'off'. It will be ignored"
-                );
-                None
-            }
-        })
+    let s = std::env::var(RERUN_ENV_VAR).ok()?;
+    match s.to_lowercase().as_str() {
+        "0" | "false" | "off" => Some(false),
+        "1" | "true" | "on" => Some(true),
+        _ => {
+            re_log::warn!(
+                "Invalid value for environment variable {RERUN_ENV_VAR}={s:?}. Expected 'on' or 'off'. It will be ignored"
+            );
+            None
+        }
+    }
 }
 
 /// Checks the `RERUN` environment variable. If not found, returns the argument.
@@ -215,9 +214,10 @@ pub fn decide_logging_enabled(default_enabled: bool) -> bool {
 pub fn new_store_info(
     application_id: impl Into<re_log_types::ApplicationId>,
 ) -> re_log_types::StoreInfo {
+    let store_id = StoreId::random(StoreKind::Recording, application_id.into());
+
     re_log_types::StoreInfo {
-        application_id: application_id.into(),
-        store_id: StoreId::random(StoreKind::Recording),
+        store_id,
         cloned_from: None,
         store_source: re_log_types::StoreSource::RustSdk {
             rustc_version: env!("RE_BUILD_RUSTC_VERSION").into(),

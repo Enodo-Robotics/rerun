@@ -28,15 +28,17 @@ import json
 import os
 import re
 import textwrap
-from collections.abc import Generator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from subprocess import run
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from google.cloud import storage
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 SCRIPT_PATH = os.path.dirname(os.path.relpath(__file__))
 DATE_FORMAT = "%Y-%m-%d"
@@ -198,7 +200,7 @@ def get_size_benchmark_data(gcs: storage.Client, commits: list[CommitWithDate]) 
 
 
 BYTE_UNITS = ["b", "kb", "kib", "mb", "mib", "gb", "gib", "tb", "tib"]
-VALID_CONVERSIONS = {unit: BYTE_UNITS for unit in BYTE_UNITS}
+VALID_CONVERSIONS = dict.fromkeys(BYTE_UNITS, BYTE_UNITS)
 
 UNITS = {
     "b": 1,

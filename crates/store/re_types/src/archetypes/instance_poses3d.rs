@@ -169,26 +169,16 @@ impl InstancePoses3D {
             component_type: Some("rerun.components.PoseTransformMat3x3".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.InstancePoses3DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [InstancePoses3D::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 5usize]> =
+    std::sync::LazyLock::new(|| {
         [
             InstancePoses3D::descriptor_translations(),
             InstancePoses3D::descriptor_rotation_axis_angles(),
@@ -198,10 +188,9 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 5usize]> =
+    std::sync::LazyLock::new(|| {
         [
-            InstancePoses3D::descriptor_indicator(),
             InstancePoses3D::descriptor_translations(),
             InstancePoses3D::descriptor_rotation_axis_angles(),
             InstancePoses3D::descriptor_quaternions(),
@@ -211,16 +200,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]> =
     });
 
 impl InstancePoses3D {
-    /// The total number of components in the archetype: 0 required, 1 recommended, 5 optional
-    pub const NUM_COMPONENTS: usize = 6usize;
+    /// The total number of components in the archetype: 0 required, 0 recommended, 5 optional
+    pub const NUM_COMPONENTS: usize = 5usize;
 }
 
-/// Indicator component for the [`InstancePoses3D`] [`::re_types_core::Archetype`]
-pub type InstancePoses3DIndicator = ::re_types_core::GenericIndicatorComponent<InstancePoses3D>;
-
 impl ::re_types_core::Archetype for InstancePoses3D {
-    type Indicator = InstancePoses3DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.InstancePoses3D".into()
@@ -229,14 +213,6 @@ impl ::re_types_core::Archetype for InstancePoses3D {
     #[inline]
     fn display_name() -> &'static str {
         "Instance poses 3D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        InstancePoses3DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -305,7 +281,6 @@ impl ::re_types_core::AsComponents for InstancePoses3D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.translations.clone(),
             self.rotation_axis_angles.clone(),
             self.quaternions.clone(),
@@ -402,12 +377,7 @@ impl InstancePoses3D {
                 .map(|mat3x3| mat3x3.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -430,7 +400,7 @@ impl InstancePoses3D {
             .or(len_scales)
             .or(len_mat3x3)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// Translation vectors.

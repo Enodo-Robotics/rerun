@@ -18,6 +18,16 @@ pub struct TensorStats {
     pub finite_range: (f64, f64),
 }
 
+impl re_byte_size::SizeBytes for TensorStats {
+    fn heap_size_bytes(&self) -> u64 {
+        0
+    }
+
+    fn is_pod() -> bool {
+        true
+    }
+}
+
 impl TensorStats {
     pub fn from_tensor(tensor: &re_types::datatypes::TensorData) -> Self {
         re_tracing::profile_function!();
@@ -128,14 +138,14 @@ impl TensorStats {
         }
         .ok();
 
-        if let Some((min, max)) = range {
-            if max < min {
-                // Empty tensor
-                return Self {
-                    range: None,
-                    finite_range: (tensor.dtype().min_value(), tensor.dtype().max_value()),
-                };
-            }
+        if let Some((min, max)) = range
+            && max < min
+        {
+            // Empty tensor
+            return Self {
+                range: None,
+                finite_range: (tensor.dtype().min_value(), tensor.dtype().max_value()),
+            };
         }
 
         let finite_range = if range
@@ -166,6 +176,7 @@ impl TensorStats {
             };
 
             // If we didn't find a finite range, set it to None.
+            #[expect(clippy::return_and_then)] // false positive
             finite_range.and_then(|r| {
                 if r.0.is_finite() && r.1.is_finite() {
                     Some(r)

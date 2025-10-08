@@ -9,10 +9,13 @@ To add new specimens to the zoo, add a function whose name starts with "specimen
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 import rerun as rr
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 def frame_times(t: int | Sequence[int], *args: int) -> list[rr.TimeColumn]:
@@ -62,15 +65,12 @@ def specimen_archetype_with_clamp_join_semantics() -> None:
 
 
 def specimen_archetype_with_latest_at_semantics() -> None:
-    """Archetype spread over a multi-row chunk and two single-row chunks, with latest-at semantics."""
+    """Archetype spread over a multi-row chunk and a single row chunk, with latest-at semantics."""
     rr.send_columns(
         "/archetype_chunk_with_latest_at_semantics",
         frame_times(range(10)),
         rr.Points2D.columns(positions=[(i, i) for i in range(10)], class_ids=range(10)),
     )
-
-    set_frame_time(0)
-    rr.log("/archetype_chunk_with_latest_at_semantics", [rr.Points2D.indicator()])
 
     set_frame_time(5)
     rr.log("/archetype_chunk_with_latest_at_semantics", rr.Points2D.from_fields(radii=2))
@@ -134,7 +134,6 @@ def specimen_many_rows_with_mismatched_instance_count() -> None:
             *rr.Points2D.columns(colors=colors).partition(colors_partitions),
         ],
     )
-    rr.log("/many_rows_with_mismatched_instance_count", [rr.Points2D.indicator()], static=True)
 
 
 # TODO(ab): add variants (unordered, overlapping timestamps, etc.)
@@ -161,7 +160,7 @@ def specimen_archetype_chunk_with_clear() -> None:
     )
 
     set_frame_time(0)
-    rr.log("/archetype_chunk_with_clear", [rr.Points2D.indicator()], rr.Points2D.from_fields(radii=2))
+    rr.log("/archetype_chunk_with_clear", rr.Points2D.from_fields(radii=2))
 
     set_frame_time(5)
     rr.log("/archetype_chunk_with_clear", rr.Clear(recursive=False))

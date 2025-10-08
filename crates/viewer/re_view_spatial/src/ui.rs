@@ -1,5 +1,4 @@
-use egui::{DragValue, NumExt as _, WidgetText, emath::OrderedFloat, text::TextWrapping};
-use web_time::Instant;
+use egui::{NumExt as _, WidgetText, emath::OrderedFloat, text::TextWrapping};
 
 use macaw::BoundingBox;
 use re_format::format_f32;
@@ -11,7 +10,6 @@ use re_viewer_context::{HoverHighlight, ImageInfo, SelectionHighlight, ViewHighl
 
 use crate::{
     Pinhole,
-    eye::EyeMode,
     pickable_textured_rect::PickableRectSourceData,
     picking::{PickableUiRect, PickingResult},
     scene_bounding_boxes::SceneBoundingBoxes,
@@ -90,20 +88,24 @@ impl SpatialViewState {
 
         let view_systems = &system_output.view_systems;
 
+        // Reset the counts and start over.
+        self.image_counts_last_frame = Default::default();
+
         for data in view_systems.iter_visualizer_data::<SpatialViewVisualizerData>() {
             for pickable_rect in &data.pickable_rects {
-                let PickableRectSourceData::Image {
-                    image: ImageInfo { kind, .. },
-                    ..
-                } = &pickable_rect.source_data
-                else {
-                    continue;
-                };
-
-                match kind {
-                    ImageKind::Segmentation => self.image_counts_last_frame.segmentation += 1,
-                    ImageKind::Color => self.image_counts_last_frame.color += 1,
-                    ImageKind::Depth => self.image_counts_last_frame.depth += 1,
+                match &pickable_rect.source_data {
+                    PickableRectSourceData::Image {
+                        image: ImageInfo { kind, .. },
+                        ..
+                    } => match kind {
+                        ImageKind::Segmentation => self.image_counts_last_frame.segmentation += 1,
+                        ImageKind::Color => self.image_counts_last_frame.color += 1,
+                        ImageKind::Depth => self.image_counts_last_frame.depth += 1,
+                    },
+                    PickableRectSourceData::Video => {
+                        self.image_counts_last_frame.color += 1;
+                    }
+                    PickableRectSourceData::Placeholder => {}
                 }
             }
         }
@@ -152,33 +154,6 @@ impl SpatialViewState {
                 self.state_3d.set_spin(spin);
             }
         }
-
-        if let Some(eye) = &mut self.state_3d.view_eye {
-            ui.selectable_toggle(|ui| {
-                let mut mode = eye.mode();
-                ui.selectable_value(&mut mode, EyeMode::FirstPerson, "First Person");
-                ui.selectable_value(&mut mode, EyeMode::Orbital, "Orbital");
-                eye.set_mode(mode);
-            });
-
-            ui.horizontal(|ui| {
-                let previous_speed = eye.speed(&self.bounding_boxes);
-                let mut speed = eye.speed(&self.bounding_boxes);
-                ui.label("Translation speed");
-                if ui
-                    .add(DragValue::new(&mut speed).range(0.001..=f32::MAX))
-                    .double_clicked()
-                {
-                    eye.set_speed(None);
-                } else if previous_speed != speed {
-                    // Make sure the camera is marked as interacted with.
-                    // Otherwise, it will continuously be reset to the default camera.
-                    // (once the speed property is part of the blueprint this concern will go away since all "non-fallback" state then lives in the blueprint store)
-                    self.state_3d.last_eye_interaction = Some(Instant::now());
-                    eye.set_speed(Some(speed));
-                }
-            });
-        }
     }
 
     pub fn fallback_opacity_for_image_kind(&self, kind: ImageKind) -> f32 {
@@ -195,7 +170,7 @@ impl SpatialViewState {
         match kind {
             ImageKind::Segmentation => {
                 if counts.color + counts.depth > 0 {
-                    // Segmentation images should always be opaque if there was more than one image in the view,
+                    // Segmentation images should always be transparent if there was more than one image in the view,
                     // excluding other segmentation images.
                     0.5
                 } else {

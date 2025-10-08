@@ -36,7 +36,6 @@ plugins:
                 "!__attrs_clear__", # For internal use
                 "!^_[^_]", # Hide things starting with a single underscore
                 "!as_component_batches", # Inherited from AsComponents
-                "!indicator", # Inherited from Archetype
                 "!num_instances", # Inherited from AsComponents
               ]
             inherited_members: true
@@ -49,6 +48,8 @@ plugins:
               - rerun_bindings
             annotations_path: brief
             signature_crossrefs: true
+            extensions:
+              - griffe_warnings_deprecated
 
   - gen-files: # https://oprypin.github.io/mkdocs-gen-files
       scripts:

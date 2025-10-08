@@ -114,55 +114,38 @@ impl GeoPoints {
             component_type: Some("rerun.components.ClassId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.GeoPointsIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [GeoPoints::descriptor_positions()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [GeoPoints::descriptor_positions()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             GeoPoints::descriptor_radii(),
             GeoPoints::descriptor_colors(),
-            GeoPoints::descriptor_indicator(),
         ]
     });
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [GeoPoints::descriptor_class_ids()]);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [GeoPoints::descriptor_class_ids()]);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 4usize]> =
+    std::sync::LazyLock::new(|| {
         [
             GeoPoints::descriptor_positions(),
             GeoPoints::descriptor_radii(),
             GeoPoints::descriptor_colors(),
-            GeoPoints::descriptor_indicator(),
             GeoPoints::descriptor_class_ids(),
         ]
     });
 
 impl GeoPoints {
-    /// The total number of components in the archetype: 1 required, 3 recommended, 1 optional
-    pub const NUM_COMPONENTS: usize = 5usize;
+    /// The total number of components in the archetype: 1 required, 2 recommended, 1 optional
+    pub const NUM_COMPONENTS: usize = 4usize;
 }
 
-/// Indicator component for the [`GeoPoints`] [`::re_types_core::Archetype`]
-pub type GeoPointsIndicator = ::re_types_core::GenericIndicatorComponent<GeoPoints>;
-
 impl ::re_types_core::Archetype for GeoPoints {
-    type Indicator = GeoPointsIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.GeoPoints".into()
@@ -171,14 +154,6 @@ impl ::re_types_core::Archetype for GeoPoints {
     #[inline]
     fn display_name() -> &'static str {
         "Geo points"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        GeoPointsIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -238,7 +213,6 @@ impl ::re_types_core::AsComponents for GeoPoints {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.positions.clone(),
             self.radii.clone(),
             self.colors.clone(),
@@ -328,12 +302,7 @@ impl GeoPoints {
                 .map(|class_ids| class_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -354,7 +323,7 @@ impl GeoPoints {
             .or(len_colors)
             .or(len_class_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The [EPSG:4326](https://epsg.io/4326) coordinates for the points (North/East-positive degrees).

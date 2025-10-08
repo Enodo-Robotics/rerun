@@ -113,7 +113,7 @@ pub struct ResolvedEntityPathFilter {
 impl ResolvedEntityPathFilter {
     /// Creates an filter that matches [`EntityPath::properties`].
     pub fn properties() -> Self {
-        // TODO(grtlr): Consider using `OnceCell` here to cache this.
+        // TODO(grtlr): Consider using `OnceLock` here to cache this.
         Self {
             rules: std::iter::once((
                 ResolvedEntityPathRule::including_subtree(&EntityPath::properties()),
@@ -359,7 +359,7 @@ impl EntityPathFilter {
     /// Adds a rule to this filter.
     ///
     /// If there's already an effect for the rule, it is overwritten with the new effect.
-    pub fn add_rule(&mut self, effect: RuleEffect, rule: EntityPathRule) {
+    pub fn insert_rule(&mut self, effect: RuleEffect, rule: EntityPathRule) {
         self.rules.insert(rule, effect);
     }
 
@@ -475,10 +475,10 @@ impl EntityPathFilter {
                 ResolvedEntityPathRule::parse_strict(&rule, subst_env).map(|r| (r, effect))
             })
             .inspect(|maybe_rule| {
-                if let Ok((ResolvedEntityPathRule { resolved_path, .. }, _)) = maybe_rule {
-                    if resolved_path.starts_with(&EntityPath::properties()) {
-                        seen_properties = true;
-                    }
+                if let Ok((ResolvedEntityPathRule { resolved_path, .. }, _)) = maybe_rule
+                    && resolved_path.starts_with(&EntityPath::properties())
+                {
+                    seen_properties = true;
                 }
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;

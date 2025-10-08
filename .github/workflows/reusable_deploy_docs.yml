@@ -41,11 +41,7 @@ permissions:
 env:
   PYTHON_VERSION: "3.9"
 
-  # web_sys_unstable_apis is required to enable the web_sys clipboard API which egui_web uses
-  # https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
-  # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
-  RUSTFLAGS: --cfg=web_sys_unstable_apis --deny warnings
-
+  RUSTFLAGS: --deny warnings
   RUSTDOCFLAGS: --deny warnings
 
   # Disable the GHA backend (Github's 10GB storage) since we use our own GCS backend.
@@ -97,7 +93,7 @@ jobs:
           process_gcloudignore: false
           parent: false
 
-      - name: "Update latest"
+      - name: "Update latest index.html"
         if: ${{ inputs.UPDATE_LATEST }}
         run: |
           cat <<EOF > index.html
@@ -120,6 +116,26 @@ jobs:
           EOF
 
           gsutil cp ./index.html gs://rerun-docs/docs/python/stable/
+
+      - name: "Update versions.json"
+        if: ${{ inputs.UPDATE_LATEST }}
+        run: |
+          VERSION=${{ inputs.PY_DOCS_VERSION_NAME }}
+
+          echo "download existing"
+          gsutil cp gs://rerun-docs/docs/python/versions.json ./
+          cat versions.json
+
+          echo "remove `stable` alias"
+          jq -c 'map(.aliases |= map(select(. != "stable")))' versions.json > versions.json.new
+          cat versions.json.new
+
+          echo "prepend new version with `stable` alias"
+          jq -c --arg v "$VERSION" '[{ version: $v, title: $v, aliases: ["stable"] }] + .' versions.json.new > versions.json
+          cat versions.json
+
+          echo "overwrite the file on gcs"
+          gsutil cp ./versions.json gs://rerun-docs/docs/python/
 
   # ---------------------------------------------------------------------------
 
@@ -162,6 +178,7 @@ jobs:
           path: "rerun_cpp/docs/html"
           destination: "rerun-docs/docs/cpp/${{ inputs.RELEASE_VERSION }}"
           process_gcloudignore: false
+          parent: false
 
       - name: "Upload C++ Docs (named)"
         if: ${{ inputs.UPDATE_LATEST }}
@@ -170,6 +187,7 @@ jobs:
           path: "rerun_cpp/docs/html"
           destination: "rerun-docs/docs/cpp/${{ inputs.CPP_DOCS_VERSION_NAME }}"
           process_gcloudignore: false
+          parent: false
 
   js-deploy-docs:
     name: JS

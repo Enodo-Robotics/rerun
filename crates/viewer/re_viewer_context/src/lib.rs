@@ -2,6 +2,8 @@
 //!
 //! This crate contains data structures that are shared with most modules of the viewer.
 
+#![warn(clippy::iter_over_hash_type)] //  TODO(#6198): enable everywhere
+
 mod annotations;
 mod async_runtime_handle;
 mod blueprint_helpers;
@@ -10,8 +12,10 @@ mod collapsed_id;
 mod component_fallbacks;
 mod component_ui_registry;
 mod drag_and_drop;
+mod heuristics;
 mod image_info;
 mod maybe_mut_ref;
+pub mod open_url;
 mod query_context;
 mod query_range;
 mod selection_state;
@@ -27,9 +31,6 @@ mod utils;
 mod view;
 mod viewer_context;
 
-#[cfg(feature = "testing")]
-pub mod test_context;
-
 // TODO(andreas): Move to its own crate?
 pub mod gpu_bridge;
 mod visitor_flow_control;
@@ -43,8 +44,9 @@ pub use self::{
     async_runtime_handle::{AsyncRuntimeError, AsyncRuntimeHandle, WasmNotSend},
     blueprint_helpers::{blueprint_timeline, blueprint_timepoint_for_writes},
     cache::{
-        Cache, Caches, ImageDecodeCache, ImageStatsCache, SharablePlayableVideoStream,
-        TensorStatsCache, VideoAssetCache, VideoStreamCache, VideoStreamProcessingError,
+        Cache, CacheMemoryReport, CacheMemoryReportItem, Caches, ImageDecodeCache, ImageStatsCache,
+        SharablePlayableVideoStream, TensorStatsCache, VideoAssetCache, VideoStreamCache,
+        VideoStreamProcessingError,
     },
     collapsed_id::{CollapseItem, CollapseScope, CollapsedId},
     component_fallbacks::{
@@ -53,6 +55,7 @@ pub use self::{
     },
     component_ui_registry::{ComponentUiRegistry, ComponentUiTypes, EditTarget, VariantName},
     drag_and_drop::{DragAndDropFeedback, DragAndDropManager, DragAndDropPayload},
+    heuristics::suggest_view_for_each_entity,
     image_info::{ColormapWithRange, ImageInfo, StoredBlobCacheKey},
     maybe_mut_ref::MaybeMutRef,
     query_context::{
@@ -60,8 +63,8 @@ pub use self::{
     },
     query_range::QueryRange,
     selection_state::{
-        ApplicationSelectionState, HoverHighlight, InteractionHighlight, ItemCollection,
-        ItemContext, SelectionChange, SelectionHighlight,
+        ApplicationSelectionState, HoverHighlight, InteractionHighlight, SelectionChange,
+        SelectionHighlight,
     },
     storage_context::StorageContext,
     store_context::StoreContext,
@@ -96,9 +99,6 @@ pub use re_ui::UiLayout; // Historical reasons
 pub mod external {
     pub use nohash_hasher;
     pub use {re_chunk_store, re_entity_db, re_log_types, re_query, re_ui};
-
-    #[cfg(feature = "testing")]
-    pub use egui_kittest;
 
     #[cfg(not(target_arch = "wasm32"))]
     pub use tokio;

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import pathlib
 from typing import TYPE_CHECKING, Union
 
 import rerun_bindings as bindings
@@ -12,12 +11,14 @@ from rerun_bindings import (
 from typing_extensions import deprecated
 
 from rerun.blueprint.api import BlueprintLike, create_in_memory_blueprint
-from rerun.dataframe import Recording
 from rerun.recording_stream import RecordingStream, get_application_id
 
 from ._spawn import _spawn_viewer
 
 if TYPE_CHECKING:
+    import pathlib
+
+    from rerun.dataframe import Recording
     from rerun.recording_stream import RecordingStream
 
 
@@ -118,7 +119,6 @@ def set_sinks(
 def connect_grpc(
     url: str | None = None,
     *,
-    flush_timeout_sec: float | None = 2.0,
     default_blueprint: BlueprintLike | None = None,
     recording: RecordingStream | None = None,
 ) -> None:
@@ -136,11 +136,7 @@ def connect_grpc(
         and the pathname must be `/proxy`.
 
         The default is `rerun+http://127.0.0.1:9876/proxy`.
-    flush_timeout_sec:
-        The minimum time the SDK will wait during a flush before potentially
-        dropping data if progress is not being made. Passing `None` indicates no timeout,
-        and can cause a call to `flush` to block indefinitely.
-    default_blueprint
+    default_blueprint:
         Optionally set a default blueprint to use for this application. If the application
         already has an active blueprint, the new blueprint won't become active until the user
         clicks the "reset blueprint" button. If you want to activate the new blueprint
@@ -173,7 +169,6 @@ def connect_grpc(
 
     bindings.connect_grpc(
         url=url,
-        flush_timeout_sec=flush_timeout_sec,
         default_blueprint=blueprint_storage,
         recording=recording.to_native() if recording is not None else None,
     )
@@ -314,6 +309,7 @@ def serve_grpc(
     default_blueprint: BlueprintLike | None = None,
     recording: RecordingStream | None = None,
     server_memory_limit: str = "25%",
+    newest_first: bool = False,
 ) -> str:
     """
     Serve log-data over gRPC.
@@ -348,6 +344,9 @@ def serve_grpc(
     server_memory_limit:
         Maximum amount of memory to use for buffering log data for clients that connect late.
         This can be a percentage of the total ram (e.g. "50%") or an absolute value (e.g. "4GB").
+    newest_first:
+        If `True`, the server will start sending back the newest messages _first_.
+        If `False`, the messages will be played back in the order they arrived.
 
     """
     if not is_recording_enabled(recording):
@@ -380,7 +379,7 @@ def serve_grpc(
 
 @deprecated(
     """Use a combination of `rr.serve_grpc` and `rr.serve_web_viewer` instead.
-    See: https://www.rerun.io/docs/reference/migration/migration-0-24?speculative-link for more details.""",
+    See: https://www.rerun.io/docs/reference/migration/migration-0-24 for more details.""",
 )
 def serve_web(
     *,

@@ -3,14 +3,20 @@ from __future__ import annotations
 import functools
 import random
 import sys
-from typing import Any, Callable, TypeVar, cast
-from uuid import UUID
+import warnings
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, cast
 
 import numpy as np
 
-__version__ = "0.24.0-alpha.1+dev"
-__version_info__ = (0, 24, 0, "alpha.1")
+__version__ = "0.25.1"
+__version_info__ = (0, 25, 1, None)
 
+if sys.version_info < (3, 10):
+    warnings.warn(
+        "Python 3.9 is past EOL (https://devguide.python.org/versions/). Rerun version 0.26 will drop support/testing of Python 3.9.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 if sys.version_info < (3, 9):  # noqa: UP036
     raise RuntimeError("Rerun SDK requires Python 3.9 or later.")
@@ -43,13 +49,13 @@ from ._image_encoded import (
 )
 from ._log import (
     AsComponents as AsComponents,
-    IndicatorComponentBatch as IndicatorComponentBatch,
     escape_entity_path_part as escape_entity_path_part,
     log as log,
     log_file_from_contents as log_file_from_contents,
     log_file_from_path as log_file_from_path,
     new_entity_path as new_entity_path,
 )
+from ._numpy_compatibility import asarray as asarray
 from ._properties import (
     send_property as send_property,
     send_recording_name as send_recording_name,
@@ -62,8 +68,10 @@ from ._send_columns import (
     TimeSequenceColumn as TimeSequenceColumn,
     send_columns as send_columns,
 )
-from .any_value import (
+from .any_batch_value import (
     AnyBatchValue as AnyBatchValue,
+)
+from .any_value import (
     AnyValues as AnyValues,
 )
 from .archetypes import (
@@ -89,6 +97,10 @@ from .archetypes import (
     InstancePoses3D as InstancePoses3D,
     LineStrips2D as LineStrips2D,
     LineStrips3D as LineStrips3D,
+    McapChannel as McapChannel,
+    McapMessage as McapMessage,
+    McapSchema as McapSchema,
+    McapStatistics as McapStatistics,
     Mesh3D as Mesh3D,
     Pinhole as Pinhole,
     Points2D as Points2D,
@@ -107,9 +119,6 @@ from .archetypes import (
 )
 from .archetypes.boxes2d_ext import (
     Box2DFormat as Box2DFormat,
-)
-from .blueprint.api import (
-    BlueprintLike as BlueprintLike,
 )
 from .components import (
     AlbedoFactor as AlbedoFactor,
@@ -139,6 +148,9 @@ from .datatypes import (
     TimeRangeBoundary as TimeRangeBoundary,
     VisibleTimeRange as VisibleTimeRange,
 )
+from .dynamic_archetype import (
+    DynamicArchetype as DynamicArchetype,
+)
 from .error_utils import (
     set_strict_mode as set_strict_mode,
 )
@@ -154,6 +166,7 @@ from .memory import (
 )
 from .recording_stream import (
     BinaryStream as BinaryStream,
+    ChunkBatcherConfig as ChunkBatcherConfig,
     RecordingStream as RecordingStream,
     binary_stream as binary_stream,
     get_application_id as get_application_id,
@@ -197,6 +210,13 @@ from .time import (
 )
 from .web import serve_web_viewer as serve_web_viewer
 
+if TYPE_CHECKING:
+    from uuid import UUID
+
+    from .blueprint.api import (
+        BlueprintLike as BlueprintLike,
+    )
+
 # =====================================
 # UTILITIES
 
@@ -228,6 +248,10 @@ def init(
     Without an active recording, all methods of the SDK will turn into no-ops.
 
     For more advanced use cases, e.g. multiple recordings setups, see [`rerun.RecordingStream`][].
+
+    To deal with accumulation of recording state when calling init() multiple times, this function will
+    have the side-effect of flushing all existing recordings. After flushing, any recordings which
+    are otherwise orphaned will also be destructed to free resources, close open file-descriptors, etc.
 
     !!! Warning
         If you don't specify a `recording_id`, it will default to a random value that is generated once
@@ -310,6 +334,11 @@ def init(
     # Always check whether we are a forked child when calling init. This should have happened
     # via `_register_on_fork` but it's worth being conservative.
     cleanup_if_forked_child()
+
+    # Rerun is being re-initialized. We may have recordings from a previous call to init that are lingering.
+    # Clean them up now to avoid memory leaks. This could cause a problem if we call rr.init() from inside a
+    # destructor during shutdown, but that seems like a fair compromise.
+    bindings.flush_and_cleanup_orphaned_recordings()
 
     if recording_id is not None:
         recording_id = str(recording_id)
@@ -396,7 +425,7 @@ def shutdown_at_exit(func: _TFunc) -> _TFunc:
         finally:
             rerun_shutdown()
 
-    return cast(_TFunc, wrapper)
+    return cast("_TFunc", wrapper)
 
 
 # ---

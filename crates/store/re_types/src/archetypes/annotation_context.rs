@@ -90,46 +90,26 @@ impl AnnotationContext {
             component_type: Some("rerun.components.AnnotationContext".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.AnnotationContextIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [AnnotationContext::descriptor_context()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [AnnotationContext::descriptor_context()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [AnnotationContext::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            AnnotationContext::descriptor_context(),
-            AnnotationContext::descriptor_indicator(),
-        ]
-    });
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [AnnotationContext::descriptor_context()]);
 
 impl AnnotationContext {
-    /// The total number of components in the archetype: 1 required, 1 recommended, 0 optional
-    pub const NUM_COMPONENTS: usize = 2usize;
+    /// The total number of components in the archetype: 1 required, 0 recommended, 0 optional
+    pub const NUM_COMPONENTS: usize = 1usize;
 }
 
-/// Indicator component for the [`AnnotationContext`] [`::re_types_core::Archetype`]
-pub type AnnotationContextIndicator = ::re_types_core::GenericIndicatorComponent<AnnotationContext>;
-
 impl ::re_types_core::Archetype for AnnotationContext {
-    type Indicator = AnnotationContextIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.AnnotationContext".into()
@@ -138,14 +118,6 @@ impl ::re_types_core::Archetype for AnnotationContext {
     #[inline]
     fn display_name() -> &'static str {
         "Annotation context"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        AnnotationContextIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -186,10 +158,7 @@ impl ::re_types_core::AsComponents for AnnotationContext {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [Some(Self::indicator()), self.context.clone()]
-            .into_iter()
-            .flatten()
-            .collect()
+        std::iter::once(self.context.clone()).flatten().collect()
     }
 }
 
@@ -244,12 +213,7 @@ impl AnnotationContext {
             .context
             .map(|context| context.partitioned(_lengths.clone()))
             .transpose()?];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -262,7 +226,7 @@ impl AnnotationContext {
     ) -> SerializationResult<impl Iterator<Item = ::re_types_core::SerializedComponentColumn>> {
         let len_context = self.context.as_ref().map(|b| b.array.len());
         let len = None.or(len_context).unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// List of class descriptions, mapping class indices to class names, colors etc.

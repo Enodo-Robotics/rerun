@@ -67,6 +67,7 @@ impl framework::Example for Outlines {
                     aspect_ratio: resolution[0] as f32 / resolution[1] as f32,
                 },
                 pixels_per_point,
+                #[expect(clippy::disallowed_methods)] // Hardcoded colors for this example.
                 outline_config: Some(OutlineConfig {
                     outline_radius_pixel: (secs_since_startup * 2.0).sin().abs() * 10.0 + 2.0,
                     color_layer_a: re_renderer::Rgba::from_rgb(1.0, 0.6, 0.0),
@@ -74,7 +75,7 @@ impl framework::Example for Outlines {
                 }),
                 ..Default::default()
             },
-        );
+        )?;
 
         let outline_mask_large_mesh = match ((secs_since_startup * 0.5) as u64) % 5 {
             0 => OutlineMaskPreference::NONE,
@@ -116,18 +117,19 @@ impl framework::Example for Outlines {
                         ) * instance.world_from_mesh,
                         outline_mask_ids: props.outline_mask_ids,
                         picking_layer_id: Default::default(),
-                        additive_tint: Color32::TRANSPARENT,
+                        additive_tint: Color32::BLACK,
                     })
             })
             .collect_vec();
 
-        view_builder.queue_draw(re_renderer::renderer::GenericSkyboxDrawData::new(
+        view_builder.queue_draw(
             re_ctx,
-            Default::default(),
-        ));
-        view_builder.queue_draw(re_renderer::renderer::MeshDrawData::new(
-            re_ctx, &instances,
-        )?);
+            re_renderer::renderer::GenericSkyboxDrawData::new(re_ctx, Default::default()),
+        );
+        view_builder.queue_draw(
+            re_ctx,
+            re_renderer::renderer::MeshDrawData::new(re_ctx, &instances)?,
+        );
 
         let command_buffer = view_builder.draw(re_ctx, re_renderer::Rgba::TRANSPARENT)?;
 

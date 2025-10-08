@@ -19,11 +19,13 @@ import pyproj
 import requests
 import rerun as rr
 import rerun.blueprint as rrb
-import shapely
 from pyproj import CRS, Transformer
 from pyproj.aoi import AreaOfInterest
 from pyproj.database import query_utm_crs_info
 from tqdm import tqdm
+
+if typing.TYPE_CHECKING:
+    import shapely
 
 DATA_DIR = Path(__file__).parent / "dataset"
 MAP_DATA_DIR = DATA_DIR / "map_data"
@@ -39,22 +41,29 @@ INVOLI_DATASETS = {
 def download_with_progress(url: str, what: str) -> io.BytesIO:
     """Download file with tqdm progress bar."""
     chunk_size = 1024 * 1024
-    resp = requests.get(url, stream=True)
-    total_size = int(resp.headers.get("content-length", 0))
-    with tqdm(
-        desc=f"Downloading {what}…",
-        total=total_size,
-        unit="iB",
-        unit_scale=True,
-        unit_divisor=1024,
-    ) as progress:
-        download_file = io.BytesIO()
-        for data in resp.iter_content(chunk_size):
-            download_file.write(data)
-            progress.update(len(data))
+    try:
+        resp = requests.get(url, stream=True, timeout=30)
+        resp.raise_for_status()
+        total_size = int(resp.headers.get("content-length", 0))
+        with tqdm(
+            desc=f"Downloading {what}…",
+            total=total_size,
+            unit="iB",
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as progress:
+            download_file = io.BytesIO()
+            for data in resp.iter_content(chunk_size):
+                download_file.write(data)
+                progress.update(len(data))
 
-    download_file.seek(0)
-    return download_file
+        if download_file.tell() != total_size and total_size > 0:
+            raise ValueError("Download incomplete: size mismatch")
+
+        download_file.seek(0)
+        return download_file
+    except (requests.RequestException, ValueError) as e:
+        raise RuntimeError(f"Failed to download {what} from {url}: {e}") from e
 
 
 def shapely_geom_to_numpy(geom: shapely.Geometry) -> list[npt.NDArray[np.float64]]:
@@ -150,7 +159,7 @@ def find_best_utm_crs(measurements: list[Measurement]) -> CRS:
     def get_area_of_interest(measurements: list[Measurement]) -> AreaOfInterest:
         """Compute the span of coordinates for all provided measurements."""
 
-        print("Computing area of interest...")
+        print("Computing area of interest…")
         all_long_lat = [
             (a.longitude, a.latitude) for a in measurements if a.latitude is not None and a.longitude is not None
         ]
@@ -332,7 +341,7 @@ class MeasurementBatchLogger:
         timestamps = rr.TimeColumn("unix_time", timestamp=df["timestamp"].to_numpy())
         pos = self._proj.transform(df["longitude"], df["latitude"], df["barometric_altitude"])
 
-        raw_coordinates = rr.AnyValues(
+        raw_coordinates = rr.AnyValues.columns(
             latitude=df["latitude"].to_numpy(),
             longitude=df["longitude"].to_numpy(),
             barometric_altitude=df["barometric_altitude"].to_numpy(),
@@ -344,7 +353,7 @@ class MeasurementBatchLogger:
             [
                 *rr.Points3D.columns(positions=np.vstack(pos).T),
                 *rr.GeoPoints.columns(positions=np.vstack((df["latitude"], df["longitude"])).T),
-                *raw_coordinates.columns(),
+                *raw_coordinates,
             ],
         )
 

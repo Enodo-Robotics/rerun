@@ -14,14 +14,13 @@ use tracing::instrument;
 
 use re_chunk::ComponentIdentifier;
 use re_chunk_store::{QueryExpression, SparseFillStrategy, ViewContentsSelector};
-use re_dataframe::{QueryCache, QueryEngine};
 use re_datafusion::DataframeQueryTableProvider;
-use re_log_types::{EntityPath, EntityPathFilter, ResolvedTimeRange};
+use re_log_types::{AbsoluteTimeRange, EntityPath, EntityPathFilter};
 use re_sdk::ComponentDescriptor;
 use re_sorbet::ColumnDescriptor;
 
 use crate::catalog::{PyDatasetEntry, to_py_err};
-use crate::utils::get_tokio_runtime;
+use crate::utils::{get_tokio_runtime, wait_for_future};
 
 /// View into a remote dataset acting as DataFusion table provider.
 #[pyclass(name = "DataframeQueryView")]
@@ -43,7 +42,6 @@ impl PyDataframeQueryView {
         index: Option<String>,
         contents: Py<PyAny>,
         include_semantically_empty_columns: bool,
-        include_indicator_columns: bool,
         include_tombstone_columns: bool,
         py: Python<'_>,
     ) -> PyResult<Self> {
@@ -66,7 +64,6 @@ impl PyDataframeQueryView {
             query_expression: QueryExpression {
                 view_contents: Some(view_contents),
                 include_semantically_empty_columns,
-                include_indicator_columns,
                 include_tombstone_columns,
                 include_static_columns: if static_only {
                     re_chunk_store::StaticColumnSelection::StaticOnly
@@ -78,12 +75,7 @@ impl PyDataframeQueryView {
                 filtered_index_values: None,
                 using_index_values: None,
                 filtered_is_not_null: None,
-                //TODO(#10327): this should not be necessary!
-                sparse_fill_strategy: if static_only {
-                    SparseFillStrategy::LatestAtGlobal
-                } else {
-                    SparseFillStrategy::None
-                },
+                sparse_fill_strategy: SparseFillStrategy::None,
                 selection: None,
             },
             partition_ids: vec![],
@@ -152,14 +144,8 @@ impl PyDataframeQueryView {
     ///
     ///     The original view will not be modified.
     fn filter_range_sequence(&self, py: Python<'_>, start: i64, end: i64) -> PyResult<Self> {
+        // TODO(emilk): it would be nice to add a check here that the index type is indeed a sequence.
         match self.query_expression.filtered_index.as_ref() {
-            // TODO(#9084): do we need this check? If so, how can we accomplish it?
-            // Some(filtered_index) if filtered_index.typ() != TimeType::Sequence => {
-            //     return Err(PyValueError::new_err(format!(
-            //         "Index for {} is not a sequence.",
-            //         filtered_index.name()
-            //     )));
-            // }
             Some(_) => {}
 
             None => {
@@ -191,7 +177,7 @@ impl PyDataframeQueryView {
             re_chunk::TimeInt::MAX
         };
 
-        let resolved = ResolvedTimeRange::new(start, end);
+        let resolved = AbsoluteTimeRange::new(start, end);
 
         Ok(self.clone_with_new_query(py, |query_expression| {
             query_expression.filtered_index_range = Some(resolved);
@@ -219,14 +205,8 @@ impl PyDataframeQueryView {
     ///
     ///     The original view will not be modified.
     fn filter_range_secs(&self, py: Python<'_>, start: f64, end: f64) -> PyResult<Self> {
+        // TODO(emilk): it would be nice to add a check here that the index type is indeed temporal
         match self.query_expression.filtered_index.as_ref() {
-            // TODO(#9084): do we need this check? If so, how can we accomplish it?
-            // Some(filtered_index) if filtered_index.typ() != TimeType::Time => {
-            //     return Err(PyValueError::new_err(format!(
-            //         "Index for {} is not temporal.",
-            //         filtered_index.name()
-            //     )));
-            // }
             Some(_) => {}
 
             None => {
@@ -239,7 +219,7 @@ impl PyDataframeQueryView {
         let start = re_log_types::Timestamp::from_secs_since_epoch(start);
         let end = re_log_types::Timestamp::from_secs_since_epoch(end);
 
-        let resolved = ResolvedTimeRange::new(start, end);
+        let resolved = AbsoluteTimeRange::new(start, end);
 
         Ok(self.clone_with_new_query(py, |query_expression| {
             query_expression.filtered_index_range = Some(resolved);
@@ -267,14 +247,8 @@ impl PyDataframeQueryView {
     ///
     ///     The original view will not be modified.
     fn filter_range_nanos(&self, py: Python<'_>, start: i64, end: i64) -> PyResult<Self> {
+        // TODO(emilk): it would be nice to add a check here that the index type is indeed a sequence.
         match self.query_expression.filtered_index.as_ref() {
-            // TODO(#9084): do we need this?
-            // Some(filtered_index) if filtered_index.typ() != TimeType::Time => {
-            //     return Err(PyValueError::new_err(format!(
-            //         "Index for {} is not temporal.",
-            //         filtered_index.name()
-            //     )));
-            // }
             Some(_) => {}
 
             None => {
@@ -287,7 +261,7 @@ impl PyDataframeQueryView {
         let start = re_log_types::Timestamp::from_nanos_since_epoch(start);
         let end = re_log_types::Timestamp::from_nanos_since_epoch(end);
 
-        let resolved = ResolvedTimeRange::new(start, end);
+        let resolved = AbsoluteTimeRange::new(start, end);
 
         Ok(self.clone_with_new_query(py, |query_expression| {
             query_expression.filtered_index_range = Some(resolved);
@@ -411,46 +385,27 @@ impl PyDataframeQueryView {
         self_: PyRef<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyCapsule>> {
-        let dataset = self_.dataset.borrow(py);
-        let entry = dataset.as_super();
-        let dataset_id = entry.details.id;
-        let connection = entry.client.borrow(py).connection().clone();
-
-        //
-        // Fetch relevant chunks
-        //
-
-        let chunk_stores = connection.get_chunks_for_dataframe_query(
-            py,
-            dataset_id,
-            &self_.query_expression,
-            self_.partition_ids.as_slice(),
-        )?;
-
-        let query_engines = chunk_stores
-            .into_iter()
-            .map(|(partition_id, store_handle)| {
-                let query_engine = QueryEngine::new(
-                    store_handle.clone(),
-                    QueryCache::new_handle(store_handle.clone()),
-                );
-
-                (partition_id, query_engine)
-            })
-            .collect();
-
-        let provider: Arc<dyn TableProvider> =
-            DataframeQueryTableProvider::new(query_engines, &self_.query_expression)
-                .map_err(to_py_err)?
-                .try_into()
-                .map_err(to_py_err)?;
+        let provider = self_.as_table_provider(py)?;
 
         let capsule_name = cr"datafusion_table_provider".into();
 
         let runtime = get_tokio_runtime().handle().clone();
-        let provider = FFI_TableProvider::new(provider, false, Some(runtime));
+        let provider = FFI_TableProvider::new(provider, true, Some(runtime));
 
         PyCapsule::new(py, provider, Some(capsule_name))
+    }
+
+    /// Convert this view to a [`pyarrow.RecordBatchReader`][].
+    #[instrument(skip_all)]
+    fn to_arrow_reader<'py>(
+        self_: PyRef<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let df = Self::df(self_)?;
+
+        py.import("pyarrow")?
+            .getattr("RecordBatchReader")?
+            .call_method1("from_stream", (df,))
     }
 
     /// Register this view to the global DataFusion context and return a DataFrame.
@@ -481,6 +436,7 @@ impl PyDataframeQueryView {
     }
 
     /// Get the relevant chunk_ids for this view.
+    #[instrument(skip_all)]
     fn get_chunk_ids<'py>(
         self_: PyRef<'py, Self>,
         py: Python<'py>,
@@ -497,6 +453,28 @@ impl PyDataframeQueryView {
             &self_.query_expression,
             self_.partition_ids.as_slice(),
         )
+    }
+}
+
+impl PyDataframeQueryView {
+    fn as_table_provider(&self, py: Python<'_>) -> PyResult<Arc<dyn TableProvider>> {
+        let dataset = self.dataset.borrow(py);
+        let entry = dataset.as_super();
+        let dataset_id = entry.details.id;
+        let connection = entry.client.borrow(py).connection().clone();
+
+        wait_for_future(py, async {
+            DataframeQueryTableProvider::new(
+                connection.origin().clone(),
+                connection.connection_registry().clone(),
+                dataset_id,
+                &self.query_expression,
+                &self.partition_ids,
+            )
+            .await
+        })
+        .map(|p| Arc::new(p) as Arc<dyn TableProvider>)
+        .map_err(to_py_err)
     }
 }
 

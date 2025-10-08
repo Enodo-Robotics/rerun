@@ -1,11 +1,8 @@
-use std::collections::BTreeMap;
-
 use itertools::Itertools as _;
 
-use re_log_types::{ApplicationId, EntryId, StoreId, StoreKind};
+use re_log_types::{StoreId, StoreKind};
 
 use crate::EntityDb;
-use crate::entity_db::EntityDbClass;
 
 #[derive(thiserror::Error, Debug)]
 pub enum StoreLoadError {
@@ -14,20 +11,6 @@ pub enum StoreLoadError {
 
     #[error(transparent)]
     ChunkStore(#[from] crate::Error),
-}
-
-// ---
-
-pub type DatasetRecordings<'a> = BTreeMap<EntryId, Vec<&'a EntityDb>>;
-
-pub type RemoteRecordings<'a> = BTreeMap<re_uri::Origin, DatasetRecordings<'a>>;
-
-pub type LocalRecordings<'a> = BTreeMap<ApplicationId, Vec<&'a EntityDb>>;
-
-pub struct SortDatasetsResults<'a> {
-    pub remote_recordings: RemoteRecordings<'a>,
-    pub example_recordings: LocalRecordings<'a>,
-    pub local_recordings: LocalRecordings<'a>,
 }
 
 // ---
@@ -75,49 +58,6 @@ impl StoreBundle {
         self.recording_store.remove(id)
     }
 
-    pub fn sort_recordings_by_class(&self) -> SortDatasetsResults<'_> {
-        let mut remote_recordings: RemoteRecordings<'_> = BTreeMap::new();
-        let mut local_recordings: LocalRecordings<'_> = BTreeMap::new();
-        let mut example_recordings: LocalRecordings<'_> = BTreeMap::new();
-
-        for entity_db in self.entity_dbs() {
-            // We want to show all open applications, even if they have no recordings
-            let Some(app_id) = entity_db.app_id().cloned() else {
-                continue; // this only happens if we haven't even started loading it, or if something is really wrong with it.
-            };
-
-            match entity_db.store_class() {
-                EntityDbClass::LocalRecording => {
-                    local_recordings.entry(app_id).or_default().push(entity_db);
-                }
-
-                EntityDbClass::ExampleRecording => {
-                    example_recordings
-                        .entry(app_id)
-                        .or_default()
-                        .push(entity_db);
-                }
-
-                EntityDbClass::DatasetPartition(uri) => {
-                    remote_recordings
-                        .entry(uri.origin.clone())
-                        .or_default()
-                        .entry(EntryId::from(uri.dataset_id))
-                        .or_default()
-                        .push(entity_db);
-                }
-
-                EntityDbClass::Blueprint => continue,
-            }
-        }
-
-        SortDatasetsResults {
-            remote_recordings,
-            example_recordings,
-            local_recordings,
-        }
-    }
-
     // --
 
     pub fn contains(&self, id: &StoreId) -> bool {
@@ -136,7 +76,7 @@ impl StoreBundle {
     /// One is created if it doesn't already exist.
     pub fn entry(&mut self, id: &StoreId) -> &mut EntityDb {
         self.recording_store.entry(id.clone()).or_insert_with(|| {
-            re_log::trace!("Creating new store: '{id}'");
+            re_log::trace!("Creating new store: '{id:?}'");
             EntityDb::new(id.clone())
         })
     }
@@ -145,7 +85,7 @@ impl StoreBundle {
     ///
     /// Like [`Self::entry`] but also sets `StoreInfo` to a default value.
     pub fn blueprint_entry(&mut self, id: &StoreId) -> &mut EntityDb {
-        debug_assert_eq!(id.kind, StoreKind::Blueprint);
+        debug_assert!(id.is_blueprint());
 
         self.recording_store.entry(id.clone()).or_insert_with(|| {
             // TODO(jleibs): If the blueprint doesn't exist this probably means we are
@@ -154,12 +94,11 @@ impl StoreBundle {
 
             let mut blueprint_db = EntityDb::new(id.clone());
 
-            re_log::trace!("Creating a new blueprint '{id}'");
+            re_log::trace!("Creating a new blueprint '{id:?}'");
 
             blueprint_db.set_store_info(re_log_types::SetStoreInfo {
                 row_id: *re_chunk::RowId::new(),
                 info: re_log_types::StoreInfo {
-                    application_id: id.as_str().into(),
                     store_id: id.clone(),
                     cloned_from: None,
                     store_source: re_log_types::StoreSource::Other("viewer".to_owned()),
@@ -213,6 +152,6 @@ impl StoreBundle {
 
         entity_dbs.sort_by_key(|db| db.last_modified_at());
 
-        entity_dbs.first().map(|db| db.store_id())
+        entity_dbs.first().map(|db| db.store_id().clone())
     }
 }

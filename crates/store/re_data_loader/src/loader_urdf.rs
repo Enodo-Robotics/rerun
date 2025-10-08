@@ -80,8 +80,14 @@ impl DataLoader for UrdfDataLoader {
         let robot = urdf_rs::read_file(&filepath)
             .with_context(|| format!("Path: {}", filepath.display()))?;
 
-        log_robot(robot, &filepath, &tx, &settings.store_id)
-            .with_context(|| "Failed to load URDF file!")?;
+        log_robot(
+            robot,
+            &filepath,
+            &tx,
+            &settings.recommended_store_id(),
+            &settings.entity_path_prefix,
+        )
+        .with_context(|| "Failed to load URDF file!")?;
 
         Ok(())
     }
@@ -102,8 +108,14 @@ impl DataLoader for UrdfDataLoader {
         let robot = urdf_rs::read_from_string(&String::from_utf8_lossy(&contents))
             .with_context(|| format!("Path: {}", filepath.display()))?;
 
-        log_robot(robot, &filepath, &tx, &settings.store_id)
-            .with_context(|| "Failed to load URDF file!")?;
+        log_robot(
+            robot,
+            &filepath,
+            &tx,
+            &settings.recommended_store_id(),
+            &settings.entity_path_prefix,
+        )
+        .with_context(|| "Failed to load URDF file!")?;
 
         Ok(())
     }
@@ -251,18 +263,17 @@ fn log_robot(
     filepath: &Path,
     tx: &Sender<LoadedData>,
     store_id: &StoreId,
+    entity_path_prefix: &Option<EntityPath>,
 ) -> anyhow::Result<()> {
     let urdf_dir = filepath.parent().map(|path| path.to_path_buf());
 
     let urdf_tree = UrdfTree::new(robot, urdf_dir).with_context(|| "Failed to build URDF tree!")?;
+    let entity_path = entity_path_prefix
+        .clone()
+        .map(|prefix| prefix / EntityPath::from_single_string(urdf_tree.name.clone()))
+        .unwrap_or_else(|| EntityPath::from_single_string(urdf_tree.name.clone()));
 
-    walk_tree(
-        &urdf_tree,
-        tx,
-        store_id,
-        &EntityPath::from_single_string(urdf_tree.name.clone()),
-        &urdf_tree.root.name,
-    )?;
+    walk_tree(&urdf_tree, tx, store_id, &entity_path, &urdf_tree.root.name)?;
 
     Ok(())
 }
@@ -548,22 +559,22 @@ fn log_geometry(
                             *r as f32, *g as f32, *b as f32, *a as f32,
                         ),
                     );
-                };
+                }
                 if texture.is_some() {
                     re_log::warn_once!("Material texture not supported"); // TODO(emilk): support textures
                 }
             }
 
-            if let Some(scale) = scale {
-                if scale != &urdf_rs::Vec3([1.0; 3]) {
-                    let urdf_rs::Vec3([x, y, z]) = *scale;
-                    send_archetype(
-                        tx,
-                        store_id,
-                        entity_path.clone(),
-                        &Transform3D::update_fields().with_scale([x as f32, y as f32, z as f32]),
-                    )?;
-                }
+            if let Some(scale) = scale
+                && scale != &urdf_rs::Vec3([1.0; 3])
+            {
+                let urdf_rs::Vec3([x, y, z]) = *scale;
+                send_archetype(
+                    tx,
+                    store_id,
+                    entity_path.clone(),
+                    &Transform3D::update_fields().with_scale([x as f32, y as f32, z as f32]),
+                )?;
             }
 
             send_archetype(tx, store_id, entity_path, &asset3d)?;

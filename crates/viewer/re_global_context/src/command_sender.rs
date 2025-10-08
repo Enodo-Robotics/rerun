@@ -1,7 +1,7 @@
 use re_chunk::{EntityPath, Timeline};
 use re_chunk_store::external::re_chunk::Chunk;
-use re_data_source::DataSource;
-use re_log_types::{ResolvedTimeRangeF, StoreId};
+use re_data_source::LogDataSource;
+use re_log_types::{AbsoluteTimeRangeF, StoreId};
 use re_ui::{UICommand, UICommandSender};
 
 use crate::RecordingOrTable;
@@ -18,11 +18,10 @@ pub enum SystemCommand {
     /// Close this app and all its recordings.
     CloseApp(re_log_types::ApplicationId),
 
-    /// Load some data.
-    LoadDataSource(DataSource),
-
-    /// Clear everything that came from this source, and close the source.
-    ClearSourceAndItsStores(re_smart_channel::SmartChannelSource),
+    /// Load data from a given data source.
+    ///
+    /// Will not load any new data if the source is already one of the active data sources.
+    LoadDataSource(LogDataSource),
 
     /// Add a new receiver for log messages.
     AddReceiver(re_smart_channel::Receiver<re_log_types::LogMsg>),
@@ -91,12 +90,23 @@ pub enum SystemCommand {
     #[cfg(debug_assertions)]
     EnableInspectBlueprintTimeline(bool),
 
+    /// Navigate to time/entities/anchors/etc. that are set in a [`re_uri::Fragment`].
+    SetUrlFragment {
+        store_id: StoreId,
+        fragment: re_uri::Fragment,
+    },
+
+    /// Copies the given url to the clipboard.
+    ///
+    /// On web this adds the viewer url as the base url.
+    CopyViewerUrl(String),
+
     /// Set the item selection.
-    SetSelection(crate::Item),
+    SetSelection(crate::ItemCollection),
 
     /// Set the active timeline and time for the given recording.
     SetActiveTime {
-        rec_id: StoreId,
+        store_id: StoreId,
         timeline: re_chunk::Timeline,
         time: Option<re_log_types::TimeReal>,
     },
@@ -105,9 +115,9 @@ pub enum SystemCommand {
     ///
     /// This also sets the active timeline and activates the loop selection.
     SetLoopSelection {
-        rec_id: StoreId,
+        store_id: StoreId,
         timeline: Timeline,
-        time_range: ResolvedTimeRangeF,
+        time_range: AbsoluteTimeRangeF,
     },
 
     /// Sets the focus to the given item.
@@ -124,9 +134,18 @@ pub enum SystemCommand {
     /// Just like selection highlighting, the exact behavior of focusing is up to the receiving views.
     SetFocus(crate::Item),
 
+    /// Show a notification to the user
+    ShowNotification(re_ui::notifications::Notification),
+
     /// Add a task, run on a background thread, that saves something to disk.
     #[cfg(not(target_arch = "wasm32"))]
     FileSaver(Box<dyn FnOnce() -> anyhow::Result<std::path::PathBuf> + Send + 'static>),
+}
+
+impl SystemCommand {
+    pub fn clear_selection() -> Self {
+        Self::SetSelection(crate::ItemCollection::default())
+    }
 }
 
 impl std::fmt::Debug for SystemCommand {

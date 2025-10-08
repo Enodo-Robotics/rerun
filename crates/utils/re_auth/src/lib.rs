@@ -15,12 +15,33 @@ mod provider;
 mod service;
 mod token;
 
+#[cfg(feature = "cli")]
+pub mod cli;
+
+#[cfg(feature = "workos")]
+pub mod workos;
+
 pub use service::client;
 pub use token::{Jwt, TokenError};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use error::Error;
 #[cfg(not(target_arch = "wasm32"))]
-pub use provider::{Claims, RedapProvider, VerificationOptions};
+pub use provider::{Claims, RedapProvider, SecretKey, VerificationOptions};
 #[cfg(not(target_arch = "wasm32"))]
 pub use service::server;
+
+/// The error message in Tonic's gRPC status when the token is malformed or invalid in some way.
+///
+/// The associated status code will always be `Unauthenticated`.
+pub const ERROR_MESSAGE_MALFORMED_CREDENTIALS: &str = "malformed auth token";
+
+/// The error message in Tonic's gRPC status when no token was found.
+///
+/// The associated status code will always be `Unauthenticated`.
+pub const ERROR_MESSAGE_MISSING_CREDENTIALS: &str = "missing credentials";
+
+/// The error message in Tonic's gRPC status when a _valid token_ did not have the required permissions.
+///
+/// The associated status code will always be `Unauthenticated`.
+pub const ERROR_MESSAGE_INVALID_CREDENTIALS: &str = "invalid credentials";

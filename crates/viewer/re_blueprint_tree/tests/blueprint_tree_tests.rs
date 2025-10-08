@@ -2,15 +2,15 @@
 
 use egui::Vec2;
 
+use egui_kittest::{OsThreshold, SnapshotOptions};
 use re_blueprint_tree::BlueprintTree;
 use re_chunk_store::RowId;
 use re_chunk_store::external::re_chunk::ChunkBuilder;
 use re_log_types::{Timeline, build_frame_nr};
+use re_test_context::TestContext;
+use re_test_viewport::TestContextExt as _;
 use re_types::archetypes::Points3D;
-use re_viewer_context::{
-    CollapseScope, RecommendedView, ViewClass as _, ViewId, test_context::TestContext,
-};
-use re_viewport::test_context_ext::TestContextExt as _;
+use re_viewer_context::{CollapseScope, RecommendedView, ViewClass as _, ViewId};
 use re_viewport_blueprint::{ViewBlueprint, ViewportBlueprint};
 
 #[test]
@@ -35,7 +35,7 @@ fn basic_blueprint_panel_should_match_snapshot() {
 
 #[test]
 fn collapse_expand_all_blueprint_panel_should_match_snapshot() {
-    for (snapshot_name, should_expand) in &[
+    for (snapshot_name, should_expand) in [
         ("expand_all_blueprint_panel", true),
         ("collapse_all_blueprint_panel", false),
     ] {
@@ -72,7 +72,7 @@ fn collapse_expand_all_blueprint_panel_should_match_snapshot() {
                         viewer_ctx,
                         &view_id,
                         CollapseScope::BlueprintTree,
-                        *should_expand,
+                        should_expand,
                     );
 
                     let blueprint = ViewportBlueprint::from_db(
@@ -87,7 +87,12 @@ fn collapse_expand_all_blueprint_panel_should_match_snapshot() {
             });
 
         harness.run();
-        harness.snapshot(snapshot_name);
+        harness.snapshot_options(
+            snapshot_name,
+            // @wumpf's Windows machine needs a bit of a higher threshold to pass this test due to discrepancies in text rendering.
+            // (Software Rasterizer on CI seems fine with the default).
+            &SnapshotOptions::new().failed_pixel_count_threshold(OsThreshold::new(0).windows(15)),
+        );
     }
 }
 
@@ -201,5 +206,12 @@ fn run_blueprint_panel_and_save_snapshot(
         });
 
     harness.run();
-    harness.snapshot(snapshot_name);
+    harness.snapshot_options(
+        snapshot_name,
+        // @wumpf's Windows machine needs a bit of a higher threshold to pass this test due to discrepancies in text rendering.
+        // (Software Rasterizer on CI seems fine with the default).
+        &SnapshotOptions::new()
+            .threshold(OsThreshold::new(SnapshotOptions::default().threshold).windows(0.8))
+            .failed_pixel_count_threshold(OsThreshold::new(0).windows(15)),
+    );
 }

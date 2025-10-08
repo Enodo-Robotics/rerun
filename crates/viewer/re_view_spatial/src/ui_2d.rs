@@ -3,7 +3,10 @@ use macaw::IsoTransform;
 
 use re_entity_db::EntityPath;
 use re_log::ResultExt as _;
-use re_renderer::view_builder::{TargetConfiguration, ViewBuilder};
+use re_renderer::{
+    ViewPickingConfiguration,
+    view_builder::{TargetConfiguration, ViewBuilder},
+};
 use re_types::blueprint::{
     archetypes::{Background, NearClipPlane, VisualBounds2D},
     components as blueprint_components,
@@ -208,18 +211,6 @@ impl SpatialView2D {
         // Don't let clipping plane become zero
         let near_clip_plane = f32::max(f32::MIN_POSITIVE, *near_clip_plane.0);
 
-        let scene_bounds = *scene_from_ui.to();
-        let Ok(target_config) = setup_target_config(
-            &painter,
-            scene_bounds,
-            near_clip_plane,
-            &query.space_origin.to_string(),
-            query.highlights.any_outlines(),
-            &state.pinhole_at_origin,
-        ) else {
-            return Ok(());
-        };
-
         // Create labels now since their shapes participate are added to scene.ui for picking.
         let (label_shapes, ui_rects) = create_labels(
             collect_ui_labels(&system_output.view_systems),
@@ -230,34 +221,48 @@ impl SpatialView2D {
             SpatialViewKind::TwoD,
         );
 
-        let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config);
-
-        if let Some(pointer_pos_ui) = response.hover_pos() {
+        let picking_config = if let Some(pointer_pos_ui) = response.hover_pos() {
             let picking_context = crate::picking::PickingContext::new(
                 pointer_pos_ui,
                 scene_from_ui,
                 ui.ctx().pixels_per_point(),
                 &eye,
             );
-            crate::picking_ui::picking(
+            let (_response, picking_config) = crate::picking_ui::picking(
                 ctx,
                 &picking_context,
                 ui,
                 response,
-                &mut view_builder,
                 state,
                 &system_output,
                 &ui_rects,
                 query,
                 SpatialViewKind::TwoD,
             )?;
+            picking_config
         } else {
             state.previous_picking_result = None;
-        }
+            None
+        };
+
+        let scene_bounds = *scene_from_ui.to();
+        let Ok(target_config) = setup_target_config(
+            &painter,
+            scene_bounds,
+            near_clip_plane,
+            &query.space_origin.to_string(),
+            query.highlights.any_outlines(),
+            &state.pinhole_at_origin,
+            picking_config,
+        ) else {
+            return Ok(());
+        };
+        let mut view_builder = ViewBuilder::new(ctx.render_ctx(), target_config)?;
+
         let view_ctx = self.view_context(ctx, query.view_id, state); // Recreate view state to handle context editing during picking.
 
         for draw_data in system_output.draw_data {
-            view_builder.queue_draw(draw_data);
+            view_builder.queue_draw(ctx.render_ctx(), draw_data);
         }
 
         let background = ViewProperty::from_archetype::<Background>(
@@ -268,7 +273,7 @@ impl SpatialView2D {
         let (background_drawable, clear_color) =
             crate::configure_background(&view_ctx, &background, self)?;
         if let Some(background_drawable) = background_drawable {
-            view_builder.queue_draw(background_drawable);
+            view_builder.queue_draw(ctx.render_ctx(), background_drawable);
         }
 
         // ------------------------------------------------------------------------
@@ -318,6 +323,7 @@ fn setup_target_config(
     space_name: &str,
     any_outlines: bool,
     scene_pinhole: &Option<Pinhole>,
+    picking_config: Option<ViewPickingConfiguration>,
 ) -> anyhow::Result<TargetConfiguration> {
     // ⚠️ When changing this code, make sure to run `tests/rust/test_pinhole_projection`.
 
@@ -355,6 +361,8 @@ fn setup_target_config(
                 principal_point.extend(1.0),
             ),
             resolution,
+            color: None,
+            line_width: None,
         }
     };
     let pinhole_rect = Rect::from_min_size(
@@ -409,6 +417,7 @@ fn setup_target_config(
             pixels_per_point,
             outline_config: any_outlines.then(|| re_view::outline_config(egui_painter.ctx())),
             blend_with_background: false,
+            picking_config,
         }
     })
 }
@@ -436,33 +445,33 @@ fn show_projections_from_3d_space(
     } = item_context
     {
         for (space_2d, pos_2d) in target_spaces {
-            if space_2d == space {
-                if let Some(pos_2d) = pos_2d {
-                    // User is hovering a 2D point inside a 3D view.
-                    let pos_in_ui = ui_from_scene.transform_pos(pos2(pos_2d.x, pos_2d.y));
-                    let radius = 4.0;
-                    shapes.push(Shape::circle_filled(
-                        pos_in_ui,
-                        radius + 2.0,
-                        ui.visuals().extreme_bg_color,
-                    ));
-                    shapes.push(Shape::circle_filled(pos_in_ui, radius, circle_fill_color));
+            if space_2d == space
+                && let Some(pos_2d) = pos_2d
+            {
+                // User is hovering a 2D point inside a 3D view.
+                let pos_in_ui = ui_from_scene.transform_pos(pos2(pos_2d.x, pos_2d.y));
+                let radius = 4.0;
+                shapes.push(Shape::circle_filled(
+                    pos_in_ui,
+                    radius + 2.0,
+                    ui.visuals().extreme_bg_color,
+                ));
+                shapes.push(Shape::circle_filled(pos_in_ui, radius, circle_fill_color));
 
-                    let text_color = ui.visuals().strong_text_color();
-                    let text = format!("Depth: {:.3} m", pos_2d.z);
-                    let font_id = egui::TextStyle::Body.resolve(ui.style());
-                    let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text, font_id, text_color));
-                    let rect = Align2::CENTER_TOP.anchor_rect(Rect::from_min_size(
-                        pos_in_ui + vec2(0.0, 5.0),
-                        galley.size(),
-                    ));
-                    shapes.push(Shape::rect_filled(
-                        rect,
-                        2.0,
-                        ui.visuals().extreme_bg_color.gamma_multiply_u8(196),
-                    ));
-                    shapes.push(Shape::galley(rect.min, galley, text_color));
-                }
+                let text_color = ui.visuals().strong_text_color();
+                let text = format!("Depth: {:.3} m", pos_2d.z);
+                let font_id = egui::TextStyle::Body.resolve(ui.style());
+                let galley = ui.fonts(|fonts| fonts.layout_no_wrap(text, font_id, text_color));
+                let rect = Align2::CENTER_TOP.anchor_rect(Rect::from_min_size(
+                    pos_in_ui + vec2(0.0, 5.0),
+                    galley.size(),
+                ));
+                shapes.push(Shape::rect_filled(
+                    rect,
+                    2.0,
+                    ui.visuals().extreme_bg_color.gamma_multiply_u8(196),
+                ));
+                shapes.push(Shape::galley(rect.min, galley, text_color));
             }
         }
     }
@@ -471,5 +480,5 @@ fn show_projections_from_3d_space(
 
 #[test]
 fn test_help_view() {
-    re_viewer_context::test_context::TestContext::test_help_view(help);
+    re_test_context::TestContext::test_help_view(help);
 }

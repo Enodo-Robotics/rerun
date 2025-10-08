@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, fmt::Formatter, fs, sync::Arc};
 
-use arrow::array::ArrayRef;
+use arrow::{array::ArrayRef, datatypes::DataType};
 use egui::Vec2;
 use egui_kittest::{SnapshotError, SnapshotOptions};
 use itertools::Itertools as _;
@@ -10,6 +10,7 @@ use nohash_hasher::IntSet;
 
 use re_component_ui::create_component_ui_registry;
 use re_log_types::{EntityPath, TimelineName};
+use re_test_context::TestContext;
 use re_types::{
     ComponentDescriptor,
     blueprint::components::{ComponentColumnSelector, QueryExpression},
@@ -21,7 +22,6 @@ use re_ui::{UiExt as _, list_item};
 use re_viewer_context::{
     UiLayout, ViewerContext,
     external::re_chunk_store::{LatestAtQuery, external::re_chunk},
-    test_context::TestContext,
 };
 
 /// Test case master list.
@@ -107,6 +107,42 @@ fn test_cases(reflection: &Reflection) -> Vec<TestCase> {
             arrow::array::UInt8Array::from(vec![42; 3001]),
             "any_value_large_blob",
         ),
+        TestCase::from_arrow(
+            ComponentType::from("custom_struct_array"),
+            arrow::array::StructArray::from(vec![
+                (
+                    Arc::new(arrow::datatypes::Field::new("a", DataType::Utf8, false)),
+                    Arc::new(arrow::array::StringArray::from(vec!["foo", "bar"])) as ArrayRef,
+                ),
+                (
+                    Arc::new(arrow::datatypes::Field::new("b", DataType::Boolean, false)),
+                    Arc::new(arrow::array::BooleanArray::from(vec![true, false])) as ArrayRef,
+                ),
+                (
+                    Arc::new(arrow::datatypes::Field::new("c", DataType::Int32, false)),
+                    Arc::new(arrow::array::Int32Array::from(vec![42, 17])) as ArrayRef,
+                ),
+            ]),
+            "any_value_struct_array",
+        ),
+        TestCase::from_arrow(
+            ComponentType::from("custom_struct_array_single_element"),
+            arrow::array::StructArray::from(vec![
+                (
+                    Arc::new(arrow::datatypes::Field::new("a", DataType::Utf8, false)),
+                    Arc::new(arrow::array::StringArray::from(vec!["foo"])) as ArrayRef,
+                ),
+                (
+                    Arc::new(arrow::datatypes::Field::new("b", DataType::Boolean, false)),
+                    Arc::new(arrow::array::BooleanArray::from(vec![true])) as ArrayRef,
+                ),
+                (
+                    Arc::new(arrow::datatypes::Field::new("c", DataType::Int32, false)),
+                    Arc::new(arrow::array::Int32Array::from(vec![42])) as ArrayRef,
+                ),
+            ]),
+            "any_value_struct_array_single_element",
+        ),
     ];
 
     //
@@ -183,7 +219,7 @@ pub fn test_all_components_ui_as_list_items_narrow() {
     let test_context = get_test_context();
     let test_cases = test_cases(&test_context.reflection);
     let snapshot_options =
-        SnapshotOptions::default().output_path("tests/snapshots/all_components_list_item_narrow");
+        SnapshotOptions::new().output_path("tests/snapshots/all_components_list_item_narrow");
 
     let results = test_cases
         .iter()
@@ -207,7 +243,7 @@ pub fn test_all_components_ui_as_list_items_wide() {
     let test_context = get_test_context();
     let test_cases = test_cases(&test_context.reflection);
     let snapshot_options =
-        SnapshotOptions::default().output_path("tests/snapshots/all_components_list_item_wide");
+        SnapshotOptions::new().output_path("tests/snapshots/all_components_list_item_wide");
 
     let results = test_cases
         .iter()
@@ -271,7 +307,7 @@ fn test_single_component_ui_as_list_item(
         });
 
     harness.run();
-    harness.try_snapshot_options(&format!("{test_case}"), _snapshot_options)
+    harness.try_snapshot_options(format!("{test_case}"), _snapshot_options)
 }
 
 // ---

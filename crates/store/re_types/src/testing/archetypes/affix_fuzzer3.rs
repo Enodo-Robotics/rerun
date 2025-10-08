@@ -257,26 +257,16 @@ impl AffixFuzzer3 {
             component_type: Some("rerun.testing.components.AffixFuzzer18".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.testing.components.AffixFuzzer3Indicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [AffixFuzzer3::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 18usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 18usize]> =
+    std::sync::LazyLock::new(|| {
         [
             AffixFuzzer3::descriptor_fuzz2001(),
             AffixFuzzer3::descriptor_fuzz2002(),
@@ -299,10 +289,9 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 18usize]
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 19usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 18usize]> =
+    std::sync::LazyLock::new(|| {
         [
-            AffixFuzzer3::descriptor_indicator(),
             AffixFuzzer3::descriptor_fuzz2001(),
             AffixFuzzer3::descriptor_fuzz2002(),
             AffixFuzzer3::descriptor_fuzz2003(),
@@ -325,16 +314,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 19usize]> =
     });
 
 impl AffixFuzzer3 {
-    /// The total number of components in the archetype: 0 required, 1 recommended, 18 optional
-    pub const NUM_COMPONENTS: usize = 19usize;
+    /// The total number of components in the archetype: 0 required, 0 recommended, 18 optional
+    pub const NUM_COMPONENTS: usize = 18usize;
 }
 
-/// Indicator component for the [`AffixFuzzer3`] [`::re_types_core::Archetype`]
-pub type AffixFuzzer3Indicator = ::re_types_core::GenericIndicatorComponent<AffixFuzzer3>;
-
 impl ::re_types_core::Archetype for AffixFuzzer3 {
-    type Indicator = AffixFuzzer3Indicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.testing.archetypes.AffixFuzzer3".into()
@@ -343,14 +327,6 @@ impl ::re_types_core::Archetype for AffixFuzzer3 {
     #[inline]
     fn display_name() -> &'static str {
         "Affix fuzzer 3"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        AffixFuzzer3Indicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -462,7 +438,6 @@ impl ::re_types_core::AsComponents for AffixFuzzer3 {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.fuzz2001.clone(),
             self.fuzz2002.clone(),
             self.fuzz2003.clone(),
@@ -676,12 +651,7 @@ impl AffixFuzzer3 {
                 .map(|fuzz2018| fuzz2018.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -730,7 +700,7 @@ impl AffixFuzzer3 {
             .or(len_fuzz2017)
             .or(len_fuzz2018)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     #[inline]

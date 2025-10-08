@@ -1,3 +1,4 @@
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use nohash_hasher::IntMap;
@@ -11,8 +12,8 @@ use re_chunk_store::{
     ChunkStoreHandle, ChunkStoreSubscriber as _, GarbageCollectionOptions, GarbageCollectionTarget,
 };
 use re_log_types::{
-    ApplicationId, EntityPath, EntityPathHash, LogMsg, ResolvedTimeRange, ResolvedTimeRangeF,
-    SetStoreInfo, StoreId, StoreInfo, StoreKind, TimeType,
+    AbsoluteTimeRange, AbsoluteTimeRangeF, ApplicationId, EntityPath, EntityPathHash, LogMsg,
+    RecordingId, SetStoreInfo, StoreId, StoreInfo, StoreKind, TimeType,
 };
 use re_query::{
     QueryCache, QueryCacheHandle, StorageEngine, StorageEngineArcReadGuard, StorageEngineReadGuard,
@@ -34,6 +35,7 @@ pub const DEFAULT_GC_TIME_BUDGET: std::time::Duration = std::time::Duration::fro
 /// The class is used to semantically group recordings in the UI (e.g. in the recording panel) and
 /// to determine how to source the default blueprint. For example, `DatasetPartition` dbs might have
 /// their default blueprint sourced remotely.
+#[derive(Debug, PartialEq, Eq)]
 pub enum EntityDbClass<'a> {
     /// This is a regular local recording (e.g. loaded from a `.rrd` file or logged to the viewer).
     LocalRecording,
@@ -42,10 +44,16 @@ pub enum EntityDbClass<'a> {
     ExampleRecording,
 
     /// This is a recording loaded from a remote dataset partition.
-    DatasetPartition(&'a re_uri::DatasetDataUri),
+    DatasetPartition(&'a re_uri::DatasetPartitionUri),
 
     /// This is a blueprint.
     Blueprint,
+}
+
+impl EntityDbClass<'_> {
+    pub fn is_example(&self) -> bool {
+        matches!(self, EntityDbClass::ExampleRecording)
+    }
 }
 
 // ---
@@ -55,6 +63,10 @@ pub enum EntityDbClass<'a> {
 /// NOTE: all mutation is to be done via public functions!
 #[derive(Clone)] // Useful for tests
 pub struct EntityDb {
+    /// Store id associated with this [`EntityDb`]. Must be identical to the `storage_engine`'s
+    /// store id.
+    store_id: StoreId,
+
     /// Set by whomever created this [`EntityDb`].
     ///
     /// Clones of an [`EntityDb`] gets a `None` source.
@@ -104,13 +116,23 @@ pub struct EntityDb {
     stats: IngestionStatistics,
 }
 
+impl Debug for EntityDb {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntityDb")
+            .field("store_id", &self.store_id)
+            .field("data_source", &self.data_source)
+            .field("set_store_info", &self.set_store_info)
+            .finish()
+    }
+}
+
 impl EntityDb {
     pub fn new(store_id: StoreId) -> Self {
         Self::with_store_config(store_id, ChunkStoreConfig::from_env().unwrap_or_default())
     }
 
     pub fn with_store_config(store_id: StoreId, store_config: ChunkStoreConfig) -> Self {
-        let store = ChunkStoreHandle::new(ChunkStore::new(store_id, store_config));
+        let store = ChunkStoreHandle::new(ChunkStore::new(store_id.clone(), store_config));
         let cache = QueryCacheHandle::new(QueryCache::new(store.clone()));
 
         // Safety: these handles are never going to be leaked outside of the `EntityDb`.
@@ -118,6 +140,7 @@ impl EntityDb {
         let storage_engine = unsafe { StorageEngine::new(store, cache) };
 
         Self {
+            store_id,
             data_source: None,
             set_store_info: None,
             last_modified_at: web_time::Instant::now(),
@@ -134,6 +157,53 @@ impl EntityDb {
     #[inline]
     pub fn tree(&self) -> &crate::EntityTree {
         &self.tree
+    }
+
+    /// Formats the entity tree into a human-readable text representation with component schema information.
+    pub fn format_with_components(&self) -> String {
+        let mut text = String::new();
+        self.tree.visit_children_recursively(|entity_path| {
+            if entity_path.is_root() {
+                return;
+            }
+            let depth = entity_path.len() - 1;
+            let indent = "  ".repeat(depth);
+            text.push_str(&format!("{indent}{entity_path}\n"));
+            let Some(components) = self
+                .storage_engine()
+                .store()
+                .all_components_for_entity_sorted(entity_path)
+            else {
+                return;
+            };
+            for component in &components {
+                let component_indent = "  ".repeat(depth + 1);
+                if let Some(component_type) = &component.component_type {
+                    if let Some(datatype) = self
+                        .storage_engine()
+                        .store()
+                        .lookup_datatype(component_type)
+                    {
+                        text.push_str(&format!(
+                            "{}{}: {}\n",
+                            component_indent,
+                            component_type.short_name(),
+                            re_arrow_util::format_data_type(&datatype)
+                        ));
+                    } else {
+                        text.push_str(&format!(
+                            "{}{}\n",
+                            component_indent,
+                            component_type.short_name()
+                        ));
+                    }
+                } else {
+                    // Fallback to component identifier
+                    text.push_str(&format!("{}{}\n", component_indent, component.component));
+                }
+            }
+        });
+        text
     }
 
     /// Returns a read-only guard to the backing [`StorageEngine`].
@@ -171,16 +241,34 @@ impl EntityDb {
         self.storage_engine.read_arc()
     }
 
+    #[inline]
     pub fn store_info_msg(&self) -> Option<&SetStoreInfo> {
         self.set_store_info.as_ref()
     }
 
+    #[inline]
     pub fn store_info(&self) -> Option<&StoreInfo> {
         self.store_info_msg().map(|msg| &msg.info)
     }
 
-    pub fn app_id(&self) -> Option<&ApplicationId> {
-        self.store_info().map(|ri| &ri.application_id)
+    #[inline]
+    pub fn application_id(&self) -> &ApplicationId {
+        self.store_id().application_id()
+    }
+
+    #[inline]
+    pub fn recording_id(&self) -> &RecordingId {
+        self.store_id().recording_id()
+    }
+
+    #[inline]
+    pub fn store_kind(&self) -> StoreKind {
+        self.store_id().kind()
+    }
+
+    #[inline]
+    pub fn store_id(&self) -> &StoreId {
+        &self.store_id
     }
 
     /// Returns the [`EntityDbClass`] of this entity db.
@@ -361,16 +449,6 @@ impl EntityDb {
         None
     }
 
-    #[inline]
-    pub fn store_kind(&self) -> StoreKind {
-        self.store_id().kind
-    }
-
-    #[inline]
-    pub fn store_id(&self) -> StoreId {
-        self.storage_engine.read().store().id()
-    }
-
     /// If this entity db is the result of a clone, which store was it cloned from?
     ///
     /// A cloned store always gets a new unique ID.
@@ -381,7 +459,8 @@ impl EntityDb {
     /// This means all active blueprints are clones.
     #[inline]
     pub fn cloned_from(&self) -> Option<&StoreId> {
-        self.store_info().and_then(|info| info.cloned_from.as_ref())
+        let info = self.store_info()?;
+        info.cloned_from.as_ref()
     }
 
     pub fn timelines(&self) -> std::collections::BTreeMap<TimelineName, Timeline> {
@@ -399,11 +478,11 @@ impl EntityDb {
     }
 
     /// Returns the time range of data on the given timeline, ignoring any static times.
-    pub fn time_range_for(&self, timeline: &TimelineName) -> Option<ResolvedTimeRange> {
+    pub fn time_range_for(&self, timeline: &TimelineName) -> Option<AbsoluteTimeRange> {
         let hist = self.time_histogram_per_timeline.get(timeline)?;
         let min = hist.min_key()?;
         let max = hist.max_key()?;
-        Some(ResolvedTimeRange::new(min, max))
+        Some(AbsoluteTimeRange::new(min, max))
     }
 
     /// Histogram of all events on the timeeline, of all entities.
@@ -473,7 +552,7 @@ impl EntityDb {
     pub fn add(&mut self, msg: &LogMsg) -> Result<Vec<ChunkStoreEvent>, Error> {
         re_tracing::profile_function!();
 
-        debug_assert_eq!(*msg.store_id(), self.store_id());
+        debug_assert_eq!(msg.store_id(), self.store_id());
 
         let store_events = match &msg {
             LogMsg::SetStoreInfo(msg) => {
@@ -507,7 +586,7 @@ impl EntityDb {
         self.add_chunk_with_timestamp_metadata(chunk, &Default::default())
     }
 
-    pub fn add_chunk_with_timestamp_metadata(
+    fn add_chunk_with_timestamp_metadata(
         &mut self,
         chunk: &Arc<Chunk>,
         timestamps: &re_sorbet::TimestampMetadata,
@@ -619,7 +698,7 @@ impl EntityDb {
     pub fn drop_time_range(
         &mut self,
         timeline: &TimelineName,
-        drop_range: ResolvedTimeRange,
+        drop_range: AbsoluteTimeRange,
     ) -> Vec<ChunkStoreEvent> {
         re_tracing::profile_function!();
 
@@ -702,7 +781,7 @@ impl EntityDb {
     /// specific time range will be accounted for.
     pub fn to_messages(
         &self,
-        time_selection: Option<(TimelineName, ResolvedTimeRangeF)>,
+        time_selection: Option<(TimelineName, AbsoluteTimeRangeF)>,
     ) -> impl Iterator<Item = ChunkResult<LogMsg>> + '_ {
         re_tracing::profile_function!();
 
@@ -716,7 +795,7 @@ impl EntityDb {
             let time_filter = time_selection.map(|(timeline, range)| {
                 (
                     timeline,
-                    ResolvedTimeRange::new(range.min.floor(), range.max.ceil()),
+                    AbsoluteTimeRange::new(range.min.floor(), range.max.ceil()),
                 )
             });
 
@@ -911,5 +990,53 @@ impl re_byte_size::SizeBytes for EntityDb {
             .stats()
             .total()
             .total_size_bytes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use re_chunk::{Chunk, RowId};
+    use re_log_types::{
+        StoreId, TimePoint, Timeline,
+        example_components::{MyPoint, MyPoints},
+    };
+
+    use super::*;
+
+    #[test]
+    fn format_with_components() -> anyhow::Result<()> {
+        re_log::setup_logging();
+
+        let mut db = EntityDb::new(StoreId::random(
+            re_log_types::StoreKind::Recording,
+            "test_app",
+        ));
+
+        let timeline_frame = Timeline::new_sequence("frame");
+
+        // Add some test data
+        {
+            let row_id = RowId::new();
+            let timepoint = TimePoint::from_iter([(timeline_frame, 10)]);
+            let point = MyPoint::new(1.0, 2.0);
+            let chunk = Chunk::builder("parent/child1/grandchild")
+                .with_component_batches(
+                    row_id,
+                    timepoint,
+                    [(MyPoints::descriptor_points(), &[point] as _)],
+                )
+                .build()?;
+
+            db.add_chunk(&Arc::new(chunk))?;
+        }
+
+        assert_eq!(
+            db.format_with_components(),
+            "/parent\n  /parent/child1\n    /parent/child1/grandchild\n      example.MyPoint: Struct[2]\n"
+        );
+
+        Ok(())
     }
 }

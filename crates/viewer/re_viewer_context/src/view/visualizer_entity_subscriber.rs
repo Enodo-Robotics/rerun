@@ -42,7 +42,6 @@ pub struct VisualizerEntitySubscriber {
     additional_filter: Box<dyn DataBasedVisualizabilityFilter>,
 }
 
-// TODO(#6889): Create writeup for things that changed and an issue for how things should move forward (i.e. descriptor overrides).
 /// Additional filter for visualizability on top of the default check for required components.
 ///
 /// This is part of the "maybe visualizable" criteria.
@@ -201,6 +200,7 @@ impl ChunkStoreSubscriber for VisualizerEntitySubscriber {
                 continue;
             }
 
+            #[expect(clippy::iter_over_hash_type)]
             for (component_desc, list_array) in event.diff.chunk.components().iter() {
                 if let Some(index) = self.required_components_indices.get(component_desc) {
                     // The component might be present, but logged completely empty.

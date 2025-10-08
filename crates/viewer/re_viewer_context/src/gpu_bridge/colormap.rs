@@ -47,7 +47,7 @@ fn colormap_preview_ui(
         texture: horizontal_gradient,
         range: [0.0, 1.0],
         decode_srgb: false,
-        multiply_rgb_with_alpha: false,
+        texture_alpha: re_renderer::renderer::TextureAlpha::Opaque,
         gamma: 1.0,
         shader_decoding: None,
         color_mapper: re_renderer::renderer::ColorMapper::Function(colormap_to_re_renderer(
@@ -123,10 +123,10 @@ pub fn colormap_edit_or_view_ui(
             .show_ui(ui, |ui| {
                 list_item::list_item_scope(ui, "inner_scope", content_ui)
             });
-        if let Some(inner) = inner_response.inner {
-            if inner.changed() {
-                inner_response.response.mark_changed();
-            }
+        if let Some(inner) = inner_response.inner
+            && inner.changed()
+        {
+            inner_response.response.mark_changed();
         }
         inner_response.response
     } else {

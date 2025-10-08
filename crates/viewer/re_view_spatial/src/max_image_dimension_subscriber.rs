@@ -1,5 +1,6 @@
+use std::sync::OnceLock;
+
 use nohash_hasher::IntMap;
-use once_cell::sync::OnceCell;
 
 use re_chunk_store::{ChunkStore, ChunkStoreSubscriberHandle, PerStoreChunkSubscriber};
 use re_log_types::{EntityPath, EntityPathHash, StoreId};
@@ -61,7 +62,7 @@ impl MaxImageDimensionsStoreSubscriber {
     ///
     /// Lazily registers the subscriber if it hasn't been registered yet.
     pub fn subscription_handle() -> ChunkStoreSubscriberHandle {
-        static SUBSCRIPTION: OnceCell<ChunkStoreSubscriberHandle> = OnceCell::new();
+        static SUBSCRIPTION: OnceLock<ChunkStoreSubscriberHandle> = OnceLock::new();
         *SUBSCRIPTION.get_or_init(ChunkStore::register_per_store_subscriber::<Self>)
     }
 }
@@ -95,19 +96,19 @@ impl PerStoreChunkSubscriber for MaxImageDimensionsStoreSubscriber {
                     }; // Ignore both empty arrays and multiple codecs per row.
                     if let Some(existing_codec) =
                         self.video_codecs.insert(entity_path.hash(), *codec)
+                        && existing_codec != *codec
                     {
-                        if existing_codec != *codec {
-                            re_log::warn!(
-                                "Changing video codec for entity path {:?} from {:?} to {:?}. This is unexpected, video codecs should remain constant per entity.",
-                                entity_path,
-                                existing_codec,
-                                codec,
-                            );
-                        }
+                        re_log::warn!(
+                            "Changing video codec for entity path {:?} from {:?} to {:?}. This is unexpected, video codecs should remain constant per entity.",
+                            entity_path,
+                            existing_codec,
+                            codec,
+                        );
                     }
                 }
             }
 
+            #[expect(clippy::iter_over_hash_type)] // order doesn't matter - we're taking a max
             for (descr, list_array) in components.iter() {
                 let Some(archetype_name) = descr.archetype else {
                     // Don't care about non-builtin types, therefore archetype name should be present.
@@ -141,13 +142,11 @@ impl PerStoreChunkSubscriber for MaxImageDimensionsStoreSubscriber {
                 // Size detection for various types of components.
                 if descr.component_type == Some(components::ImageFormat::name()) {
                     for new_dim in list_array.iter().filter_map(|array| {
-                        array.and_then(|array| {
-                            let array = arrow::array::ArrayRef::from(array);
-                            components::ImageFormat::from_arrow(&array)
-                                .ok()?
-                                .into_iter()
-                                .next()
-                        })
+                        let array = arrow::array::ArrayRef::from(array?);
+                        components::ImageFormat::from_arrow(&array)
+                            .ok()?
+                            .into_iter()
+                            .next()
                     }) {
                         max_dim.width = max_dim.width.max(new_dim.width);
                         max_dim.height = max_dim.height.max(new_dim.height);
@@ -255,6 +254,7 @@ fn try_size_from_video_stream_sample(
 ) -> Option<[u32; 2]> {
     let codec = match video_codec {
         components::VideoCodec::H264 => re_video::VideoCodec::H264,
+        components::VideoCodec::H265 => re_video::VideoCodec::H265,
     };
 
     match re_video::detect_gop_start(sample, codec).ok()? {

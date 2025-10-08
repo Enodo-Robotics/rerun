@@ -119,9 +119,9 @@ impl PyRecording {
 
             Ok(contents)
         } else {
-            return Err(PyTypeError::new_err(
+            Err(PyTypeError::new_err(
                 "Could not interpret `contents` as a ViewContentsLike. Top-level type must be a string or a dictionary.",
-            ));
+            ))
         }
     }
 }
@@ -167,10 +167,6 @@ impl PyRecording {
     ///     Whether to include columns that are semantically empty, by default `False`.
     ///
     ///     Semantically empty columns are components that are `null` or empty `[]` for every row in the recording.
-    /// include_indicator_columns : bool, optional
-    ///     Whether to include indicator columns, by default `False`.
-    ///
-    ///     Indicator columns are components used to represent the presence of an archetype within an entity.
     /// include_tombstone_columns : bool, optional
     ///     Whether to include tombstone columns, by default `False`.
     ///
@@ -199,7 +195,6 @@ impl PyRecording {
         index,
         contents,
         include_semantically_empty_columns = false,
-        include_indicator_columns = false,
         include_tombstone_columns = false,
     ))]
     fn view(
@@ -207,7 +202,6 @@ impl PyRecording {
         index: Option<&str>,
         contents: Bound<'_, PyAny>,
         include_semantically_empty_columns: bool,
-        include_indicator_columns: bool,
         include_tombstone_columns: bool,
     ) -> PyResult<PyRecordingView> {
         let static_only = index.is_none();
@@ -226,7 +220,6 @@ impl PyRecording {
         let query = QueryExpression {
             view_contents: Some(contents),
             include_semantically_empty_columns,
-            include_indicator_columns,
             include_tombstone_columns,
             include_static_columns: if static_only {
                 StaticColumnSelection::StaticOnly
@@ -238,12 +231,7 @@ impl PyRecording {
             filtered_index_values: None,
             using_index_values: None,
             filtered_is_not_null: None,
-            //TODO(#10327): this should not be necessary!
-            sparse_fill_strategy: if static_only {
-                SparseFillStrategy::LatestAtGlobal
-            } else {
-                SparseFillStrategy::None
-            },
+            sparse_fill_strategy: SparseFillStrategy::None,
             selection: None,
         };
 
@@ -257,20 +245,11 @@ impl PyRecording {
 
     /// The recording ID of the recording.
     fn recording_id(&self) -> String {
-        self.store.read().id().as_str().to_owned()
+        self.store.read().id().recording_id().to_string()
     }
 
     /// The application ID of the recording.
-    fn application_id(&self) -> PyResult<String> {
-        Ok(self
-            .store
-            .read()
-            .store_info()
-            .ok_or(PyValueError::new_err(
-                "Recording is missing application id.",
-            ))?
-            .application_id
-            .as_str()
-            .to_owned())
+    fn application_id(&self) -> String {
+        self.store.read().id().application_id().to_string()
     }
 }

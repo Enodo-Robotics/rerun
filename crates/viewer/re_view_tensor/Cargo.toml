@@ -40,4 +40,5 @@ thiserror.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]
-re_viewer_context = { workspace = true, features = ["testing"] }
+re_test_context.workspace = true
+re_test_viewport.workspace = true

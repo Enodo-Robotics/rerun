@@ -5,7 +5,7 @@ use nohash_hasher::IntSet;
 use re_log_types::{EntityPath, EntityPathFilter, EntityPathRule, RuleEffect};
 use re_types::ViewClassIdentifier;
 use re_ui::UiExt as _;
-use re_viewer_context::{Item, RecommendedView};
+use re_viewer_context::{Item, RecommendedView, SystemCommand, SystemCommandSender as _};
 use re_viewport_blueprint::ViewBlueprint;
 
 use crate::{ContextMenuAction, ContextMenuContext};
@@ -90,7 +90,7 @@ fn recommended_views_for_selection(ctx: &ContextMenuContext<'_>) -> IntSet<ViewC
     let view_class_registry = ctx.viewer_context.view_class_registry();
     let recording = ctx.viewer_context.recording();
     let maybe_visualizable_entities = view_class_registry
-        .maybe_visualizable_entities_for_visualizer_systems(&recording.store_id());
+        .maybe_visualizable_entities_for_visualizer_systems(recording.store_id());
 
     for entry in view_class_registry.iter_registry() {
         let Some(suggested_origin) = entry
@@ -156,8 +156,10 @@ fn create_view_for_selected_entities(
     // Note that these entity paths will always be absolute, rather than
     // relative to the origin. This makes sense since if you create a view and
     // then change the origin you likely wanted those entities to still be there.
+
+    #[expect(clippy::iter_over_hash_type)] // Order of rule insertion does not matter here
     for path in entities_of_interest {
-        query_filter.add_rule(
+        query_filter.insert_rule(
             RuleEffect::Include,
             EntityPathRule::including_entity_subtree(&path),
         );
@@ -172,8 +174,8 @@ fn create_view_for_selected_entities(
     ctx.viewport_blueprint
         .add_views(std::iter::once(view), target_container_id, None);
     ctx.viewer_context
-        .selection_state()
-        .set_selection(Item::View(view_id));
+        .command_sender()
+        .send_system(SystemCommand::SetSelection(Item::View(view_id).into()));
     ctx.viewport_blueprint
         .mark_user_interaction(ctx.viewer_context);
 }

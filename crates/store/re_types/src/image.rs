@@ -43,6 +43,17 @@ impl ImageKind {
         }
     }
 }
+
+impl re_byte_size::SizeBytes for ImageKind {
+    fn heap_size_bytes(&self) -> u64 {
+        0
+    }
+
+    fn is_pod() -> bool {
+        true
+    }
+}
+
 // ----------------------------------------------------------------------------
 
 /// Errors when converting images from the [`image`] crate to an [`archetypes::Image`].
@@ -243,7 +254,7 @@ pub fn find_non_empty_dim_indices(shape: &[u64]) -> SmallVec<[usize; 4]> {
 
     // 0 is always a valid index.
     let mut min = non_unit_indices.next().unwrap_or(0);
-    let mut max = non_unit_indices.last().unwrap_or(min);
+    let mut max = non_unit_indices.next_back().unwrap_or(min);
 
     // Note, these are inclusive ranges.
 

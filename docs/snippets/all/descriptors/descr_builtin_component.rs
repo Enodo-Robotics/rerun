@@ -1,7 +1,5 @@
 use rerun::{ChunkStore, ChunkStoreConfig, ComponentDescriptor};
 
-// TODO(#6889): Remove `as rerun::Component` cast once `ComponentBatch::name()` is gone.
-
 fn example(rec: &rerun::RecordingStream) -> Result<(), Box<dyn std::error::Error>> {
     use rerun::ComponentBatch as _;
     rec.log_static(
@@ -45,15 +43,15 @@ fn check_tags(rec: &rerun::RecordingStream) {
     //
     // Python and C++ are indirectly checked by the snippet comparison tool itself.
     if let Ok(path_to_rrd) = std::env::var("_RERUN_TEST_FORCE_SAVE") {
-        rec.flush_blocking();
+        rec.flush_blocking().unwrap();
 
         let stores =
             ChunkStore::from_rrd_filepath(&ChunkStoreConfig::ALL_DISABLED, path_to_rrd).unwrap();
         assert_eq!(1, stores.len());
 
         let store = stores.into_values().next().unwrap();
-        // Skip the first two chunks, as they represent the `RecordingInfo`.
-        let chunks = store.iter_chunks().skip(2).collect::<Vec<_>>();
+        // Skip the first chunk, as it represents the `RecordingInfo`.
+        let chunks = store.iter_chunks().skip(1).collect::<Vec<_>>();
         assert_eq!(1, chunks.len());
 
         let chunk = chunks.into_iter().next().unwrap();

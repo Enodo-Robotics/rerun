@@ -3,11 +3,7 @@ use nohash_hasher::IntMap;
 use re_chunk_store::LatestAtQuery;
 use re_entity_db::{EntityPath, EntityTree};
 use re_log_types::EntityPathHash;
-use re_types::{
-    Archetype as _, ArchetypeName, ComponentDescriptorSet,
-    archetypes::{self, InstancePoses3D, Transform3D},
-    components::ImagePlaneDistance,
-};
+use re_types::{ArchetypeName, archetypes, components::ImagePlaneDistance};
 use re_view::DataResultQuery as _;
 use re_viewer_context::{DataResultTree, IdentifiedViewSystem, ViewContext, ViewContextSystem};
 use vec1::smallvec_v1::SmallVec1;
@@ -123,7 +119,7 @@ impl TransformInfo {
 /// * the query time
 ///    * TODO(#723): ranges aren't taken into account yet
 /// * TODO(andreas): the queried entities. Right now we determine transforms for ALL entities in the scene.
-///                  since 3D views tend to display almost everything that's mostly fine, but it's very wasteful when they don't.
+///   since 3D views tend to display almost everything that's mostly fine, but it's very wasteful when they don't.
 ///
 /// The renderer then uses this reference space as its world space,
 /// making world and reference space equivalent for a given view.
@@ -157,14 +153,6 @@ impl Default for TransformTreeContext {
 }
 
 impl ViewContextSystem for TransformTreeContext {
-    fn compatible_component_sets(&self) -> Vec<ComponentDescriptorSet> {
-        vec![
-            Transform3D::all_components().iter().cloned().collect(),
-            InstancePoses3D::all_components().iter().cloned().collect(),
-            std::iter::once(archetypes::Pinhole::descriptor_image_from_camera()).collect(),
-        ]
-    }
-
     /// Determines transforms for all entities relative to a space path which serves as the "reference".
     /// I.e. the resulting transforms are "reference from scene"
     ///
@@ -182,7 +170,7 @@ impl ViewContextSystem for TransformTreeContext {
         // TODO(andreas): This is a rather annoying sync point between different views.
         // We could alleviate this by introducing a per view class (not instance) method that is called
         // before system execution.
-        TransformCacheStoreSubscriber::access_mut(&ctx.recording().store_id(), |cache| {
+        TransformCacheStoreSubscriber::access_mut(ctx.recording().store_id(), |cache| {
             cache.apply_all_updates(ctx.recording());
         });
 
@@ -202,7 +190,7 @@ impl ViewContextSystem for TransformTreeContext {
 
         let time_query = ctx.current_query();
 
-        TransformCacheStoreSubscriber::access(&ctx.recording().store_id(), |cache| {
+        TransformCacheStoreSubscriber::access(ctx.recording().store_id(), |cache| {
             let transforms = cache.transforms_for_timeline(query.timeline);
 
             // Child transforms of this space

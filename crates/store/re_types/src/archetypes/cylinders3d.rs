@@ -99,6 +99,8 @@ pub struct Cylinders3D {
     pub quaternions: Option<SerializedComponentBatch>,
 
     /// Optional colors for the cylinders.
+    ///
+    /// Alpha channel is used for transparency for solid fill-mode.
     pub colors: Option<SerializedComponentBatch>,
 
     /// Optional radii for the lines used when the cylinder is rendered as a wireframe.
@@ -254,37 +256,26 @@ impl Cylinders3D {
             component_type: Some("rerun.components.ClassId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Cylinders3DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Cylinders3D::descriptor_lengths(),
             Cylinders3D::descriptor_radii(),
         ]
     });
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Cylinders3D::descriptor_centers(),
             Cylinders3D::descriptor_colors(),
-            Cylinders3D::descriptor_indicator(),
         ]
     });
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 7usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Cylinders3D::descriptor_rotation_axis_angles(),
             Cylinders3D::descriptor_quaternions(),
@@ -296,14 +287,13 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 12usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 11usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Cylinders3D::descriptor_lengths(),
             Cylinders3D::descriptor_radii(),
             Cylinders3D::descriptor_centers(),
             Cylinders3D::descriptor_colors(),
-            Cylinders3D::descriptor_indicator(),
             Cylinders3D::descriptor_rotation_axis_angles(),
             Cylinders3D::descriptor_quaternions(),
             Cylinders3D::descriptor_line_radii(),
@@ -315,16 +305,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 12usize]> =
     });
 
 impl Cylinders3D {
-    /// The total number of components in the archetype: 2 required, 3 recommended, 7 optional
-    pub const NUM_COMPONENTS: usize = 12usize;
+    /// The total number of components in the archetype: 2 required, 2 recommended, 7 optional
+    pub const NUM_COMPONENTS: usize = 11usize;
 }
 
-/// Indicator component for the [`Cylinders3D`] [`::re_types_core::Archetype`]
-pub type Cylinders3DIndicator = ::re_types_core::GenericIndicatorComponent<Cylinders3D>;
-
 impl ::re_types_core::Archetype for Cylinders3D {
-    type Indicator = Cylinders3DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Cylinders3D".into()
@@ -333,14 +318,6 @@ impl ::re_types_core::Archetype for Cylinders3D {
     #[inline]
     fn display_name() -> &'static str {
         "Cylinders 3D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Cylinders3DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -439,7 +416,6 @@ impl ::re_types_core::AsComponents for Cylinders3D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.lengths.clone(),
             self.radii.clone(),
             self.centers.clone(),
@@ -593,12 +569,7 @@ impl Cylinders3D {
                 .map(|class_ids| class_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -633,7 +604,7 @@ impl Cylinders3D {
             .or(len_show_labels)
             .or(len_class_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The total axial length of the cylinder, measured as the straight-line distance between the centers of its two endcaps.
@@ -698,6 +669,8 @@ impl Cylinders3D {
     }
 
     /// Optional colors for the cylinders.
+    ///
+    /// Alpha channel is used for transparency for solid fill-mode.
     #[inline]
     pub fn with_colors(
         mut self,

@@ -3,6 +3,7 @@
 #include <optional>
 #include <vector>
 
+#include <arrow/array/array_base.h>
 #include <arrow/buffer.h>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -17,6 +18,14 @@ namespace fs = std::filesystem;
 #define TEST_TAG "[recording_stream]"
 
 struct BadComponent {};
+
+// Not making this static makes lsan_suppressions.supp miss this.
+// Output of use counter for this shared_ptr indicates that we're not leaking the shared ptr itself.
+// If we do leak it, it's very unclear how that would be happening - somewhere in the FFI transition?
+// But then why would it not show up for anything else? More likely a false positive.
+static std::shared_ptr<arrow::Array> null_arrow_array() {
+    return std::make_shared<arrow::NullArray>(1);
+}
 
 template <>
 struct rerun::Loggable<BadComponent> {
@@ -191,7 +200,8 @@ SCENARIO("RecordingStream can be used for logging archetypes and components", TE
                     THEN("collection of component batch results can be logged") {
                         rerun::Collection<rerun::Result<rerun::ComponentBatch>> batches = {
                             batch0,
-                            batch1};
+                            batch1,
+                        };
                         stream.log("log_archetype-splat", batches);
                         stream.log_static("log_archetype-splat", batches);
                     }
@@ -306,30 +316,37 @@ void test_logging_to_grpc_connection(const char* url, const rerun::RecordingStre
     AND_GIVEN("an invalid url") {
         THEN("connect call fails") {
             CHECK(
-                stream.connect_grpc("definitely not valid!", 0.1f).code ==
+                stream.connect_grpc("definitely not valid!").code ==
                 rerun::ErrorCode::InvalidServerUrl
             );
         }
     }
-    AND_GIVEN("a valid socket url " << url) {
+    AND_GIVEN("a valid socket url  " << url) {
         THEN("connect call returns no error") {
-            CHECK(stream.connect_grpc(url, 0.1f).code == rerun::ErrorCode::Ok);
+            CHECK(stream.connect_grpc(url).code == rerun::ErrorCode::Ok);
 
             WHEN("logging an archetype and then flushing") {
                 check_logged_error([&] {
                     stream.log(
                         "archetype",
-                        rerun::Points2D({
-                            rerun::Vec2D{1.0, 2.0},
-                            rerun::Vec2D{4.0, 5.0},
-                        })
+                        rerun::Points2D({rerun::Vec2D{1.0, 2.0}, rerun::Vec2D{4.0, 5.0}})
                     );
                 });
 
-                stream.flush_blocking();
+                // The flush should fail, because there is no server on the other side:
+                CHECK(
+                    stream.flush_blocking().code == rerun::ErrorCode::RecordingStreamFlushFailure
+                );
 
                 THEN("does not crash") {
                     // No easy way to see if it got sent.
+                }
+
+                THEN("the stream is still valid and we can log more things") {
+                    // Regression test for https://github.com/rerun-io/rerun/issues/10884
+                    check_logged_error([&] {
+                        stream.log("archetype", rerun::Points2D(rerun::Vec2D{1.0, 2.0}));
+                    });
                 }
             }
         }
@@ -344,12 +361,12 @@ SCENARIO("RecordingStream can construct LogSinks", TEST_TAG) {
 
     std::string test_rrd0 = std::string(test_path) + "test-file-log-sink-0.rrd";
 
-    fs::remove(test_rrd0);
+    fs::remove_all(test_rrd0);
 
     GIVEN("a new RecordingStream") {
         rerun::RecordingStream stream("test-local");
 
-        AND_GIVEN("valid save path" << test_rrd0) {
+        AND_GIVEN("valid save path " << test_rrd0) {
             AND_GIVEN("a directory already existing at this path") {
                 fs::create_directory(test_rrd0);
                 THEN("set_sinks(FileSink) call fails") {
@@ -358,13 +375,14 @@ SCENARIO("RecordingStream can construct LogSinks", TEST_TAG) {
                         rerun::ErrorCode::RecordingStreamSaveFailure
                     );
                 }
+                fs::remove_all(test_rrd0);
             }
             THEN("set_sinks(FileSink) call returns no error") {
                 CHECK(stream.set_sinks(rerun::FileSink{test_rrd0}).code == rerun::ErrorCode::Ok);
             }
         }
 
-        AND_GIVEN("an invalid url" << invalid_url) {
+        AND_GIVEN("an invalid url " << invalid_url) {
             THEN("set_sinks(GrpcSink) call fails") {
                 CHECK(
                     stream.set_sinks(rerun::GrpcSink{invalid_url}).code ==
@@ -372,18 +390,18 @@ SCENARIO("RecordingStream can construct LogSinks", TEST_TAG) {
                 );
             }
         }
-        AND_GIVEN("a valid url" << url) {
+        AND_GIVEN("a valid url " << url) {
             THEN("set_sinks(GrpcSink) call returns no error") {
                 CHECK(stream.set_sinks(rerun::GrpcSink{url}).code == rerun::ErrorCode::Ok);
             }
         }
 
-        AND_GIVEN("both a url" << url << "and a save path" << test_rrd0) {
-            THEN("set_sinks(GrpcSink, FileSink) call returns no error") {
-                CHECK(
-                    stream.set_sinks(rerun::GrpcSink{url}, rerun::FileSink{test_rrd0}).code ==
-                    rerun::ErrorCode::Ok
-                );
+        AND_GIVEN("both a url " << url << " and a save path " << test_rrd0) {
+            auto error = stream.set_sinks(rerun::GrpcSink{url}, rerun::FileSink{test_rrd0});
+            AND_GIVEN("Error: " << error.description) {
+                THEN("set_sinks(GrpcSink, FileSink) call returns no error") {
+                    CHECK(error.code == rerun::ErrorCode::Ok);
+                }
             }
         }
     }
@@ -439,7 +457,7 @@ SCENARIO("Recording stream handles invalid logging gracefully", TEST_TAG) {
             AND_GIVEN("a cell with an invalid component type") {
                 rerun::ComponentBatch cell = {};
                 cell.component_type = RR_COMPONENT_TYPE_HANDLE_INVALID;
-                cell.array = rerun::components::indicator_arrow_array();
+                cell.array = null_arrow_array();
 
                 THEN("try_log_data_row fails with InvalidComponentTypeHandle") {
                     CHECK(

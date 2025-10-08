@@ -309,32 +309,16 @@ impl Points3D {
             component_type: Some("rerun.components.KeypointId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Points3DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Points3D::descriptor_positions()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Points3D::descriptor_positions()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            Points3D::descriptor_radii(),
-            Points3D::descriptor_colors(),
-            Points3D::descriptor_indicator(),
-        ]
-    });
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| [Points3D::descriptor_radii(), Points3D::descriptor_colors()]);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 4usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 4usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Points3D::descriptor_labels(),
             Points3D::descriptor_show_labels(),
@@ -343,13 +327,12 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 4usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 8usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 7usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Points3D::descriptor_positions(),
             Points3D::descriptor_radii(),
             Points3D::descriptor_colors(),
-            Points3D::descriptor_indicator(),
             Points3D::descriptor_labels(),
             Points3D::descriptor_show_labels(),
             Points3D::descriptor_class_ids(),
@@ -358,16 +341,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 8usize]> =
     });
 
 impl Points3D {
-    /// The total number of components in the archetype: 1 required, 3 recommended, 4 optional
-    pub const NUM_COMPONENTS: usize = 8usize;
+    /// The total number of components in the archetype: 1 required, 2 recommended, 4 optional
+    pub const NUM_COMPONENTS: usize = 7usize;
 }
 
-/// Indicator component for the [`Points3D`] [`::re_types_core::Archetype`]
-pub type Points3DIndicator = ::re_types_core::GenericIndicatorComponent<Points3D>;
-
 impl ::re_types_core::Archetype for Points3D {
-    type Indicator = Points3DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Points3D".into()
@@ -376,14 +354,6 @@ impl ::re_types_core::Archetype for Points3D {
     #[inline]
     fn display_name() -> &'static str {
         "Points 3D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Points3DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -459,7 +429,6 @@ impl ::re_types_core::AsComponents for Points3D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.positions.clone(),
             self.radii.clone(),
             self.colors.clone(),
@@ -576,12 +545,7 @@ impl Points3D {
                 .map(|keypoint_ids| keypoint_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -608,7 +572,7 @@ impl Points3D {
             .or(len_class_ids)
             .or(len_keypoint_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// All the 3D positions at which the point cloud shows points.

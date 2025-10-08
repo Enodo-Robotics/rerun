@@ -102,6 +102,8 @@ pub struct Capsules3D {
     pub quaternions: Option<SerializedComponentBatch>,
 
     /// Optional colors for the capsules.
+    ///
+    /// Alpha channel is used for transparency for solid fill-mode.
     pub colors: Option<SerializedComponentBatch>,
 
     /// Optional radii for the lines used when the cylinder is rendered as a wireframe.
@@ -257,37 +259,26 @@ impl Capsules3D {
             component_type: Some("rerun.components.ClassId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Capsules3DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Capsules3D::descriptor_lengths(),
             Capsules3D::descriptor_radii(),
         ]
     });
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Capsules3D::descriptor_translations(),
             Capsules3D::descriptor_colors(),
-            Capsules3D::descriptor_indicator(),
         ]
     });
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 7usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Capsules3D::descriptor_rotation_axis_angles(),
             Capsules3D::descriptor_quaternions(),
@@ -299,14 +290,13 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 12usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 11usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Capsules3D::descriptor_lengths(),
             Capsules3D::descriptor_radii(),
             Capsules3D::descriptor_translations(),
             Capsules3D::descriptor_colors(),
-            Capsules3D::descriptor_indicator(),
             Capsules3D::descriptor_rotation_axis_angles(),
             Capsules3D::descriptor_quaternions(),
             Capsules3D::descriptor_line_radii(),
@@ -318,16 +308,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 12usize]> =
     });
 
 impl Capsules3D {
-    /// The total number of components in the archetype: 2 required, 3 recommended, 7 optional
-    pub const NUM_COMPONENTS: usize = 12usize;
+    /// The total number of components in the archetype: 2 required, 2 recommended, 7 optional
+    pub const NUM_COMPONENTS: usize = 11usize;
 }
 
-/// Indicator component for the [`Capsules3D`] [`::re_types_core::Archetype`]
-pub type Capsules3DIndicator = ::re_types_core::GenericIndicatorComponent<Capsules3D>;
-
 impl ::re_types_core::Archetype for Capsules3D {
-    type Indicator = Capsules3DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Capsules3D".into()
@@ -336,14 +321,6 @@ impl ::re_types_core::Archetype for Capsules3D {
     #[inline]
     fn display_name() -> &'static str {
         "Capsules 3D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Capsules3DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -444,7 +421,6 @@ impl ::re_types_core::AsComponents for Capsules3D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.lengths.clone(),
             self.radii.clone(),
             self.translations.clone(),
@@ -598,12 +574,7 @@ impl Capsules3D {
                 .map(|class_ids| class_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -638,7 +609,7 @@ impl Capsules3D {
             .or(len_show_labels)
             .or(len_class_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// Lengths of the capsules, defined as the distance between the centers of the endcaps.
@@ -703,6 +674,8 @@ impl Capsules3D {
     }
 
     /// Optional colors for the capsules.
+    ///
+    /// Alpha channel is used for transparency for solid fill-mode.
     #[inline]
     pub fn with_colors(
         mut self,

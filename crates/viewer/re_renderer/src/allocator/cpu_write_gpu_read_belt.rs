@@ -369,7 +369,9 @@ impl Chunk {
         let byte_offset_in_chunk_buffer = self.unused_offset;
         let end_offset = byte_offset_in_chunk_buffer + size_in_bytes;
 
-        debug_assert!(byte_offset_in_chunk_buffer % CpuWriteGpuReadBelt::MIN_OFFSET_ALIGNMENT == 0);
+        debug_assert!(
+            byte_offset_in_chunk_buffer.is_multiple_of(CpuWriteGpuReadBelt::MIN_OFFSET_ALIGNMENT)
+        );
         debug_assert!(end_offset <= self.buffer.size());
 
         let buffer_slice = self.buffer.slice(byte_offset_in_chunk_buffer..end_offset);
@@ -594,6 +596,8 @@ impl CpuWriteGpuReadBelt {
     pub fn after_queue_submit(&mut self) {
         re_tracing::profile_function!();
         self.receive_chunks();
+
+        // TODO(andreas): Use `map_buffer_on_submit` https://github.com/gfx-rs/wgpu/pull/8125 once available.
 
         let sender = &self.sender;
         for chunk in self.closed_chunks.drain(..) {

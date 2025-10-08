@@ -525,7 +525,7 @@ fn quote_enum(
                 "Enums can only have one default value",
             );
         }
-    };
+    }
     let derives = derives.iter().map(|&derive| {
         let derive = format_ident!("{derive}");
         quote!(#derive)
@@ -783,6 +783,7 @@ impl quote::ToTokens for TypeTokenizer<'_> {
             Type::Float16 => quote!(half::f16),
             Type::Float32 => quote!(f32),
             Type::Float64 => quote!(f64),
+            Type::Binary => quote!(::arrow::buffer::Buffer),
             Type::String => quote!(::re_types_core::ArrowString),
             Type::Array { elem_type, length } => {
                 if *unwrap {
@@ -821,6 +822,7 @@ impl quote::ToTokens for &ElementType {
             ElementType::Float16 => quote!(half::f16),
             ElementType::Float32 => quote!(f32),
             ElementType::Float64 => quote!(f64),
+            ElementType::Binary => quote!(::arrow::buffer::Buffer),
             ElementType::String => quote!(::re_types_core::ArrowString),
             ElementType::Object { fqname } => quote_fqname_as_type_path(fqname),
         }
@@ -1145,47 +1147,14 @@ fn quote_trait_impls_for_archetype(reporter: &Reporter, obj: &Object) -> TokenSt
                 }
             }
         })
-        .chain(std::iter::once({
-            let indicator_component_type = format!(
-                "{}Indicator",
-                obj.fqname.replace("archetypes", "components")
-            );
-
-            let doc = "Returns the [`ComponentDescriptor`] for the associated indicator component.";
-
-            quote! {
-                #[doc = #doc]
-                #[inline]
-                pub fn descriptor_indicator() -> ComponentDescriptor {
-                    ComponentDescriptor {
-                        archetype: None,
-                        component: #indicator_component_type.into(),
-                        component_type: None,
-                    }
-                }
-            }
-        }))
         .collect_vec();
-
-    let archetype_name = format_ident!("{}", obj.name);
-    let indicator_name = format!("{}Indicator", obj.name);
-
-    let quoted_indicator_name = format_ident!("{indicator_name}");
-    let quoted_indicator_doc =
-        format!("Indicator component for the [`{name}`] [`::re_types_core::Archetype`]");
 
     let (num_required_descriptors, required_descriptors) =
         compute_component_descriptors(obj, ATTR_RERUN_COMPONENT_REQUIRED);
-    let (mut num_recommended_descriptors, mut recommended_descriptors) =
+    let (num_recommended_descriptors, recommended_descriptors) =
         compute_component_descriptors(obj, ATTR_RERUN_COMPONENT_RECOMMENDED);
     let (num_optional_descriptors, optional_descriptors) =
         compute_component_descriptors(obj, ATTR_RERUN_COMPONENT_OPTIONAL);
-
-    num_recommended_descriptors += 1;
-    recommended_descriptors = quote! {
-        #recommended_descriptors
-        #archetype_name::descriptor_indicator(),
-    };
 
     let num_components_docstring = quote_doc_line(&format!(
         "The total number of components in the archetype: {num_required_descriptors} required, {num_recommended_descriptors} recommended, {num_optional_descriptors} optional"
@@ -1200,23 +1169,29 @@ fn quote_trait_impls_for_archetype(reporter: &Reporter, obj: &Object) -> TokenSt
         .collect::<Vec<_>>();
 
     let all_component_batches = {
-        std::iter::once(quote! {
-            Some(Self::indicator())
-        })
-        .chain(obj.fields.iter().map(|obj_field| {
+        obj.fields.iter().map(|obj_field| {
             let field_name = format_ident!("{}", obj_field.name);
             quote!(self.#field_name.clone())
-        }))
+        })
     };
 
-    let as_components_impl = quote! {
-        #[inline]
-        fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
-            use ::re_types_core::Archetype as _;
-            [#(#all_component_batches,)*].into_iter().flatten().collect()
+    let as_components_impl = if all_component_batches.len() == 1 {
+        quote! {
+            #[inline]
+            fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
+                use ::re_types_core::Archetype as _;
+                std::iter::once(#(#all_component_batches)*).flatten().collect()
+            }
+        }
+    } else {
+        quote! {
+            #[inline]
+            fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
+                use ::re_types_core::Archetype as _;
+                [#(#all_component_batches,)*].into_iter().flatten().collect()
+            }
         }
     };
-
     let all_deserializers = {
         obj.fields.iter().map(|obj_field| {
             let field_name = format_ident!("{}", obj_field.name);
@@ -1237,29 +1212,24 @@ fn quote_trait_impls_for_archetype(reporter: &Reporter, obj: &Object) -> TokenSt
             #(#all_descriptor_methods)*
         }
 
-        static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; #num_required_descriptors]> =
-            once_cell::sync::Lazy::new(|| {[#required_descriptors]});
+        static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; #num_required_descriptors]> =
+            std::sync::LazyLock::new(|| {[#required_descriptors]});
 
-        static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; #num_recommended_descriptors]> =
-            once_cell::sync::Lazy::new(|| {[#recommended_descriptors]});
+        static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; #num_recommended_descriptors]> =
+            std::sync::LazyLock::new(|| {[#recommended_descriptors]});
 
-        static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; #num_optional_descriptors]> =
-            once_cell::sync::Lazy::new(|| {[#optional_descriptors]});
+        static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; #num_optional_descriptors]> =
+            std::sync::LazyLock::new(|| {[#optional_descriptors]});
 
-        static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; #num_all_descriptors]> =
-            once_cell::sync::Lazy::new(|| {[#required_descriptors #recommended_descriptors #optional_descriptors]});
+        static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; #num_all_descriptors]> =
+            std::sync::LazyLock::new(|| {[#required_descriptors #recommended_descriptors #optional_descriptors]});
 
         impl #name {
             #num_components_docstring
             pub const NUM_COMPONENTS: usize = #num_all_descriptors;
         }
 
-        #[doc = #quoted_indicator_doc]
-        pub type #quoted_indicator_name = ::re_types_core::GenericIndicatorComponent<#name>;
-
         impl ::re_types_core::Archetype for #name {
-            type Indicator = #quoted_indicator_name;
-
             #[inline]
             fn name() -> ::re_types_core::ArchetypeName {
                 #fqname.into()
@@ -1268,12 +1238,6 @@ fn quote_trait_impls_for_archetype(reporter: &Reporter, obj: &Object) -> TokenSt
             #[inline]
             fn display_name() -> &'static str {
                 #display_name
-            }
-
-            #[inline]
-            fn indicator() -> SerializedComponentBatch {
-                #[allow(clippy::unwrap_used)] // There is no such thing as failing to serialize an indicator.
-                #quoted_indicator_name::DEFAULT.serialized(Self::descriptor_indicator()).unwrap()
             }
 
             #[inline]
@@ -1679,8 +1643,6 @@ fn quote_builder_from_obj(reporter: &Reporter, objects: &Objects, obj: &Object) 
             quote!(let #len_field_name = self.#field_name.as_ref().map(|b| b.array.len()))
         });
 
-        let indicator_column = quote!(::re_types_core::indicator_column::<Self>(_lengths.into_iter().count())?);
-
         quote! {
             #columns_doc
             #[inline]
@@ -1692,7 +1654,7 @@ fn quote_builder_from_obj(reporter: &Reporter, objects: &Objects, obj: &Object) 
                 I: IntoIterator<Item = usize> + Clone,
             {
                 let columns = [ #(#fields),* ];
-                Ok(columns.into_iter().flatten().chain([#indicator_column]))
+                Ok(columns.into_iter().flatten())
             }
 
             #columns_unary_doc
@@ -1709,7 +1671,7 @@ fn quote_builder_from_obj(reporter: &Reporter, objects: &Objects, obj: &Object) 
 
                 // NOTE: This will return an error if the different batches have different lengths,
                 // which is fine.
-                self.columns(std::iter::repeat(1).take(len))
+                self.columns(std::iter::repeat_n(1, len))
             }
         }
     });

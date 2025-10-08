@@ -26,6 +26,9 @@ use ::re_types_core::{DeserializationError, DeserializationResult};
 /// If there are multiple [`archetypes::InstancePoses3D`][crate::archetypes::InstancePoses3D] instances logged to the same entity as a mesh,
 /// an instance of the mesh will be drawn for each transform.
 ///
+/// The viewer draws meshes always two-sided. However, for transparency ordering
+/// front faces are assumed to those with counter clockwise triangle winding order (this is the same as in the GLTF specification).
+///
 /// ## Examples
 ///
 /// ### Simple indexed 3D mesh
@@ -68,7 +71,7 @@ use ::re_types_core::{DeserializationError, DeserializationResult};
 ///             [-1.0, 1.0, -1.0],
 ///             [1.0, -1.0, -1.0],
 ///         ])
-///         .with_triangle_indices([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])
+///         .with_triangle_indices([[0, 2, 1], [0, 3, 1], [0, 3, 2], [1, 3, 2]])
 ///         .with_vertex_colors([0xFF0000FF, 0x00FF00FF, 0x00000FFFF, 0xFFFF00FF]),
 ///     )?;
 ///     // This box will not be affected by its parent's instance poses!
@@ -121,12 +124,16 @@ pub struct Mesh3D {
     pub vertex_normals: Option<SerializedComponentBatch>,
 
     /// An optional color for each vertex.
+    ///
+    /// The alpha channel is ignored.
     pub vertex_colors: Option<SerializedComponentBatch>,
 
     /// An optional uv texture coordinate for each vertex.
     pub vertex_texcoords: Option<SerializedComponentBatch>,
 
     /// A color multiplier applied to the whole mesh.
+    ///
+    /// Alpha channel governs the overall mesh transparency.
     pub albedo_factor: Option<SerializedComponentBatch>,
 
     /// Optional albedo texture.
@@ -135,6 +142,8 @@ pub struct Mesh3D {
     ///
     /// Currently supports only sRGB(A) textures, ignoring alpha.
     /// (meaning that the tensor must have 3 or 4 channels and use the `u8` format)
+    ///
+    /// The alpha channel is ignored.
     pub albedo_texture_buffer: Option<SerializedComponentBatch>,
 
     /// The format of the `albedo_texture_buffer`, if any.
@@ -254,32 +263,21 @@ impl Mesh3D {
             component_type: Some("rerun.components.ClassId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Mesh3DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Mesh3D::descriptor_vertex_positions()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Mesh3D::descriptor_vertex_positions()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Mesh3D::descriptor_triangle_indices(),
             Mesh3D::descriptor_vertex_normals(),
-            Mesh3D::descriptor_indicator(),
         ]
     });
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 6usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Mesh3D::descriptor_vertex_colors(),
             Mesh3D::descriptor_vertex_texcoords(),
@@ -290,13 +288,12 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 10usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 9usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Mesh3D::descriptor_vertex_positions(),
             Mesh3D::descriptor_triangle_indices(),
             Mesh3D::descriptor_vertex_normals(),
-            Mesh3D::descriptor_indicator(),
             Mesh3D::descriptor_vertex_colors(),
             Mesh3D::descriptor_vertex_texcoords(),
             Mesh3D::descriptor_albedo_factor(),
@@ -307,16 +304,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 10usize]> =
     });
 
 impl Mesh3D {
-    /// The total number of components in the archetype: 1 required, 3 recommended, 6 optional
-    pub const NUM_COMPONENTS: usize = 10usize;
+    /// The total number of components in the archetype: 1 required, 2 recommended, 6 optional
+    pub const NUM_COMPONENTS: usize = 9usize;
 }
 
-/// Indicator component for the [`Mesh3D`] [`::re_types_core::Archetype`]
-pub type Mesh3DIndicator = ::re_types_core::GenericIndicatorComponent<Mesh3D>;
-
 impl ::re_types_core::Archetype for Mesh3D {
-    type Indicator = Mesh3DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Mesh3D".into()
@@ -325,14 +317,6 @@ impl ::re_types_core::Archetype for Mesh3D {
     #[inline]
     fn display_name() -> &'static str {
         "Mesh 3D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Mesh3DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -432,7 +416,6 @@ impl ::re_types_core::AsComponents for Mesh3D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.vertex_positions.clone(),
             self.triangle_indices.clone(),
             self.vertex_normals.clone(),
@@ -570,12 +553,7 @@ impl Mesh3D {
                 .map(|class_ids| class_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -606,7 +584,7 @@ impl Mesh3D {
             .or(len_albedo_texture_format)
             .or(len_class_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The positions of each vertex.
@@ -645,6 +623,8 @@ impl Mesh3D {
     }
 
     /// An optional color for each vertex.
+    ///
+    /// The alpha channel is ignored.
     #[inline]
     pub fn with_vertex_colors(
         mut self,
@@ -666,6 +646,8 @@ impl Mesh3D {
     }
 
     /// A color multiplier applied to the whole mesh.
+    ///
+    /// Alpha channel governs the overall mesh transparency.
     #[inline]
     pub fn with_albedo_factor(
         mut self,
@@ -694,6 +676,8 @@ impl Mesh3D {
     ///
     /// Currently supports only sRGB(A) textures, ignoring alpha.
     /// (meaning that the tensor must have 3 or 4 channels and use the `u8` format)
+    ///
+    /// The alpha channel is ignored.
     #[inline]
     pub fn with_albedo_texture_buffer(
         mut self,

@@ -6,15 +6,17 @@ import logging
 import os
 import pathlib
 import time
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 from uuid import uuid4
 
 import anywidget
 import jupyter_ui_poll
 import traitlets
 from ipywidgets import HTML
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 try:
     __version__ = importlib.metadata.version("rerun_notebook")
@@ -99,7 +101,7 @@ if ASSET_ENV is None:
     if "RERUN_DEV_ENVIRONMENT" in os.environ:
         ASSET_ENV = "serve-local"
     else:
-        ASSET_ENV = f"https://app.rerun.io/version/{__version__}/widget.js"
+        ASSET_ENV = f"https://app.rerun.io/version/{__version__}/notebook/widget.js"
 
 if ASSET_ENV == ASSET_MAGIC_SERVE:  # localhost widget
     from .asset_server import serve_assets
@@ -140,13 +142,27 @@ class ErrorWidget:
             display(self._html)
 
 
+_EventData = dict[str, Any]
+_Buffers = list[bytes]
+_Event = tuple[_EventData, _Buffers | None]
+
+
 class Viewer(anywidget.AnyWidget):  # type: ignore[misc]
     _esm = ESM_MOD
     _css = CSS_PATH
 
-    _width = traitlets.Int(allow_none=True).tag(sync=True)
-    _height = traitlets.Int(allow_none=True).tag(sync=True)
+    # NOTE: A property which may be set from within the Viewer should NOT be a traitlet!
+    # Use `self.send` instead, events from which are handled in `on_custom_message` in `widget.ts`.
+    # To expose it bi-directionally, add a Viewer event for it instead.
+    # This makes the asynchronous communication between the Viewer and SDK more explicit, leading to fewer surprises.
+    #
+    # Example: `set_time_ctrl` uses `self.send`, and the state of the timeline is exposed via Viewer events.
 
+    _width = traitlets.Union([traitlets.Int(), traitlets.Unicode()]).tag(sync=True)
+    _height = traitlets.Union([traitlets.Int(), traitlets.Unicode()]).tag(sync=True)
+
+    # TODO(nick): This traitlet is only used for initialization
+    # we should figure out how to pass directly and remove it
     _url = traitlets.Unicode(allow_none=True).tag(sync=True)
 
     _panel_states = traitlets.Dict(
@@ -156,16 +172,7 @@ class Viewer(anywidget.AnyWidget):  # type: ignore[misc]
     ).tag(sync=True)
 
     _ready = False
-    _data_queue: list[bytes]
-    _table_queue: list[bytes]
-
-    _time_ctrl = traitlets.Tuple(
-        traitlets.Unicode(allow_none=True),
-        traitlets.Int(allow_none=True),
-        traitlets.Bool(),
-        allow_none=True,
-    ).tag(sync=True)
-    _recording_id = traitlets.Unicode(allow_none=True).tag(sync=True)
+    _event_queue: list[_Event] = []
 
     _fallback_token = traitlets.Unicode(allow_none=True).tag(sync=True)
 
@@ -174,8 +181,8 @@ class Viewer(anywidget.AnyWidget):  # type: ignore[misc]
     def __init__(
         self,
         *,
-        width: int | None = None,
-        height: int | None = None,
+        width: int | Literal["auto"],
+        height: int | Literal["auto"],
         url: str | None = None,
         panel_states: Mapping[Panel, PanelState] | None = None,
         fallback_token: str | None = None,
@@ -186,8 +193,6 @@ class Viewer(anywidget.AnyWidget):  # type: ignore[misc]
         self._width = width
         self._height = height
         self._url = url
-        self._data_queue = []
-        self._table_queue = []
 
         if panel_states:
             self.update_panel_states(panel_states)
@@ -208,28 +213,24 @@ class Viewer(anywidget.AnyWidget):  # type: ignore[misc]
     def _on_ready(self) -> None:
         self._ready = True
 
-        for data in self._data_queue:
-            self.send_rrd(data)
-        self._data_queue.clear()
+        for event, buffers in self._event_queue:
+            super().send(event, buffers)
 
-        for data in self._table_queue:
-            self.send_table(data)
-        self._table_queue.clear()
+        self._event_queue.clear()
+
+    def send(self, content: _EventData, buffers: _Buffers | None = None) -> None:
+        if not self._ready:
+            self._event_queue.append((content, buffers))
+            return
+
+        super().send(content, buffers)
 
     def send_rrd(self, data: bytes) -> None:
         """Send a recording to the viewer."""
 
-        if not self._ready:
-            self._data_queue.append(data)
-            return
-
         self.send({"type": "rrd"}, buffers=[data])
 
     def send_table(self, data: bytes) -> None:
-        if not self._ready:
-            self._table_queue.append(data)
-            return
-
         self.send({"type": "table"}, buffers=[data])
 
     def block_until_ready(self, timeout: float = 10.0) -> None:
@@ -257,10 +258,16 @@ class Viewer(anywidget.AnyWidget):  # type: ignore[misc]
         self._panel_states = new_panel_states
 
     def set_time_ctrl(self, timeline: str | None, time: int | None, play: bool) -> None:
-        self._time_ctrl = (timeline, time, play)
+        self.send({"type": "time_ctrl", "timeline": timeline, "time": time, "play": play})
 
     def set_active_recording(self, recording_id: str) -> None:
-        self._recording_id = recording_id
+        self.send({"type": "recording_id", "recording_id": recording_id})
+
+    def open_url(self, url: str) -> None:
+        self.send({"type": "open_url", "url": url})
+
+    def close_url(self, url: str) -> None:
+        self.send({"type": "close_url", "url": url})
 
     def _on_raw_event(self, callback: Callable[[str], None]) -> None:
         """Register a set of callbacks with this instance of the Viewer."""

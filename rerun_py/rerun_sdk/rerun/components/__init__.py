@@ -17,10 +17,18 @@ from .annotation_context import (
 )
 from .axis_length import AxisLength, AxisLengthBatch
 from .blob import Blob, BlobBatch
+from .channel_id import ChannelId, ChannelIdBatch
+from .channel_message_counts import (
+    ChannelMessageCounts,
+    ChannelMessageCountsArrayLike,
+    ChannelMessageCountsBatch,
+    ChannelMessageCountsLike,
+)
 from .class_id import ClassId, ClassIdBatch
 from .clear_is_recursive import ClearIsRecursive, ClearIsRecursiveBatch
 from .color import Color, ColorBatch
 from .colormap import Colormap, ColormapArrayLike, ColormapBatch, ColormapLike
+from .count import Count, CountBatch
 from .depth_meter import DepthMeter, DepthMeterBatch
 from .draw_order import DrawOrder, DrawOrderBatch
 from .entity_path import EntityPath, EntityPathBatch
@@ -37,11 +45,13 @@ from .image_buffer import ImageBuffer, ImageBufferBatch
 from .image_format import ImageFormat, ImageFormatBatch
 from .image_plane_distance import ImagePlaneDistance, ImagePlaneDistanceBatch
 from .interactive import Interactive, InteractiveBatch
+from .key_value_pairs import KeyValuePairs, KeyValuePairsArrayLike, KeyValuePairsBatch, KeyValuePairsLike
 from .keypoint_id import KeypointId, KeypointIdBatch
 from .lat_lon import LatLon, LatLonBatch
 from .length import Length, LengthBatch
 from .line_strip2d import LineStrip2D, LineStrip2DArrayLike, LineStrip2DBatch, LineStrip2DLike
 from .line_strip3d import LineStrip3D, LineStrip3DArrayLike, LineStrip3DBatch, LineStrip3DLike
+from .linear_speed import LinearSpeed, LinearSpeedBatch
 from .magnification_filter import (
     MagnificationFilter,
     MagnificationFilterArrayLike,
@@ -69,6 +79,7 @@ from .rotation_axis_angle import RotationAxisAngle, RotationAxisAngleBatch
 from .rotation_quat import RotationQuat, RotationQuatBatch
 from .scalar import Scalar, ScalarBatch
 from .scale3d import Scale3D, Scale3DBatch
+from .schema_id import SchemaId, SchemaIdBatch
 from .series_visible import SeriesVisible, SeriesVisibleBatch
 from .show_labels import ShowLabels, ShowLabelsBatch
 from .stroke_width import StrokeWidth, StrokeWidthBatch
@@ -113,6 +124,12 @@ __all__ = [
     "AxisLengthBatch",
     "Blob",
     "BlobBatch",
+    "ChannelId",
+    "ChannelIdBatch",
+    "ChannelMessageCounts",
+    "ChannelMessageCountsArrayLike",
+    "ChannelMessageCountsBatch",
+    "ChannelMessageCountsLike",
     "ClassId",
     "ClassIdBatch",
     "ClearIsRecursive",
@@ -123,6 +140,8 @@ __all__ = [
     "ColormapArrayLike",
     "ColormapBatch",
     "ColormapLike",
+    "Count",
+    "CountBatch",
     "DepthMeter",
     "DepthMeterBatch",
     "DrawOrder",
@@ -161,6 +180,10 @@ __all__ = [
     "ImagePlaneDistanceBatch",
     "Interactive",
     "InteractiveBatch",
+    "KeyValuePairs",
+    "KeyValuePairsArrayLike",
+    "KeyValuePairsBatch",
+    "KeyValuePairsLike",
     "KeypointId",
     "KeypointIdBatch",
     "LatLon",
@@ -175,6 +198,8 @@ __all__ = [
     "LineStrip3DArrayLike",
     "LineStrip3DBatch",
     "LineStrip3DLike",
+    "LinearSpeed",
+    "LinearSpeedBatch",
     "MagnificationFilter",
     "MagnificationFilterArrayLike",
     "MagnificationFilterBatch",
@@ -223,6 +248,8 @@ __all__ = [
     "ScalarBatch",
     "Scale3D",
     "Scale3DBatch",
+    "SchemaId",
+    "SchemaIdBatch",
     "SeriesVisible",
     "SeriesVisibleBatch",
     "ShowLabels",

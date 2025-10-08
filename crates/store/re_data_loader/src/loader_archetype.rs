@@ -1,8 +1,7 @@
 use itertools::Either;
 
 use re_chunk::{Chunk, RowId};
-use re_log_types::{EntityPath, TimePoint};
-use re_types::Archetype;
+use re_log_types::{ApplicationId, EntityPath, TimePoint};
 use re_types::ComponentBatch;
 use re_types::archetypes::{AssetVideo, VideoFrameReference};
 use re_types::components::VideoTimestamp;
@@ -61,35 +60,37 @@ impl DataLoader for ArchetypeLoader {
 
         re_tracing::profile_function!(filepath.display().to_string());
 
-        let entity_path = EntityPath::from_file_path(&filepath);
+        let entity_path = settings
+            .entity_path_prefix
+            .clone()
+            .map(|prefix| prefix / EntityPath::from_file_path(&filepath))
+            .unwrap_or_else(|| EntityPath::from_file_path(&filepath));
 
         let mut timepoint = TimePoint::default();
         // TODO(cmc): log these once heuristics (I think?) are fixed
-        if false {
-            if let Ok(metadata) = filepath.metadata() {
-                use re_log_types::TimeCell;
+        if false && let Ok(metadata) = filepath.metadata() {
+            use re_log_types::TimeCell;
 
-                if let Some(created) = metadata
-                    .created()
-                    .ok()
-                    .and_then(|t| TimeCell::try_from(t).ok())
-                {
-                    timepoint.insert_cell("created_at", created);
-                }
-                if let Some(modified) = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|t| TimeCell::try_from(t).ok())
-                {
-                    timepoint.insert_cell("modified_at", modified);
-                }
-                if let Some(accessed) = metadata
-                    .accessed()
-                    .ok()
-                    .and_then(|t| TimeCell::try_from(t).ok())
-                {
-                    timepoint.insert_cell("accessed_at", accessed);
-                }
+            if let Some(created) = metadata
+                .created()
+                .ok()
+                .and_then(|t| TimeCell::try_from(t).ok())
+            {
+                timepoint.insert_cell("created_at", created);
+            }
+            if let Some(modified) = metadata
+                .modified()
+                .ok()
+                .and_then(|t| TimeCell::try_from(t).ok())
+            {
+                timepoint.insert_cell("modified_at", modified);
+            }
+            if let Some(accessed) = metadata
+                .accessed()
+                .ok()
+                .and_then(|t| TimeCell::try_from(t).ok())
+            {
+                timepoint.insert_cell("accessed_at", accessed);
             }
         }
 
@@ -132,10 +133,15 @@ impl DataLoader for ArchetypeLoader {
             )?);
         }
 
-        let store_id = settings
-            .opened_store_id
-            .clone()
-            .unwrap_or_else(|| settings.store_id.clone());
+        let store_id = settings.opened_store_id.clone().unwrap_or_else(|| {
+            re_log_types::StoreId::recording(
+                settings
+                    .application_id
+                    .clone()
+                    .unwrap_or_else(ApplicationId::random),
+                settings.recording_id.clone(),
+            )
+        });
         for row in rows {
             let data = LoadedData::Chunk(Self::name(&Self), store_id.clone(), row);
             if tx.send(data).is_err() {
@@ -189,7 +195,10 @@ fn load_video(
         re_log_types::TimeCell::ZERO_DURATION,
     );
 
-    let video_asset = AssetVideo::new(contents);
+    let video_asset = {
+        re_tracing::profile_scope!("serialize-as-arrow");
+        AssetVideo::new(contents)
+    };
 
     let video_frame_reference_chunk = match video_asset.read_frame_timestamps_nanos() {
         Ok(frame_timestamps_nanos) => {
@@ -214,28 +223,14 @@ fn load_video(
                 .to_arrow_list_array()
                 .map_err(re_chunk::ChunkError::from)?;
 
-            // Indicator column.
-            let video_frame_reference_indicators =
-                <VideoFrameReference as Archetype>::Indicator::new_array(video_timestamps.len());
-            let video_frame_reference_indicators_list_array = video_frame_reference_indicators
-                .to_arrow_list_array()
-                .map_err(re_chunk::ChunkError::from)?;
-
             Some(Chunk::from_auto_row_ids(
                 re_chunk::ChunkId::new(),
                 entity_path.clone(),
                 std::iter::once((*video_timeline.name(), time_column)).collect(),
-                [
-                    (
-                        VideoFrameReference::indicator().descriptor.clone(),
-                        video_frame_reference_indicators_list_array,
-                    ),
-                    (
-                        VideoFrameReference::descriptor_timestamp(),
-                        video_timestamp_list_array,
-                    ),
-                ]
-                .into_iter()
+                std::iter::once((
+                    VideoFrameReference::descriptor_timestamp(),
+                    video_timestamp_list_array,
+                ))
                 .collect(),
             )?)
         }

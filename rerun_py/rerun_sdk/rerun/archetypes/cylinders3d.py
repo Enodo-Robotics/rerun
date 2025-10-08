@@ -146,6 +146,8 @@ class Cylinders3D(Cylinders3DExt, Archetype):
             If no rotation is specified, the cylinders align with the +Z axis of the local coordinate system.
         colors:
             Optional colors for the cylinders.
+
+            Alpha channel is used for transparency for solid fill-mode.
         line_radii:
             Optional radii for the lines used when the cylinder is rendered as a wireframe.
         fill_mode:
@@ -238,6 +240,8 @@ class Cylinders3D(Cylinders3DExt, Archetype):
             If no rotation is specified, the cylinders align with the +Z axis of the local coordinate system.
         colors:
             Optional colors for the cylinders.
+
+            Alpha channel is used for transparency for solid fill-mode.
         line_radii:
             Optional radii for the lines used when the cylinder is rendered as a wireframe.
         fill_mode:
@@ -272,7 +276,7 @@ class Cylinders3D(Cylinders3DExt, Archetype):
                 class_ids=class_ids,
             )
 
-        batches = inst.as_component_batches(include_indicators=False)
+        batches = inst.as_component_batches()
         if len(batches) == 0:
             return ComponentColumnList([])
 
@@ -316,8 +320,7 @@ class Cylinders3D(Cylinders3DExt, Archetype):
 
             columns.append(batch.partition(sizes))
 
-        indicator_column = cls.indicator().partition(np.zeros(len(sizes)))
-        return ComponentColumnList([indicator_column] + columns)
+        return ComponentColumnList(columns)
 
     lengths: components.LengthBatch | None = field(
         metadata={"component": True},
@@ -376,6 +379,8 @@ class Cylinders3D(Cylinders3DExt, Archetype):
         converter=components.ColorBatch._converter,  # type: ignore[misc]
     )
     # Optional colors for the cylinders.
+    #
+    # Alpha channel is used for transparency for solid fill-mode.
     #
     # (Docstring intentionally commented out to hide this field from the docs)
 

@@ -3,22 +3,26 @@ from __future__ import annotations
 import contextvars
 import functools
 import inspect
+import math
 import uuid
-from collections.abc import Iterable
-from datetime import datetime, timedelta
-from pathlib import Path
-from types import TracebackType
 from typing import TYPE_CHECKING, Any, Callable, TypeVar, overload
 
-import numpy as np
+from rerun_bindings import ChunkBatcherConfig as ChunkBatcherConfig  # noqa: TC001, TC002
 from typing_extensions import deprecated
 
 import rerun as rr
 from rerun import bindings
-from rerun.memory import MemoryRecording
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    from types import TracebackType
+
+    import numpy as np
+
     from rerun import AsComponents, BlueprintLike, ComponentColumn, DescribedComponentBatch
+    from rerun.memory import MemoryRecording
     from rerun.sinks import LogSinkLike
 
     from ._send_columns import TimeColumnLike
@@ -39,6 +43,7 @@ def new_recording(
     make_thread_default: bool = False,
     spawn: bool = False,
     default_enabled: bool = True,
+    batcher_config: ChunkBatcherConfig | None = None,
 ) -> RecordingStream:
     """
     Creates a new recording with a user-chosen application id (name) that can be used to log data.
@@ -103,6 +108,8 @@ def new_recording(
     default_enabled
         Should Rerun logging be on by default?
         Can be overridden with the RERUN env-var, e.g. `RERUN=on` or `RERUN=off`.
+    batcher_config
+        Optional configuration for the chunk batcher.
 
     Returns
     -------
@@ -117,6 +124,7 @@ def new_recording(
         make_default=make_default,
         make_thread_default=make_thread_default,
         default_enabled=default_enabled,
+        batcher_config=batcher_config,
     )
 
     if spawn:
@@ -302,10 +310,11 @@ class RecordingStream:
     Micro-batching using both space and time triggers (whichever comes first) is done automatically
     in a dedicated background thread.
 
-    You can configure the frequency of the batches using the following environment variables:
+    You can configure the frequency of the batches using the `batcher_config` parameter when creating
+    the RecordingStream, or via the following environment variables:
 
     - `RERUN_FLUSH_TICK_SECS`:
-        Flush frequency in seconds (default: `0.05` (50ms)).
+        Flush frequency in seconds (default: `0.2` (200ms)).
     - `RERUN_FLUSH_NUM_BYTES`:
         Flush threshold in bytes (default: `1048576` (1MiB)).
     - `RERUN_FLUSH_NUM_ROWS`:
@@ -322,6 +331,7 @@ class RecordingStream:
         make_thread_default: bool = False,
         default_enabled: bool = True,
         send_properties: bool = True,
+        batcher_config: ChunkBatcherConfig | None = None,
     ) -> None:
         """
         Creates a new recording stream with a user-chosen application id (name) that can be used to log data.
@@ -383,6 +393,8 @@ class RecordingStream:
             Can be overridden with the RERUN env-var, e.g. `RERUN=on` or `RERUN=off`.
         send_properties
             Immediately send the recording properties to the viewer (default: True)
+        batcher_config
+            Optional configuration for the chunk batcher.
 
         Returns
         -------
@@ -411,6 +423,7 @@ class RecordingStream:
             make_thread_default=make_thread_default,
             default_enabled=default_enabled,
             send_properties=send_properties,
+            batcher_config=batcher_config,
         )
 
         self._prev: RecordingStream | None = None
@@ -536,7 +549,6 @@ class RecordingStream:
         self,
         url: str | None = None,
         *,
-        flush_timeout_sec: float | None = 2.0,
         default_blueprint: BlueprintLike | None = None,
     ) -> None:
         """
@@ -553,10 +565,6 @@ class RecordingStream:
             and the pathname must be `/proxy`.
 
             The default is `rerun+http://127.0.0.1:9876/proxy`.
-        flush_timeout_sec:
-            The minimum time the SDK will wait during a flush before potentially
-            dropping data if progress is not being made. Passing `None` indicates no timeout,
-            and can cause a call to `flush` to block indefinitely.
         default_blueprint
             Optionally set a default blueprint to use for this application. If the application
             already has an active blueprint, the new blueprint won't become active until the user
@@ -567,7 +575,7 @@ class RecordingStream:
 
         from .sinks import connect_grpc
 
-        connect_grpc(url, flush_timeout_sec=flush_timeout_sec, default_blueprint=default_blueprint, recording=self)
+        connect_grpc(url, default_blueprint=default_blueprint, recording=self)
 
     def save(self, path: str | Path, default_blueprint: BlueprintLike | None = None) -> None:
         """
@@ -657,6 +665,7 @@ class RecordingStream:
         grpc_port: int | None = None,
         default_blueprint: BlueprintLike | None = None,
         server_memory_limit: str = "25%",
+        newest_first: bool = False,
     ) -> str:
         """
         Serve log-data over gRPC.
@@ -686,6 +695,9 @@ class RecordingStream:
         server_memory_limit:
             Maximum amount of memory to use for buffering log data for clients that connect late.
             This can be a percentage of the total ram (e.g. "50%") or an absolute value (e.g. "4GB").
+        newest_first:
+            If `True`, the server will start sending back the newest messages _first_.
+            If `False`, the messages will be played back in the order they arrived.
 
         """
 
@@ -700,7 +712,7 @@ class RecordingStream:
 
     @deprecated(
         """Use a combination of `serve_grpc` and `rr.serve_web_viewer` instead.
-        See: https://www.rerun.io/docs/reference/migration/migration-0-24?speculative-link for more details.""",
+        See: https://www.rerun.io/docs/reference/migration/migration-0-24 for more details.""",
     )
     def serve_web(
         self,
@@ -1392,27 +1404,42 @@ class BinaryStream:
     def __init__(self, storage: bindings.PyBinarySinkStorage) -> None:
         self.storage = storage
 
-    def read(self, *, flush: bool = True) -> bytes | None:
+    def read(self, *, flush: bool = True, flush_timeout_sec: float = math.inf) -> bytes | None:
         """
         Reads the available bytes from the stream.
 
         If using `flush`, the read call will first block until the flush is complete.
+        If all the data was not successfully flushed within the given timeout,
+        an exception will be raised.
 
         Parameters
         ----------
         flush:
             If true (default), the stream will be flushed before reading.
+        flush_timeout_sec:
+            If `flush` is `True`, wait at most this many seconds.
+            If the timeout is reached, an error is raised.
 
         """
-        return self.storage.read(flush=flush)  # type: ignore[no-any-return]
+        return self.storage.read(flush=flush, flush_timeout_sec=flush_timeout_sec)  # type: ignore[no-any-return]
 
-    def flush(self) -> None:
+    def flush(self, timeout_sec: float = math.inf) -> None:
         """
         Flushes the recording stream and ensures that all logged messages have been encoded into the stream.
 
         This will block until the flush is complete.
+
+        If all the data was not successfully flushed within the given timeout,
+        an exception will be raised.
+
+        Parameters
+        ----------
+        timeout_sec:
+            Wait at most this many seconds.
+            If the timeout is reached, an error is raised.
+
         """
-        self.storage.flush()
+        self.storage.flush(timeout_sec=timeout_sec)
 
 
 # ---

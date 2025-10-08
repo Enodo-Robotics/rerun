@@ -2,9 +2,12 @@
 //!
 //! This crate provides ui elements for Rerun component data for the Rerun Viewer.
 
+#![warn(clippy::iter_over_hash_type)] //  TODO(#6198): enable everywhere
+
 use re_log_types::EntityPath;
 use re_types::reflection::ComponentDescriptorExt as _;
 use re_types::{ComponentDescriptor, RowId};
+use re_ui::UiExt as _;
 use re_viewer_context::{UiLayout, ViewerContext};
 
 mod annotation_context;
@@ -23,14 +26,17 @@ mod store_id;
 mod tensor;
 mod video;
 
+mod extra_data_ui;
 pub mod item_ui;
 
 pub use crate::tensor::tensor_summary_ui_grid_contents;
 pub use component::ComponentPathLatestAtResults;
 pub use component_ui_registry::{add_to_registry, register_component_uis};
 pub use image::image_preview_ui;
-use re_types_core::ArchetypeName;
+pub use instance_path::archetype_label_list_item_ui;
+use re_chunk_store::UnitChunkShared;
 use re_types_core::reflection::Reflection;
+use re_types_core::{ArchetypeName, Component};
 
 pub type ArchetypeComponentMap =
     std::collections::BTreeMap<Option<ArchetypeName>, Vec<ComponentDescriptor>>;
@@ -42,7 +48,6 @@ pub fn sorted_component_list_by_archetype_for_ui<'a>(
 ) -> ArchetypeComponentMap {
     let mut map = iter
         .into_iter()
-        .filter(|d| !d.is_indicator_component())
         .fold(ArchetypeComponentMap::default(), |mut acc, descriptor| {
             acc.entry(descriptor.archetype)
                 .or_default()
@@ -86,7 +91,9 @@ pub trait DataUi {
 
     /// Called [`Self::data_ui`] using the default query and recording.
     fn data_ui_recording(&self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui, ui_layout: UiLayout) {
+        ui.sanity_check();
         self.data_ui(ctx, ui, ui_layout, &ctx.current_query(), ctx.recording());
+        ui.sanity_check();
     }
 }
 
@@ -143,4 +150,16 @@ pub fn annotations(
     let mut annotation_map = re_viewer_context::AnnotationMap::default();
     annotation_map.load(ctx, query, std::iter::once(entity_path));
     annotation_map.find(entity_path)
+}
+
+/// Finds and deserializes the given component type if its descriptor matches the given archetype name.
+fn find_and_deserialize_archetype_mono_component<C: Component>(
+    components: &[(ComponentDescriptor, UnitChunkShared)],
+    archetype_name: Option<ArchetypeName>,
+) -> Option<C> {
+    components.iter().find_map(|(descr, chunk)| {
+        (descr.component_type == Some(C::name()) && descr.archetype == archetype_name)
+            .then(|| chunk.component_mono::<C>(descr)?.ok())
+            .flatten()
+    })
 }

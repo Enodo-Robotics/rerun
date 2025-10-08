@@ -1,5 +1,7 @@
 use ahash::HashSet;
-use egui::{Color32, Context, Frame, Id, RichText, Stroke, Style};
+use egui::containers::menu::{MenuButton, MenuConfig};
+use egui::{Button, Color32, Context, Frame, Id, PopupCloseBehavior, RichText, Stroke, Style};
+
 use re_ui::{UiExt as _, design_tokens_of, icons};
 
 /// This applies some fixes so that the column resize bar is correctly displayed.
@@ -23,8 +25,12 @@ pub fn apply_table_style_fixes(style: &mut Style) {
     style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(0.0, Color32::TRANSPARENT);
 }
 
-pub fn header_title(ui: &mut egui::Ui, title: impl Into<RichText>) -> egui::Response {
-    header_ui(ui, false, |ui| {
+pub fn header_title(
+    ui: &mut egui::Ui,
+    table_style: re_ui::TableStyle,
+    title: impl Into<RichText>,
+) -> egui::Response {
+    header_ui(ui, table_style, false, |ui| {
         ui.monospace(title.into().strong());
     })
     .response
@@ -32,6 +38,7 @@ pub fn header_title(ui: &mut egui::Ui, title: impl Into<RichText>) -> egui::Resp
 
 pub fn header_ui<R>(
     ui: &mut egui::Ui,
+    table_style: re_ui::TableStyle,
     connected_to_next_cell: bool,
     content: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
@@ -40,7 +47,7 @@ pub fn header_ui<R>(
         .rect_filled(rect, 0.0, ui.tokens().table_header_bg_fill);
 
     let response = Frame::new()
-        .inner_margin(ui.tokens().table_cell_margin())
+        .inner_margin(ui.tokens().header_cell_margin(table_style))
         .show(ui, content);
 
     if !connected_to_next_cell {
@@ -62,11 +69,12 @@ pub fn header_ui<R>(
 
 pub fn cell_ui<R>(
     ui: &mut egui::Ui,
+    table_style: re_ui::TableStyle,
     connected_to_next_cell: bool,
     content: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
     let response = Frame::new()
-        .inner_margin(ui.tokens().table_cell_margin())
+        .inner_margin(ui.tokens().table_cell_margin(table_style))
         .show(ui, content);
 
     let rect = ui.max_rect();
@@ -195,7 +203,7 @@ impl TableConfig {
                     ui,
                     |ui| {
                         handle.ui(ui, |ui| {
-                            ui.small_icon(&icons::DND_HANDLE, None);
+                            ui.small_icon(&icons::DND_HANDLE, Some(ui.visuals().text_color()));
                         });
                         let mut label = RichText::new(&column.name);
                         if visible {
@@ -224,7 +232,12 @@ impl TableConfig {
     }
 
     pub fn button_ui(&mut self, ui: &mut egui::Ui) {
-        ui.menu_image_text_button(icons::SETTINGS.as_image(), "Columns", |ui| {
+        MenuButton::from_button(Button::image_and_text(
+            icons::SETTINGS.as_image(),
+            "Columns",
+        ))
+        .config(MenuConfig::new().close_behavior(PopupCloseBehavior::CloseOnClickOutside))
+        .ui(ui, |ui| {
             self.ui(ui);
         });
     }

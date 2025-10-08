@@ -62,17 +62,19 @@ impl ItemTitle {
                 let item_title = Self::from_instance_path(ctx, style, instance_path);
                 if let Some(view) = viewport.view(view_id) {
                     item_title.with_tooltip(
-                        SyntaxHighlightedBuilder::new(ctx.egui_ctx().style())
-                            .append(instance_path)
-                            .append(&format!(" in view '{}'", view.display_name_or_default())),
+                        SyntaxHighlightedBuilder::new()
+                            .with(instance_path)
+                            .with_body(" in view ")
+                            .with(&view.display_name_or_default())
+                            .into_widget_text(&ctx.egui_ctx().style()),
                     )
                 } else {
                     item_title
                 }
             }
 
-            // TODO(lucasmerlin): Icon? How do get the actual title? Should RedapServers be part of ViewerContext?
-            Item::RedapEntry(entry) => Self::new(entry.to_string(), &icons::DATASET),
+            // TODO(#10566): There should be an `EntryName` in this `Item` arm.
+            Item::RedapEntry(entry) => Self::new(entry.entry_id.to_string(), &icons::DATASET),
 
             // TODO(lucasmerlin): Icon?
             Item::RedapServer(origin) => Self::new(origin.to_string(), &icons::DATASET),
@@ -84,34 +86,33 @@ impl ItemTitle {
     }
 
     pub fn from_store_id(ctx: &ViewerContext<'_>, store_id: &re_log_types::StoreId) -> Self {
-        let id_str = format!("{} ID: {}", store_id.kind, store_id);
-
         let title = if let Some(entity_db) = ctx.storage_context.bundle.get(store_id) {
-            match (
-                entity_db.app_id(),
-                entity_db
-                    .recording_info_property::<Timestamp>(&RecordingInfo::descriptor_start_time()),
-            ) {
-                (Some(application_id), Some(started)) => {
-                    let time = re_log_types::Timestamp::from(started.0)
-                        .to_jiff_zoned(ctx.app_options().timestamp_format)
-                        .strftime("%H:%M:%S")
-                        .to_string();
-                    format!("{application_id} - {time}")
-                }
-                (Some(application_id), None) => application_id.to_string(),
-                _ => id_str.clone(),
+            if let Some(started) = entity_db
+                .recording_info_property::<Timestamp>(&RecordingInfo::descriptor_start_time())
+            {
+                let time = re_log_types::Timestamp::from(started.0)
+                    .to_jiff_zoned(ctx.app_options().timestamp_format)
+                    .strftime("%H:%M:%S")
+                    .to_string();
+                format!("{} - {time}", store_id.application_id())
+            } else {
+                store_id.application_id().to_string()
             }
         } else {
-            id_str.clone()
+            store_id.application_id().to_string()
         };
 
-        let icon = match store_id.kind {
+        let icon = match store_id.kind() {
             re_log_types::StoreKind::Recording => &icons::RECORDING,
             re_log_types::StoreKind::Blueprint => &icons::BLUEPRINT,
         };
 
-        Self::new(title, icon).with_tooltip(id_str)
+        Self::new(title, icon).with_tooltip(format!(
+            "Store kind: {}\nApplication ID: {}\nRecording ID: {}",
+            store_id.kind(),
+            store_id.application_id(),
+            store_id.recording_id(),
+        ))
     }
 
     pub fn from_instance_path(

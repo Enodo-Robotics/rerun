@@ -69,7 +69,6 @@ crossbeam.workspace = true
 document-features.workspace = true
 itertools.workspace = true
 nohash-hasher.workspace = true
-once_cell.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 thiserror.workspace = true
@@ -88,6 +87,7 @@ webbrowser = { workspace = true, optional = true }
 libc.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 similar-asserts.workspace = true
 
 

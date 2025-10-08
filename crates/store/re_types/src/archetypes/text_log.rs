@@ -109,48 +109,32 @@ impl TextLog {
             component_type: Some("rerun.components.Color".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.TextLogIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [TextLog::descriptor_text()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [TextLog::descriptor_text()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| [TextLog::descriptor_level(), TextLog::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [TextLog::descriptor_level()]);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [TextLog::descriptor_color()]);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [TextLog::descriptor_color()]);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 4usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 3usize]> =
+    std::sync::LazyLock::new(|| {
         [
             TextLog::descriptor_text(),
             TextLog::descriptor_level(),
-            TextLog::descriptor_indicator(),
             TextLog::descriptor_color(),
         ]
     });
 
 impl TextLog {
-    /// The total number of components in the archetype: 1 required, 2 recommended, 1 optional
-    pub const NUM_COMPONENTS: usize = 4usize;
+    /// The total number of components in the archetype: 1 required, 1 recommended, 1 optional
+    pub const NUM_COMPONENTS: usize = 3usize;
 }
 
-/// Indicator component for the [`TextLog`] [`::re_types_core::Archetype`]
-pub type TextLogIndicator = ::re_types_core::GenericIndicatorComponent<TextLog>;
-
 impl ::re_types_core::Archetype for TextLog {
-    type Indicator = TextLogIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.TextLog".into()
@@ -159,14 +143,6 @@ impl ::re_types_core::Archetype for TextLog {
     #[inline]
     fn display_name() -> &'static str {
         "Text log"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        TextLogIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -213,15 +189,10 @@ impl ::re_types_core::AsComponents for TextLog {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [
-            Some(Self::indicator()),
-            self.text.clone(),
-            self.level.clone(),
-            self.color.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [self.text.clone(), self.level.clone(), self.color.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -293,12 +264,7 @@ impl TextLog {
                 .map(|color| color.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -313,7 +279,7 @@ impl TextLog {
         let len_level = self.level.as_ref().map(|b| b.array.len());
         let len_color = self.color.as_ref().map(|b| b.array.len());
         let len = None.or(len_text).or(len_level).or(len_color).unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The body of the message.

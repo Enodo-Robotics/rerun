@@ -91,9 +91,7 @@ impl CodeGenerator for DocsCodeGenerator {
                 ObjectKind::Archetype,
                 1,
                 r"Archetypes are bundles of components for which the Rerun viewer has first-class
-built-in support. When logged, each archetype also includes an _indicator component_ which captures
-the intent of the logging code and triggers the activation of the corresponding visualizers. See
-[Entities and Components](../../concepts/entity-component.md) and
+built-in support. See [Entities and Components](../../concepts/entity-component.md) and
 [Visualizers and Overrides](../../concepts/visualizers-and-overrides.md) for more information.
 
 This page lists all built-in archetypes.",
@@ -416,6 +414,7 @@ fn write_fields(reporter: &Reporter, objects: &Objects, o: &mut String, object: 
             Type::Float16 => atomic("float16"),
             Type::Float32 => atomic("float32"),
             Type::Float64 => atomic("float64"),
+            Type::Binary => atomic("binary"),
             Type::String => atomic("utf8"),
 
             Type::Array { elem_type, length } => {
@@ -747,7 +746,7 @@ fn write_example_list(o: &mut String, examples: &[ExampleInfo<'_>]) {
         putln!(o, "## Examples");
     } else {
         putln!(o, "## Example");
-    };
+    }
     putln!(o);
 
     for ExampleInfo {

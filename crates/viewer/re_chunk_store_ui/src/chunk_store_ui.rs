@@ -6,7 +6,7 @@ use itertools::{Either, Itertools as _};
 
 use re_chunk_store::{ChunkStore, LatestAtQuery, RangeQuery};
 use re_log_types::{
-    ResolvedTimeRange, StoreKind, TimeType, Timeline, TimelineName, TimestampFormat,
+    AbsoluteTimeRange, StoreKind, TimeType, Timeline, TimelineName, TimestampFormat,
 };
 use re_ui::{UiExt as _, list_item};
 use re_viewer_context::StoreContext;
@@ -125,6 +125,8 @@ impl DatastoreUi {
         let all_timelines = chunk_store.timelines();
 
         self.chunk_list_mode.ui(ui, chunk_store, timestamp_format);
+
+        let table_style = re_ui::TableStyle::Dense;
 
         //
         // Collect chunks based on query mode
@@ -320,7 +322,7 @@ impl DatastoreUi {
                         ui.label(format_time_range(timeline, time_range, timestamp_format));
                     } else {
                         ui.label("-");
-                    };
+                    }
                 });
             }
 
@@ -352,9 +354,9 @@ impl DatastoreUi {
                     .striped(true);
 
                 table_builder
-                    .header(tokens.deprecated_table_line_height(), header_ui)
+                    .header(tokens.table_row_height(table_style), header_ui)
                     .body(|body| {
-                        body.rows(tokens.deprecated_table_line_height(), chunks.len(), row_ui);
+                        body.rows(tokens.table_row_height(table_style), chunks.len(), row_ui);
                     });
             });
     }
@@ -396,9 +398,15 @@ impl DatastoreUi {
         list_item::list_item_scope(ui, "chunk store info", |ui| {
             let stats = chunk_store.stats().total();
             ui.list_item_collapsible_noninteractive_label("Info", false, |ui| {
+                // Note: no need to print the store kind, because it's selected by the top-level toggle.
                 ui.list_item_flat_noninteractive(
-                    list_item::PropertyContent::new("Store ID")
-                        .value_text(chunk_store.id().to_string()),
+                    list_item::PropertyContent::new("Application ID")
+                        .value_text(chunk_store.id().application_id().to_string()),
+                );
+
+                ui.list_item_flat_noninteractive(
+                    list_item::PropertyContent::new("Recording ID")
+                        .value_text(chunk_store.id().recording_id().to_string()),
                 );
 
                 ui.list_item_flat_noninteractive(
@@ -440,13 +448,12 @@ impl DatastoreUi {
 
                 ui.list_item_flat_noninteractive(
                     list_item::PropertyContent::new("Chunk max rows")
-                        .value_text(re_format::format_uint(chunk_store.config().chunk_max_rows)),
+                        .value_uint(chunk_store.config().chunk_max_rows),
                 );
 
                 ui.list_item_flat_noninteractive(
-                    list_item::PropertyContent::new("Chunk max rows (unsorted)").value_text(
-                        re_format::format_uint(chunk_store.config().chunk_max_rows_if_unsorted),
-                    ),
+                    list_item::PropertyContent::new("Chunk max rows (unsorted)")
+                        .value_uint(chunk_store.config().chunk_max_rows_if_unsorted),
                 );
             });
         });
@@ -457,7 +464,7 @@ impl DatastoreUi {
 
 fn format_time_range(
     timeline: &Timeline,
-    time_range: &ResolvedTimeRange,
+    time_range: &AbsoluteTimeRange,
     timestamp_format: TimestampFormat,
 ) -> String {
     if time_range.min() == time_range.max() {

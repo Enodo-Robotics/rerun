@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+use arrow::array::RecordBatchOptions;
 use arrow::{
     array::{
         ArrayRef as ArrowArrayRef, BooleanArray as ArrowBooleanArray,
@@ -29,7 +30,7 @@ use re_chunk_store::{
     ChunkStore, ColumnDescriptor, ComponentColumnDescriptor, Index, IndexColumnDescriptor,
     IndexValue, QueryExpression, SparseFillStrategy,
 };
-use re_log_types::ResolvedTimeRange;
+use re_log_types::AbsoluteTimeRange;
 use re_query::{QueryCache, StorageEngineLike};
 use re_sorbet::{
     ChunkColumnDescriptors, ColumnSelector, RowIdColumnDescriptor, TimeColumnSelector,
@@ -160,6 +161,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
     /// Lazily initialize internal private state.
     ///
     /// It is important that query handles stay cheap to create.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn init(&self) -> &QueryHandleState {
         self.engine
             .with(|store, cache| self.state.get_or_init(|| self.init_(store, cache)))
@@ -204,18 +206,18 @@ impl<E: StorageEngineLike> QueryHandle<E> {
         // 4. Perform the query and keep track of all the relevant chunks.
         let query = {
             let index_range = if self.query.filtered_index.is_none() {
-                ResolvedTimeRange::EMPTY // static-only
+                AbsoluteTimeRange::EMPTY // static-only
             } else if let Some(using_index_values) = self.query.using_index_values.as_ref() {
                 using_index_values
                     .first()
                     .and_then(|start| using_index_values.last().map(|end| (start, end)))
-                    .map_or(ResolvedTimeRange::EMPTY, |(start, end)| {
-                        ResolvedTimeRange::new(*start, *end)
+                    .map_or(AbsoluteTimeRange::EMPTY, |(start, end)| {
+                        AbsoluteTimeRange::new(*start, *end)
                     })
             } else {
                 self.query
                     .filtered_index_range
-                    .unwrap_or(ResolvedTimeRange::EVERYTHING)
+                    .unwrap_or(AbsoluteTimeRange::EVERYTHING)
             };
 
             RangeQuery::new(filtered_index, index_range)
@@ -377,6 +379,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
         }
     }
 
+    #[tracing::instrument(level = "info", skip_all)]
     #[allow(clippy::unused_self)]
     fn compute_user_selection(
         &self,
@@ -454,7 +457,6 @@ impl<E: StorageEngineLike> QueryHandle<E> {
                                     component_type: None,
                                     store_datatype: ArrowDataType::Null,
                                     is_static: false,
-                                    is_indicator: false,
                                     is_tombstone: false,
                                     is_semantically_empty: false,
                                 }),
@@ -486,10 +488,10 @@ impl<E: StorageEngineLike> QueryHandle<E> {
                         .fetch_chunks(store, cache, query, &column.entity_path, [&column.into()])
                         .unwrap_or_default();
 
-                    if let Some(pov) = self.query.filtered_is_not_null.as_ref() {
-                        if column.matches(pov) {
-                            view_pov_chunks_idx = Some(idx);
-                        }
+                    if let Some(pov) = self.query.filtered_is_not_null.as_ref()
+                        && column.matches(pov)
+                    {
+                        view_pov_chunks_idx = Some(idx);
                     }
 
                     chunks
@@ -705,6 +707,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
     /// the chunk's time range contains the `index_value`.
     ///
     /// I.e.: it's pretty cheap already.
+    #[tracing::instrument(level = "trace", skip_all)]
     #[inline]
     pub fn seek_to_row(&self, row_idx: usize) {
         let state = self.init();
@@ -734,6 +737,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
     /// the chunk's time range contains the `index_value`.
     ///
     /// I.e.: it's pretty cheap already.
+    #[tracing::instrument(level = "debug", skip_all)]
     fn seek_to_index_value(&self, index_value: IndexValue) {
         re_tracing::profile_function!();
 
@@ -867,6 +871,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
         })
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn _next_row(&self, store: &ChunkStore, cache: &QueryCache) -> Option<Vec<ArrowArrayRef>> {
         re_tracing::profile_function!();
 
@@ -997,7 +1002,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
                         cursor: cur_cursor_value,
                         row_id: cur_row_id,
                     });
-                };
+                }
             }
         }
 
@@ -1167,46 +1172,45 @@ impl<E: StorageEngineLike> QueryHandle<E> {
             .map(|(view_idx, streaming_state)| {
                 // NOTE: Reminder: the only reason the streaming state could be `None` here is
                 // because this column does not have data for the current index value (i.e. `null`).
-                streaming_state.as_ref().and_then(|streaming_state| {
-                    let list_array = match streaming_state {
-                        StreamingJoinState::StreamingJoinState(s) => {
-                            debug_assert!(
-                                s.chunk.components().iter().count() <= 1,
-                                "cannot possibly get more than one component with this query"
-                            );
+                let streaming_state = streaming_state.as_ref()?;
+                let list_array = match streaming_state {
+                    StreamingJoinState::StreamingJoinState(s) => {
+                        debug_assert!(
+                            s.chunk.components().iter().count() <= 1,
+                            "cannot possibly get more than one component with this query"
+                        );
 
-                            s.chunk
-                                .components()
-                                .iter()
-                                .next()
-                                .map(|(_, list_array)| list_array.slice(s.cursor as usize, 1))
+                        s.chunk
+                            .components()
+                            .iter()
+                            .next()
+                            .map(|(_, list_array)| list_array.slice(s.cursor as usize, 1))
 
-                        }
+                    }
 
-                        StreamingJoinState::Retrofilled(unit) => {
-                            let component_desc = state.view_contents.get_index_or_component(view_idx).and_then(|col| if let ColumnDescriptor::Component(descr) = col {
-                                if let Some(component_type) = descr.component_type  { component_type.sanity_check(); }
-                                Some(re_types_core::ComponentDescriptor {
-                                    component_type: descr.component_type,
-                                    archetype: descr.archetype,
-                                    component: descr.component,
-                                })
-                            } else {
-                                None
-                            })?;
-                            unit.components().get(&component_desc).cloned()
-                        }
-                    };
+                    StreamingJoinState::Retrofilled(unit) => {
+                        let component_desc = state.view_contents.get_index_or_component(view_idx).and_then(|col| if let ColumnDescriptor::Component(descr) = col {
+                            if let Some(component_type) = descr.component_type  { component_type.sanity_check(); }
+                            Some(re_types_core::ComponentDescriptor {
+                                component_type: descr.component_type,
+                                archetype: descr.archetype,
+                                component: descr.component,
+                            })
+                        } else {
+                            None
+                        })?;
+                        unit.components().get(&component_desc).cloned()
+                    }
+                };
 
 
-                    debug_assert!(
-                        list_array.is_some(),
-                        "This must exist or the chunk wouldn't have been sliced/retrofilled to start with."
-                    );
+                debug_assert!(
+                    list_array.is_some(),
+                    "This must exist or the chunk wouldn't have been sliced/retrofilled to start with."
+                );
 
-                    // NOTE: This cannot possibly return None, see assert above.
-                    list_array
-                })
+                // NOTE: This cannot possibly return None, see assert above.
+                list_array
             })
             .collect();
 
@@ -1266,7 +1270,7 @@ impl<E: StorageEngineLike> QueryHandle<E> {
             self.schema().clone(),
             row,
             // Explicitly setting row-count to one means it works even when there are no columns (e.g. due to heavy filtering)
-            &arrow::array::RecordBatchOptions::new().with_row_count(Some(1)),
+            &RecordBatchOptions::new().with_row_count(Some(1)),
         ) {
             Ok(batch) => Some(batch),
             Err(err) => {
@@ -1287,12 +1291,18 @@ impl<E: StorageEngineLike> QueryHandle<E> {
         E: 'static + Send + Clone,
     {
         let row = self.next_row_async().await?;
+        let row_count = row.first().map(|a| a.len()).unwrap_or(0);
 
         // If we managed to get a row, then the state must be initialized already.
         #[allow(clippy::unwrap_used)]
         let schema = self.state.get().unwrap().arrow_schema.clone();
 
-        ArrowRecordBatch::try_new(schema, row).ok()
+        ArrowRecordBatch::try_new_with_options(
+            schema,
+            row,
+            &RecordBatchOptions::default().with_row_count(Some(row_count)),
+        )
+        .ok()
     }
 }
 
@@ -1329,12 +1339,13 @@ impl<E: StorageEngineLike> QueryHandle<E> {
 mod tests {
     use std::sync::Arc;
 
+    use arrow::array::{StringArray, UInt32Array};
     use arrow::compute::concat_batches;
     use insta::assert_snapshot;
 
     use re_chunk::{Chunk, ChunkId, ComponentIdentifier, RowId, TimePoint};
     use re_chunk_store::{
-        ChunkStore, ChunkStoreConfig, ChunkStoreHandle, ResolvedTimeRange, TimeInt,
+        AbsoluteTimeRange, ChunkStore, ChunkStoreConfig, ChunkStoreHandle, QueryExpression, TimeInt,
     };
     use re_format_arrow::format_record_batch;
     use re_log_types::{
@@ -1343,6 +1354,7 @@ mod tests {
     };
     use re_query::StorageEngine;
     use re_sorbet::ComponentColumnSelector;
+    use re_types::{AnyValues, AsComponents as _, ComponentDescriptor};
     use re_types_core::components;
 
     use crate::{QueryCache, QueryEngine};
@@ -1488,7 +1500,7 @@ mod tests {
         let filtered_index = Some(TimelineName::new("frame_nr"));
         let query = QueryExpression {
             filtered_index,
-            filtered_index_range: Some(ResolvedTimeRange::new(30, 60)),
+            filtered_index_range: Some(AbsoluteTimeRange::new(30, 60)),
             ..Default::default()
         };
         eprintln!("{query:#?}:");
@@ -2300,6 +2312,61 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn query_static_any_values() -> anyhow::Result<()> {
+        re_log::setup_logging();
+
+        let store = ChunkStore::new_handle(
+            re_log_types::StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
+            ChunkStoreConfig::COMPACTION_DISABLED,
+        );
+
+        let any_values = AnyValues::default()
+            .with_component_from_data("yak", Arc::new(StringArray::from(vec!["yuk"])))
+            .with_component_from_data("foo", Arc::new(StringArray::from(vec!["bar"])))
+            .with_component_from_data("baz", Arc::new(UInt32Array::from(vec![42u32])));
+
+        let entity_path = EntityPath::from("test");
+
+        let chunk0 = Chunk::builder(entity_path.clone())
+            .with_serialized_batches(
+                RowId::new(),
+                TimePoint::default(),
+                any_values.as_serialized_batches(),
+            )
+            .build()?;
+
+        store.write().insert_chunk(&Arc::new(chunk0))?;
+
+        let engine = QueryEngine::from_store(store);
+
+        let query_expr = QueryExpression {
+            view_contents: None,
+            include_semantically_empty_columns: false,
+            include_tombstone_columns: false,
+            include_static_columns: re_chunk_store::StaticColumnSelection::Both,
+            filtered_index: None,
+            filtered_index_range: None,
+            filtered_index_values: None,
+            using_index_values: None,
+            filtered_is_not_null: None,
+            sparse_fill_strategy: re_chunk_store::SparseFillStrategy::None,
+            selection: None,
+        };
+
+        let query_handle = engine.query(query_expr);
+
+        let dataframe = concat_batches(
+            query_handle.schema(),
+            &query_handle.batch_iter().collect_vec(),
+        )?;
+        eprintln!("{}", format_record_batch(&dataframe.clone()));
+
+        assert_snapshot!(DisplayRB(dataframe));
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn async_barebones() -> anyhow::Result<()> {
         use tokio_stream::StreamExt as _;
@@ -2458,7 +2525,7 @@ mod tests {
     /// repeated timestamps, duplicated chunks, partial multi-timelines, flat and recursive clears, etc.
     fn create_nasty_store() -> anyhow::Result<ChunkStore> {
         let mut store = ChunkStore::new(
-            re_log_types::StoreId::random(re_log_types::StoreKind::Recording),
+            re_log_types::StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
             ChunkStoreConfig::COMPACTION_DISABLED,
         );
 

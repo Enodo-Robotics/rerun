@@ -2,6 +2,7 @@
 //!
 //! TODO(andreas): This is not a `data_ui`, can this go somewhere else, shouldn't be in `re_data_ui`.
 
+use re_entity_db::entity_db::EntityDbClass;
 use re_entity_db::{EntityTree, InstancePath};
 use re_format::format_uint;
 use re_log_types::{ApplicationId, EntityPath, TableId, TimeInt, TimeType, Timeline, TimelineName};
@@ -9,6 +10,7 @@ use re_types::{
     archetypes::RecordingInfo,
     components::{Name, Timestamp},
 };
+use re_ui::list_item::ListItemContentButtonsExt as _;
 use re_ui::{SyntaxHighlighting as _, UiExt as _, icons, list_item};
 use re_viewer_context::{
     HoverHighlight, Item, SystemCommand, SystemCommandSender as _, UiLayout, ViewId, ViewerContext,
@@ -100,7 +102,7 @@ pub fn entity_path_parts_buttons(
                     db,
                     ui,
                     view_id,
-                    &InstancePath::entity_all(accumulated.clone().into()),
+                    &InstancePath::entity_all(accumulated.clone()),
                     part.syntax_highlighted(ui.style()),
                     with_individual_icons,
                 );
@@ -320,7 +322,7 @@ pub fn instance_path_parts_buttons(
                 db,
                 ui,
                 view_id,
-                &InstancePath::entity_all(accumulated.clone().into()),
+                &InstancePath::entity_all(accumulated.clone()),
                 part.syntax_highlighted(ui.style()),
                 with_icon,
             );
@@ -664,7 +666,9 @@ pub fn store_id_button_ui(
     if let Some(entity_db) = ctx.storage_context.bundle.get(store_id) {
         entity_db_button_ui(ctx, ui, entity_db, ui_layout, true);
     } else {
-        ui_layout.label(ui, store_id.to_string());
+        ui_layout.label(ui, "<unknown store>").on_hover_ui(|ui| {
+            ui.label(format!("{store_id:?}"));
+        });
     }
 }
 
@@ -685,17 +689,22 @@ pub fn entity_db_button_ui(
     use re_viewer_context::{SystemCommand, SystemCommandSender as _};
 
     let app_id_prefix = if include_app_id {
-        entity_db
-            .app_id()
-            .map_or(String::default(), |app_id| format!("{app_id} - "))
+        format!("{} - ", entity_db.application_id())
     } else {
         String::default()
     };
 
+    // We try to use a name that has the most chance to be familiar to the user:
+    // - The recording name has to be explicitly set by the user, so use it if it exists.
+    // - For remote data, partition id have a lot of visibility too, so good fall-back.
+    // - Lacking anything better, the start time is better than a random id and caters to the local
+    //   workflow where the same logging process is run repeatedly.
     let recording_name = if let Some(recording_name) =
         entity_db.recording_info_property::<Name>(&RecordingInfo::descriptor_name())
     {
         Some(recording_name.to_string())
+    } else if let EntityDbClass::DatasetPartition(url) = entity_db.store_class() {
+        Some(url.partition_id.clone())
     } else {
         entity_db
             .recording_info_property::<Timestamp>(&RecordingInfo::descriptor_start_time())
@@ -726,7 +735,7 @@ pub fn entity_db_button_ui(
             // Close-button:
             let resp = ui
                 .small_icon_button(&icons::CLOSE_SMALL, "Close recording")
-                .on_hover_text(match store_id.kind {
+                .on_hover_text(match store_id.kind() {
                     re_log_types::StoreKind::Recording => {
                         "Close this recording (unsaved data will be lost)"
                     }
@@ -740,7 +749,6 @@ pub fn entity_db_button_ui(
                         store_id.clone().into(),
                     ));
             }
-            resp
         });
     }
 
@@ -779,7 +787,7 @@ pub fn entity_db_button_ui(
         // blueprint.
         // TODO(jleibs): We should still have an `Activate this Blueprint` button in the selection panel
         // for the blueprint.
-        if store_id.kind == re_log_types::StoreKind::Recording {
+        if store_id.is_recording() {
             ctx.command_sender()
                 .send_system(SystemCommand::ActivateRecordingOrTable(
                     store_id.clone().into(),
@@ -812,7 +820,6 @@ pub fn table_id_button_ui(
                         table_id.clone().into(),
                     ));
             }
-            resp
         });
     }
 

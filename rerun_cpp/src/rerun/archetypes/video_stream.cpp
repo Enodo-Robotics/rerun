@@ -12,6 +12,8 @@ namespace rerun::archetypes {
             ComponentBatch::empty<rerun::components::VideoCodec>(Descriptor_codec).value_or_throw();
         archetype.sample = ComponentBatch::empty<rerun::components::VideoSample>(Descriptor_sample)
                                .value_or_throw();
+        archetype.opacity =
+            ComponentBatch::empty<rerun::components::Opacity>(Descriptor_opacity).value_or_throw();
         archetype.draw_order =
             ComponentBatch::empty<rerun::components::DrawOrder>(Descriptor_draw_order)
                 .value_or_throw();
@@ -27,13 +29,12 @@ namespace rerun::archetypes {
         if (sample.has_value()) {
             columns.push_back(sample.value().partitioned(lengths_).value_or_throw());
         }
+        if (opacity.has_value()) {
+            columns.push_back(opacity.value().partitioned(lengths_).value_or_throw());
+        }
         if (draw_order.has_value()) {
             columns.push_back(draw_order.value().partitioned(lengths_).value_or_throw());
         }
-        columns.push_back(
-            ComponentColumn::from_indicators<VideoStream>(static_cast<uint32_t>(lengths_.size()))
-                .value_or_throw()
-        );
         return columns;
     }
 
@@ -43,6 +44,9 @@ namespace rerun::archetypes {
         }
         if (sample.has_value()) {
             return columns(std::vector<uint32_t>(sample.value().length(), 1));
+        }
+        if (opacity.has_value()) {
+            return columns(std::vector<uint32_t>(opacity.value().length(), 1));
         }
         if (draw_order.has_value()) {
             return columns(std::vector<uint32_t>(draw_order.value().length(), 1));
@@ -66,13 +70,11 @@ namespace rerun {
         if (archetype.sample.has_value()) {
             cells.push_back(archetype.sample.value());
         }
+        if (archetype.opacity.has_value()) {
+            cells.push_back(archetype.opacity.value());
+        }
         if (archetype.draw_order.has_value()) {
             cells.push_back(archetype.draw_order.value());
-        }
-        {
-            auto result = ComponentBatch::from_indicator<VideoStream>();
-            RR_RETURN_NOT_OK(result.error);
-            cells.emplace_back(std::move(result.value));
         }
 
         return rerun::take_ownership(std::move(cells));

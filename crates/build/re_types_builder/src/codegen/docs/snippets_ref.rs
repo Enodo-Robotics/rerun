@@ -249,20 +249,16 @@ impl SnippetsRefCodeGenerator {
                         panic!("Snippet {} contained reference to deprecated object '{}'. Please migrate the snippet. Migration notice: {deprecation_summary}", snippet.name_qualified, obj.fqname);
                     }
 
-                    if obj.kind == ObjectKind::Archetype {
-                        if let Some(opt_outs) = archetype_opt_outs.get(&obj.name) {
-                            if opt_outs.contains(&snippet.name_qualified) {
-                                return false;
-                            }
-                        }
+                    if obj.kind == ObjectKind::Archetype
+                        && let Some(opt_outs) = archetype_opt_outs.get(&obj.name)
+                        && opt_outs.contains(&snippet.name_qualified) {
+                        return false;
                     }
 
-                    if obj.kind == ObjectKind::Component {
-                        if let Some(opt_outs) = component_opt_outs.get(&obj.name) {
-                            if opt_outs.contains(&snippet.name_qualified) {
-                                return false;
-                            }
-                        }
+                    if obj.kind == ObjectKind::Component
+                        && let Some(opt_outs) = component_opt_outs.get(&obj.name)
+                        && opt_outs.contains(&snippet.name_qualified) {
+                        return false;
                     }
 
                     true
@@ -468,7 +464,6 @@ fn collect_snippets_recursively<'o>(
             for obj in objs {
                 if contains_whole_word(&contents, &obj.name) {
                     set.insert(*obj);
-                    continue;
                 }
             }
         }
@@ -637,7 +632,7 @@ impl<'o> KnownObjects<'o> {
                 }
 
                 ObjectKind::Datatype => {}
-            };
+            }
         }
 
         Self {
@@ -654,7 +649,7 @@ impl<'o> KnownObjects<'o> {
 
 /// Returns `true` if the given name has not been released yet.
 fn is_speculative(any_name: &str) -> anyhow::Result<bool> {
-    let is_pre_0_21_release = {
+    let is_pre_0_25_release = {
         // Reminder of what those look like:
         // env!("CARGO_PKG_VERSION") = "0.21.0-alpha.1+dev"
         // env!("CARGO_PKG_VERSION_MAJOR") = "0"
@@ -666,28 +661,17 @@ fn is_speculative(any_name: &str) -> anyhow::Result<bool> {
             .parse()
             .context("couldn't parse minor crate version")?;
 
-        minor < 21
+        minor < 25
     };
 
-    const RELEASED_IN_0_21: &[&str] = &[
+    const RELEASED_IN_0_25: &[&str] = &[
         // archetypes & components
-        "GraphEdge",
-        "GraphEdges",
-        "GraphNode",
-        "GraphNodes",
-        "GraphView",
-        "Plane3D",
+        "DynamicArchetype",
         // snippets
-        "concepts/explicit_recording",
-        "descriptors/descr_builtin_archetype",
-        "descriptors/descr_builtin_component",
-        "descriptors/descr_custom_archetype",
-        "descriptors/descr_custom_component",
-        "howto/any_values_send_columns",
-        "views/graph",
+        "tutorials/dynamic_archetype",
     ];
 
-    let is_speculative = is_pre_0_21_release && RELEASED_IN_0_21.contains(&any_name);
+    let is_speculative = is_pre_0_25_release && RELEASED_IN_0_25.contains(&any_name);
 
     Ok(is_speculative)
 }

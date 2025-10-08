@@ -1,7 +1,8 @@
 use re_chunk_store::RowId;
 use re_log_types::{EntityPath, TimePoint, Timeline};
-use re_viewer_context::{ViewClass as _, ViewId, test_context::TestContext};
-use re_viewport::test_context_ext::TestContextExt as _;
+use re_test_context::{TestContext, external::egui_kittest::SnapshotOptions};
+use re_test_viewport::TestContextExt as _;
+use re_viewer_context::{ViewClass as _, ViewId};
 use re_viewport_blueprint::ViewBlueprint;
 
 #[test]
@@ -168,8 +169,8 @@ fn run_view_ui_and_save_snapshot(
     let mut harness = test_context
         .setup_kittest_for_rendering()
         .with_size(size)
-        .build(|ctx| {
-            test_context.run_with_single_view(ctx, view_id);
+        .build_ui(|ui| {
+            test_context.run_with_single_view(ui, view_id);
         });
 
     {
@@ -207,15 +208,15 @@ fn run_view_ui_and_save_snapshot(
 
             harness.run_steps(8);
 
-            let broken_pixels_fraction = 0.0036;
-            let num_pixels = (size.x * size.y).ceil() as u64;
+            let broken_pixels_fraction = 0.004;
 
-            use re_viewer_context::test_context::HarnessExt as _;
-            success = harness.try_snapshot_with_broken_pixels_threshold(
-                &name,
-                num_pixels,
-                broken_pixels_fraction,
+            let options = SnapshotOptions::new().failed_pixel_count_threshold(
+                (size.x * size.y * broken_pixels_fraction).round() as usize,
             );
+
+            if harness.try_snapshot_options(&name, &options).is_err() {
+                success = false;
+            }
         }
         assert!(success, "one or more snapshots failed");
     }

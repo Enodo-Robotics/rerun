@@ -32,16 +32,16 @@ fn check_tags(rec: &rerun::RecordingStream) {
     //
     // Python and C++ are indirectly checked by the snippet comparison tool itself.
     if let Ok(path_to_rrd) = std::env::var("_RERUN_TEST_FORCE_SAVE") {
-        rec.flush_blocking();
+        rec.flush_blocking().unwrap();
 
         let stores =
             ChunkStore::from_rrd_filepath(&ChunkStoreConfig::ALL_DISABLED, path_to_rrd).unwrap();
         assert_eq!(1, stores.len());
 
         let store = stores.into_values().next().unwrap();
-        // Skip the first two chunks, as they represent the `RecordingInfo`.
-        let chunks = store.iter_chunks().skip(2).collect::<Vec<_>>();
-        assert_eq!(2, chunks.len());
+        // Skip the first chunk, as it represent the `RecordingInfo`.
+        let chunks = store.iter_chunks().skip(1).collect::<Vec<_>>();
+        assert_eq!(1, chunks.len());
 
         {
             let chunk = &chunks[0];
@@ -61,21 +61,6 @@ fn check_tags(rec: &rerun::RecordingStream) {
                     component_type: Some("rerun.components.Radius".into()),
                 },
             ];
-
-            similar_asserts::assert_eq!(expected, descriptors);
-        }
-
-        {
-            let chunk = &chunks[1];
-
-            let mut descriptors = chunk.components().keys().cloned().collect::<Vec<_>>();
-            descriptors.sort();
-
-            let expected = vec![ComponentDescriptor {
-                archetype: None,
-                component: "rerun.components.Points3DIndicator".into(),
-                component_type: None,
-            }];
 
             similar_asserts::assert_eq!(expected, descriptors);
         }

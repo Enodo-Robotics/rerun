@@ -458,7 +458,6 @@ impl QuotedObject {
         let mut cpp_includes = Includes::new(obj.fqname.clone(), obj.scope());
         cpp_includes.insert_rerun("collection_adapter_builtins.hpp");
         hpp_includes.insert_system("utility"); // std::move
-        hpp_includes.insert_rerun("indicator_component.hpp");
 
         let field_declarations = obj
             .fields
@@ -674,8 +673,7 @@ impl QuotedObject {
                 name_and_parameters: quote! { columns(const Collection<uint32_t>& lengths_) },
             },
             definition_body: {
-                // Plus 1 for the indicator column.
-                let num_fields = quote_integer(obj.fields.len() + 1);
+                let num_fields = quote_integer(obj.fields.len());
                 let push_back_columns = obj.fields.iter().map(|field| {
                     let field_ident = field_name_ident(field);
                     quote! {
@@ -689,10 +687,6 @@ impl QuotedObject {
                     std::vector<ComponentColumn> columns;
                     columns.reserve(#num_fields);
                     #(#push_back_columns)*
-                    columns.push_back(
-                        ComponentColumn::from_indicators<#archetype_type_ident>(static_cast<uint32_t>(lengths_.size()))
-                            .value_or_throw()
-                    );
                     return columns;
                 }
             },
@@ -746,11 +740,6 @@ impl QuotedObject {
             .iter()
             .map(|m| m.to_cpp_tokens(&quote!(#archetype_type_ident)));
 
-        let indicator_comment = quote_doc_comment(
-            "Indicator component, used to identify the archetype when converting to a list of components.",
-        );
-        let indicator_component_fqname =
-            format!("{}Indicator", obj.fqname).replace("archetypes", "components");
         let doc_hide_comment = quote_hide_from_docs();
         let deprecated_notice = quote_deprecated_notice(obj);
         let name_doc_string =
@@ -785,7 +774,7 @@ impl QuotedObject {
         //   -> this means that there's no non-move constructors/assignments
         // * we really want to make sure that the object is movable, therefore creating a move ctor
         //   -> this means that there's no implicit move assignment.
-        // Therefore, we have to define all five move/copy  constructors/assignments.
+        // Therefore, we have to define all five move/copy constructors/assignments.
         let hpp = quote! {
             #hpp_includes
 
@@ -797,12 +786,6 @@ impl QuotedObject {
                     #(#field_declarations;)*
 
                 public:
-                    static constexpr const char IndicatorComponentType[] = #indicator_component_fqname;
-                    #NEWLINE_TOKEN
-                    #NEWLINE_TOKEN
-                    #indicator_comment
-                    using IndicatorComponent = rerun::components::IndicatorComponent<IndicatorComponentType>;
-
                     #NEWLINE_TOKEN
                     #name_doc_string
                     static constexpr const char ArchetypeName[] = #archetype_name;
@@ -916,34 +899,32 @@ impl QuotedObject {
                 &mut hpp_includes,
                 objects,
             ));
-        };
+        }
 
         // If we're a component with a single datatype field, add an implicit casting operator for convenience.
         if obj.kind == ObjectKind::Component
             && obj.fields.len() == 1
             && matches!(obj.fields[0].typ, Type::Object { .. })
-        {
-            if let Type::Object {
+            && let Type::Object {
                 fqname: datatype_fqname,
             } = &obj.fields[0].typ
-            {
-                let data_type = quote_field_type(&mut hpp_includes, &obj.fields[0]);
-                let type_name = datatype_fqname.split('.').last().unwrap();
-                let field_name = format_ident!("{}", obj.fields[0].name);
+        {
+            let data_type = quote_field_type(&mut hpp_includes, &obj.fields[0]);
+            let type_name = datatype_fqname.split('.').next_back().unwrap();
+            let field_name = format_ident!("{}", obj.fields[0].name);
 
-                methods.push(Method {
-                    docs: format!("Cast to the underlying {type_name} datatype").into(),
-                    declaration: MethodDeclaration {
-                        name_and_parameters: quote! { operator #data_type() const },
-                        is_static: false,
-                        return_type: quote! {},
-                    },
-                    definition_body: quote! {
-                        return #field_name;
-                    },
-                    inline: true,
-                });
-            }
+            methods.push(Method {
+                docs: format!("Cast to the underlying {type_name} datatype").into(),
+                declaration: MethodDeclaration {
+                    name_and_parameters: quote! { operator #data_type() const },
+                    is_static: false,
+                    return_type: quote! {},
+                },
+                definition_body: quote! {
+                    return #field_name;
+                },
+                inline: true,
+            });
         }
 
         let methods_hpp = methods.iter().map(|m| m.to_hpp_tokens(reporter, objects));
@@ -1644,10 +1625,12 @@ fn add_copy_assignment_and_constructor(
 
 /// If the type forwards to another rerun defined type, returns the fully qualified name of that type.
 fn transparent_forwarded_fqname(obj: &Object) -> Option<&str> {
-    if obj.is_arrow_transparent() && obj.fields.len() == 1 && !obj.fields[0].is_nullable {
-        if let Type::Object { fqname } = &obj.fields[0].typ {
-            return Some(fqname);
-        }
+    if obj.is_arrow_transparent()
+        && obj.fields.len() == 1
+        && !obj.fields[0].is_nullable
+        && let Type::Object { fqname } = &obj.fields[0].typ
+    {
+        return Some(fqname);
     }
     None
 }
@@ -1845,7 +1828,7 @@ fn archetype_serialize(type_ident: &Ident, obj: &Object, hpp_includes: &mut Incl
         quote!(archetypes)
     };
 
-    let num_fields = quote_integer(obj.fields.len() + 1); // Plus one for the indicator.
+    let num_fields = quote_integer(obj.fields.len());
     let push_batches = obj.fields.iter().map(|field| {
         let field_name_ident = field_name_ident(field);
 
@@ -1871,11 +1854,6 @@ fn archetype_serialize(type_ident: &Ident, obj: &Object, hpp_includes: &mut Incl
             #NEWLINE_TOKEN
             #NEWLINE_TOKEN
             #(#push_batches)*
-            {
-                auto result = ComponentBatch::from_indicator<#type_ident>();
-                RR_RETURN_NOT_OK(result.error);
-                cells.emplace_back(std::move(result.value));
-            }
             #NEWLINE_TOKEN
             #NEWLINE_TOKEN
             return rerun::take_ownership(std::move(cells));
@@ -1967,13 +1945,14 @@ fn quote_fill_arrow_array_builder(
             }
 
             // C-style enum, encoded as arrow integer array.
-            ObjectClass::Enum(_) => {
+            ObjectClass::Enum(typ) => {
+                let quoted_type = quote_enum_type(&typ);
                 quote! {
                     #parameter_check
                     ARROW_RETURN_NOT_OK(#builder->Reserve(static_cast<int64_t>(num_elements)));
                     for (size_t elem_idx = 0; elem_idx < num_elements; elem_idx += 1) {
                         const auto variant = elements[elem_idx];
-                        ARROW_RETURN_NOT_OK(#builder->Append(static_cast<uint8_t>(variant)));
+                        ARROW_RETURN_NOT_OK(#builder->Append(static_cast<#quoted_type>(variant)));
                     }
                 }
             }
@@ -2024,6 +2003,7 @@ fn quote_fill_arrow_array_builder(
                                     ElementType::Float16 => Some("HalfFloatBuilder"),
                                     ElementType::Float32 => Some("FloatBuilder"),
                                     ElementType::Float64 => Some("DoubleBuilder"),
+                                    ElementType::Binary => Some("BinaryBuilder"),
                                     ElementType::String => Some("StringBuilder"),
                                     ElementType::Object{..} => None,
                                 };
@@ -2254,7 +2234,7 @@ fn quote_append_single_value_to_builder(
     value_access: &TokenStream,
     includes: &mut Includes,
 ) -> TokenStream {
-    match &typ {
+    match typ {
         Type::Unit => {
             quote!(ARROW_RETURN_NOT_OK(#value_builder->AppendNull());)
         }
@@ -2272,6 +2252,11 @@ fn quote_append_single_value_to_builder(
         | Type::Float64
         | Type::String => {
             quote!(ARROW_RETURN_NOT_OK(#value_builder->Append(#value_access));)
+        }
+        Type::Binary => {
+            quote!(
+                ARROW_RETURN_NOT_OK(#value_builder->Append(#value_access.data(), static_cast<int64_t>(#value_access.size())));
+            )
         }
         Type::Float16 => {
             // Cast `rerun::half` to a `uint16_t``
@@ -2309,6 +2294,14 @@ fn quote_append_single_value_to_builder(
                             reinterpret_cast<const uint16_t*>(#field_ptr_accessor),
                             static_cast<int64_t>(#num_items_per_element), nullptr)
                         );
+                    }
+                }
+                ElementType::Binary => {
+                    quote! {
+                        for (size_t item_idx = 0; item_idx < #num_items_per_element; item_idx += 1) {
+                            auto&& data = &#value_access[elem_idx].data;
+                            ARROW_RETURN_NOT_OK(#value_builder->Append(data.data(), static_cast<int32_t>(data.size())));
+                        }
                     }
                 }
                 ElementType::String => {
@@ -2468,6 +2461,10 @@ fn quote_field_type(includes: &mut Includes, obj_field: &ObjectField) -> TokenSt
         }
         Type::Float32 => quote! { float  },
         Type::Float64 => quote! { double  },
+        Type::Binary => {
+            includes.insert_rerun("collection.hpp");
+            quote! { rerun::Collection<uint8_t>  }
+        }
         Type::String => {
             includes.insert_system("string");
             quote! { std::string  }
@@ -2528,11 +2525,24 @@ fn quote_element_type(includes: &mut Includes, typ: &ElementType) -> TokenStream
         }
         ElementType::Float32 => quote! { float },
         ElementType::Float64 => quote! { double },
+        ElementType::Binary => {
+            includes.insert_rerun("collection.hpp");
+            quote! { rerun::Collection<uint8_t>  }
+        }
         ElementType::String => {
             includes.insert_system("string");
             quote! { std::string }
         }
         ElementType::Object { fqname } => quote_fqname_as_type_path(includes, fqname),
+    }
+}
+
+fn quote_enum_type(typ: &EnumIntegerType) -> TokenStream {
+    match typ {
+        EnumIntegerType::U8 => quote! { uint8_t },
+        EnumIntegerType::U16 => quote! { uint16_t },
+        EnumIntegerType::U32 => quote! { uint32_t },
+        EnumIntegerType::U64 => quote! { uint64_t },
     }
 }
 
@@ -2660,6 +2670,7 @@ fn quote_arrow_datatype(
         Type::Float16 => quote!(arrow::float16()),
         Type::Float32 => quote!(arrow::float32()),
         Type::Float64 => quote!(arrow::float64()),
+        Type::Binary => quote!(arrow::large_binary()),
         Type::String => quote!(arrow::utf8()),
         Type::Bool => quote!(arrow::boolean()),
 

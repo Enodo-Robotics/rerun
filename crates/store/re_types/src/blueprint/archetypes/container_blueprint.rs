@@ -161,26 +161,16 @@ impl ContainerBlueprint {
             component_type: Some("rerun.blueprint.components.GridColumns".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.blueprint.components.ContainerBlueprintIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [ContainerBlueprint::descriptor_container_kind()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [ContainerBlueprint::descriptor_container_kind()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [ContainerBlueprint::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 7usize]> =
+    std::sync::LazyLock::new(|| {
         [
             ContainerBlueprint::descriptor_display_name(),
             ContainerBlueprint::descriptor_contents(),
@@ -192,11 +182,10 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 7usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 9usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 8usize]> =
+    std::sync::LazyLock::new(|| {
         [
             ContainerBlueprint::descriptor_container_kind(),
-            ContainerBlueprint::descriptor_indicator(),
             ContainerBlueprint::descriptor_display_name(),
             ContainerBlueprint::descriptor_contents(),
             ContainerBlueprint::descriptor_col_shares(),
@@ -208,17 +197,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 9usize]> =
     });
 
 impl ContainerBlueprint {
-    /// The total number of components in the archetype: 1 required, 1 recommended, 7 optional
-    pub const NUM_COMPONENTS: usize = 9usize;
+    /// The total number of components in the archetype: 1 required, 0 recommended, 7 optional
+    pub const NUM_COMPONENTS: usize = 8usize;
 }
 
-/// Indicator component for the [`ContainerBlueprint`] [`::re_types_core::Archetype`]
-pub type ContainerBlueprintIndicator =
-    ::re_types_core::GenericIndicatorComponent<ContainerBlueprint>;
-
 impl ::re_types_core::Archetype for ContainerBlueprint {
-    type Indicator = ContainerBlueprintIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.blueprint.archetypes.ContainerBlueprint".into()
@@ -227,14 +210,6 @@ impl ::re_types_core::Archetype for ContainerBlueprint {
     #[inline]
     fn display_name() -> &'static str {
         "Container blueprint"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        ContainerBlueprintIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -318,7 +293,6 @@ impl ::re_types_core::AsComponents for ContainerBlueprint {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.container_kind.clone(),
             self.display_name.clone(),
             self.contents.clone(),

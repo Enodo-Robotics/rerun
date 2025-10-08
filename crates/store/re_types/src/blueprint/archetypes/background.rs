@@ -55,47 +55,31 @@ impl Background {
             component_type: Some("rerun.components.Color".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.blueprint.components.BackgroundIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Background::descriptor_kind()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Background::descriptor_kind()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Background::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Background::descriptor_color()]);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Background::descriptor_color()]);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Background::descriptor_kind(),
-            Background::descriptor_indicator(),
             Background::descriptor_color(),
         ]
     });
 
 impl Background {
-    /// The total number of components in the archetype: 1 required, 1 recommended, 1 optional
-    pub const NUM_COMPONENTS: usize = 3usize;
+    /// The total number of components in the archetype: 1 required, 0 recommended, 1 optional
+    pub const NUM_COMPONENTS: usize = 2usize;
 }
 
-/// Indicator component for the [`Background`] [`::re_types_core::Archetype`]
-pub type BackgroundIndicator = ::re_types_core::GenericIndicatorComponent<Background>;
-
 impl ::re_types_core::Archetype for Background {
-    type Indicator = BackgroundIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.blueprint.archetypes.Background".into()
@@ -104,14 +88,6 @@ impl ::re_types_core::Archetype for Background {
     #[inline]
     fn display_name() -> &'static str {
         "Background"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        BackgroundIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -155,14 +131,10 @@ impl ::re_types_core::AsComponents for Background {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [
-            Some(Self::indicator()),
-            self.kind.clone(),
-            self.color.clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        [self.kind.clone(), self.color.clone()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 

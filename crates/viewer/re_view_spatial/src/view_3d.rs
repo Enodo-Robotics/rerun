@@ -4,7 +4,7 @@ use nohash_hasher::IntSet;
 
 use re_entity_db::EntityDb;
 use re_log_types::EntityPath;
-use re_types::blueprint::archetypes::LineGrid3D;
+use re_types::blueprint::archetypes::{EyeControls3D, LineGrid3D};
 use re_types::components;
 use re_types::{Component as _, View as _, ViewClassIdentifier, blueprint::archetypes::Background};
 use re_ui::{Help, UiExt as _, list_item};
@@ -107,7 +107,7 @@ impl ViewClass for SpatialView3D {
         //
         // Also, if a ViewCoordinate3D is logged somewhere between the common ancestor and the
         // subspace origin, we use it as origin.
-        SpatialTopology::access(&entity_db.store_id(), |topo| {
+        SpatialTopology::access(entity_db.store_id(), |topo| {
             let common_ancestor_subspace = topo.subspace_for_entity(&common_ancestor);
 
             // Consider the case where the common ancestor might be in a 2D space that is connected
@@ -149,7 +149,7 @@ impl ViewClass for SpatialView3D {
         // If the topology hasn't changed, we don't need to recompute any of this.
         // Also, we arrive at the same `VisualizableFilterContext` for lots of different origins!
 
-        let context = SpatialTopology::access(&entity_db.store_id(), |topo| {
+        let context = SpatialTopology::access(entity_db.store_id(), |topo| {
             let primary_space = topo.subspace_for_entity(space_origin);
             if !primary_space.supports_3d_content() {
                 // If this is strict 2D space, only display the origin entity itself.
@@ -286,7 +286,7 @@ impl ViewClass for SpatialView3D {
         // There's also a strong argument to be made that ViewCoordinates implies a 3D space, thus changing the SpacialTopology accordingly!
         let engine = ctx.recording_engine();
         ctx.recording().tree().visit_children_recursively(|path| {
-            // TODO(#9917): Note that the view coordinates component may be logged by different archetypes which is why we do a name query here.
+            // TODO(#2663): Note that the view coordinates component may be logged by different archetypes which is why we do a name query here.
             if !engine
                 .store()
                 .entity_component_descriptors_with_type(path, components::ViewCoordinates::name())
@@ -299,7 +299,7 @@ impl ViewClass for SpatialView3D {
         // Spawn a view at each subspace that has any potential 3D content.
         // Note that visualizability filtering is all about being in the right subspace,
         // so we don't need to call the visualizers' filter functions here.
-        SpatialTopology::access(&ctx.recording_id(), |topo| {
+        SpatialTopology::access(ctx.store_id(), |topo| {
             ViewSpawnHeuristics::new(
                 topo.iter_subspaces()
                     .filter_map(|subspace| {
@@ -398,13 +398,13 @@ impl ViewClass for SpatialView3D {
                     ui.markdown_ui("Set with `rerun.ViewCoordinates`.");
                 });
 
-                if let Some(eye) = &state.state_3d.view_eye {
-                    if let Some(eye_up) = eye.eye_up() {
-                        ui.label(format!(
-                            "Current camera-eye up-axis is {}",
-                            format_vector(eye_up)
-                        ));
-                    }
+                if let Some(eye) = &state.state_3d.view_eye
+                    && let Some(eye_up) = eye.eye_up()
+                {
+                    ui.label(format!(
+                        "Current camera-eye up-axis is {}",
+                        format_vector(eye_up)
+                    ));
                 }
 
                 ui.re_checkbox(&mut state.state_3d.show_axes, "Show origin axes")
@@ -424,6 +424,7 @@ impl ViewClass for SpatialView3D {
 
         re_ui::list_item::list_item_scope(ui, "spatial_view3d_selection_ui", |ui| {
             let view_ctx = self.view_context(ctx, view_id, state);
+            view_property_ui::<EyeControls3D>(&view_ctx, ui, self);
             view_property_ui::<Background>(&view_ctx, ui, self);
             view_property_ui_grid3d(&view_ctx, ui, self);
         });

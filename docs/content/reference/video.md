@@ -21,8 +21,12 @@ This is also very simple to do, and the Python logging SDK has built-in support 
 
 Finally, for the best compression ratio, you can encode the images as an encoded video.
 There are two options to choose from:
-* Raw video frames [`VideoStream`](../reference/types/archetypes/video_stream.md).
+* Raw video frames [`VideoStream`](../reference/types/archetypes/video_stream.md)
 * Video files using [`AssetVideo`](../reference/types/archetypes/asset_video.md)
+
+⚠️ Do not use compressed video if you need accurate pixel replication:
+this is not only due to the obvious detail loss on encoding,
+but also since the exact _display_ of the same video is not consistent across platforms and decoder versions.
 
 ## Streaming video / raw encoded video frames
 
@@ -37,12 +41,12 @@ allows the Rerun Viewer to show incomplete or open ended video streams.
 In contrast, [`AssetVideo`](../reference/types/archetypes/asset_video.md) requires the entire
 video asset file to be in Viewer memory before decoding can begin.
 
-Refer to the [video camera streaming](https://github.com/rerun-io/rerun/blob/latest/examples/python/camera_video_stream?speculative-link) example to learn how to stream live video to Rerun.
+Refer to the [video camera streaming](https://github.com/rerun-io/rerun/blob/latest/examples/python/camera_video_stream) example to learn how to stream live video to Rerun.
 
-Current limitations:
+Current limitations of `VideoStream`:
 * [#9815](https://github.com/rerun-io/rerun/issues/9815): Decoding on native is generally slower than decoding in the browser right now.
   This can cause increased latency and in some cases may even stop video playback.
-* [#10184](https://github.com/rerun-io/rerun/issues/10184), [#10185](https://github.com/rerun-io/rerun/issues/10185), [#10186](https://github.com/rerun-io/rerun/issues/10186): [`VideoStream`](../reference/types/archetypes/video_stream.md) only supports H.264 at this point.
+* [#10184](https://github.com/rerun-io/rerun/issues/10184), [#10186](https://github.com/rerun-io/rerun/issues/10186): [`VideoStream`](../reference/types/archetypes/video_stream.md) only supports H.264 & H.265 at this point.
 * [#10090](https://github.com/rerun-io/rerun/issues/10090): B-frames are not yet supported for [`VideoStream`](../reference/types/archetypes/video_stream.md).
 * [#10422](https://github.com/rerun-io/rerun/issues/10422): [`VideoFrameReference`](../reference/types/archetypes/video_frame_reference.md) does not yet work with [`VideoStream`](../reference/types/archetypes/video_stream.md).
 
@@ -50,11 +54,17 @@ Current limitations:
 Discoverable for scripts/zombie_todos.py:
 TODO(#9815): fix above if ticket is outdated.
 TODO(#10184): fix above if ticket is outdated.
-TODO(#10185): fix above if ticket is outdated.
 TODO(#10186): fix above if ticket is outdated.
 TODO(#10090): fix above if ticket is outdated.
 TODO(#10422): fix above if ticket is outdated.
 -->
+
+### Export MP4 from RRD (remuxing)
+
+Sample data from [`VideoStream`](../reference/types/archetypes/video_stream.md) can be queried
+and remuxed to mp4 without re-encoding the video as demonstrated in [this sample](https://github.com/rerun-io/rerun/blob/latest/docs/snippets/all/archetypes/video_stream_query_and_mux.py#speculative-link).
+
+Check the [doc page on retrieving data](../howto/dataframe-api.md) to learn more about dataframe queries in general.
 
 
 ## Video files
@@ -84,7 +94,7 @@ Codec support varies in the web & native viewer:
 | ---------- | ------- | ------ |
 | AV1        | ✅       | 🟧      |
 | H.264/avc  | ✅       | ✅      |
-| H.265/hevc | 🟧       | ❌      |
+| H.265/hevc | 🟧       | ✅      |
 | VP9        | ✅       | ❌      |
 
 <!--
@@ -117,9 +127,9 @@ TODO(#7755): fix above if ticket is outdated.
 TODO(#10184): fix above if ticket is outdated.
 -->
 
-#### H.264/avc
+#### H.264/avc & H.265/hevc
 
-H.264/avc is supported via a separately installed `FFmpeg` binary, requiring a minimum version of `5.1`.
+H.264/avc and H.265/hevc are supported via a separately installed `FFmpeg` binary, requiring a minimum version of `5.1`.
 
 The viewer does intentionally not come bundled with `FFmpeg` to avoid licensing issues.
 By default rerun will look for a system installed `FFmpeg` installation in `PATH`,
@@ -166,7 +176,7 @@ There are still some limitations to encoded Video in Rerun which will be address
 * [#7594](https://github.com/rerun-io/rerun/issues/7594): HDR video is not supported
 * [#5181](https://github.com/rerun-io/rerun/issues/5181): There is no audio support
 * There is no video encoder in the Rerun SDK, so you need to create the video stream or file yourself.
-  Refer to the [video camera streaming](https://github.com/rerun-io/rerun/blob/latest/examples/python/camera_video_stream?speculative-link) example to learn how to encode video using [`pyAV`](https://github.com/PyAV-Org/PyAV).
+  Refer to the [video camera streaming](https://github.com/rerun-io/rerun/blob/latest/examples/python/camera_video_stream) example to learn how to encode video using [`pyAV`](https://github.com/PyAV-Org/PyAV).
 
 <!--
 Discoverable for scripts/zombie_todos.py:

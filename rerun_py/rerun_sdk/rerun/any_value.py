@@ -1,189 +1,15 @@
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
-import numpy as np
-import pyarrow as pa
-from pyarrow import ArrowInvalid
+from typing_extensions import deprecated
 
 from rerun._baseclasses import ComponentDescriptor
 
-from ._baseclasses import ComponentBatchLike, ComponentColumn, ComponentColumnList, DescribedComponentBatch
+from ._baseclasses import ComponentColumn, ComponentColumnList, DescribedComponentBatch
 from ._log import AsComponents
-from .error_utils import catch_and_log_exceptions
-
-ANY_VALUE_TYPE_REGISTRY: dict[ComponentDescriptor, Any] = {}
-
-
-class AnyBatchValue(ComponentBatchLike):
-    """
-    Helper to log arbitrary data as a component batch or column.
-
-    This is a very simple helper that implements the `ComponentBatchLike` interface on top
-    of the `pyarrow` library array conversion functions.
-
-    See also [rerun.AnyValues][].
-    """
-
-    def __init__(self, descriptor: str | ComponentDescriptor, value: Any, drop_untyped_nones: bool = True) -> None:
-        """
-        Construct a new AnyBatchValue.
-
-        The value will be attempted to be converted into an arrow array by first calling
-        the `as_arrow_array()` method if it's defined. All Rerun Batch datatypes implement
-        this function so it's possible to pass them directly to AnyValues.
-
-        If the object doesn't implement `as_arrow_array()`, it will be passed as an argument
-        to [pyarrow.array][] .
-
-        Note: rerun requires that a given component only take on a single type.
-        The first type logged will be the type that is used for all future logs
-        of that component. The API will make a best effort to do type conversion
-        if supported by numpy and arrow. Any components that can't be converted
-        will be dropped, and a warning will be sent to the log.
-
-        If you are want to inspect how your component will be converted to the
-        underlying arrow code, we first attempt to cast it directly to a pyarrow
-        array. Failing this, we call
-
-        ```
-        pa_scalar = pa.scalar(value)
-        pa_value = pa.array(pa_scalar)
-        ```
-
-        Parameters
-        ----------
-        descriptor:
-            Either the name or the full descriptor of the component.
-        value:
-            The data to be logged as a component.
-        drop_untyped_nones:
-            If True, any components that are None will be dropped unless they have been
-            previously logged with a type.
-
-        """
-        if isinstance(descriptor, str):
-            descriptor = ComponentDescriptor(descriptor)
-        elif isinstance(descriptor, ComponentDescriptor):
-            descriptor = descriptor
-
-        np_type, pa_type = ANY_VALUE_TYPE_REGISTRY.get(descriptor, (None, None))
-
-        self.descriptor = descriptor
-        self.pa_array = None
-
-        with catch_and_log_exceptions(f"Converting data for '{descriptor}'"):
-            if isinstance(value, pa.Array):
-                self.pa_array = value
-            elif hasattr(value, "as_arrow_array"):
-                self.pa_array = value.as_arrow_array()
-            else:
-                if pa_type is not None:
-                    if value is None:
-                        value = []
-                    # Special case: strings are iterables so pyarrow will not
-                    # handle them properly
-                    if not isinstance(value, (str, bytes)):
-                        try:
-                            self.pa_array = pa.array(value, type=pa_type)
-                        except (ArrowInvalid, TypeError):
-                            pass
-                    if self.pa_array is None:
-                        try:
-                            pa_scalar = pa.scalar(value, type=pa_type)
-                            self.pa_array = pa.array([pa_scalar], type=pa_type)
-                        except (ArrowInvalid, TypeError):
-                            pass
-                    if self.pa_array is None:
-                        # Fall back - use numpy
-                        np_value = np.atleast_1d(np.asarray(value, dtype=np_type))
-                        self.pa_array = pa.array(np_value, type=pa_type)
-                else:
-                    if value is None:
-                        if not drop_untyped_nones:
-                            raise ValueError("Cannot convert None to arrow array. Type is unknown.")
-                    else:
-                        # This should handle most non-scalar values, but we have to
-                        # treat str and bytes special because they are iterable
-                        if not isinstance(value, (str, bytes)) and value is not None:
-                            try:
-                                self.pa_array = pa.array(value)
-                                ANY_VALUE_TYPE_REGISTRY[descriptor] = (None, self.pa_array.type)
-                            except (ArrowInvalid, TypeError):
-                                pass
-                        if self.pa_array is None:
-                            try:
-                                pa_scalar = pa.scalar(value)
-                                self.pa_array = pa.array([pa_scalar])
-                                ANY_VALUE_TYPE_REGISTRY[descriptor] = (None, self.pa_array.type)
-                            except (ArrowInvalid, TypeError):
-                                pass
-                        if self.pa_array is None:
-                            # Fall back - use numpy which handles a wide variety of lists, tuples,
-                            # and mixtures of them and will turn into a well formed array
-                            np_value = np.atleast_1d(np.asarray(value))
-                            self.pa_array = pa.array(np_value)
-                            ANY_VALUE_TYPE_REGISTRY[descriptor] = (np_value.dtype, self.pa_array.type)
-
-    def is_valid(self) -> bool:
-        return self.pa_array is not None
-
-    def component_descriptor(self) -> ComponentDescriptor:
-        return self.descriptor
-
-    def as_arrow_array(self) -> pa.Array | None:
-        return self.pa_array
-
-    @classmethod
-    def column(
-        cls,
-        descriptor: str | ComponentDescriptor,
-        value: Any,
-        drop_untyped_nones: bool = True,
-    ) -> ComponentColumn:
-        """
-        Construct a new column-oriented AnyBatchValue.
-
-        This makes it possible to use `rr.send_columns` to send columnar data directly into Rerun.
-
-        The returned columns will be partitioned into unit-length sub-batches by default.
-        Use `ComponentColumn.partition` to repartition the data as needed.
-
-        The value will be attempted to be converted into an arrow array by first calling
-        the `as_arrow_array()` method if it's defined. All Rerun Batch datatypes implement
-        this function so it's possible to pass them directly to AnyValues.
-
-        If the object doesn't implement `as_arrow_array()`, it will be passed as an argument
-        to [pyarrow.array][] .
-
-        Note: rerun requires that a given component only take on a single type.
-        The first type logged will be the type that is used for all future logs
-        of that component. The API will make a best effort to do type conversion
-        if supported by numpy and arrow. Any components that can't be converted
-        will be dropped, and a warning will be sent to the log.
-
-        If you want to inspect how your component will be converted to the
-        underlying arrow code, the following snippet is what is happening
-        internally:
-
-        ```
-        np_value = np.atleast_1d(np.array(value, copy=False))
-        pa_value = pa.array(value)
-        ```
-
-        Parameters
-        ----------
-        descriptor:
-            Either the name or the full descriptor of the component.
-        value:
-            The data to be logged as a component.
-        drop_untyped_nones:
-            If True, any components that are None will be dropped unless they have been
-            previously logged with a type.
-
-        """
-        inst = cls(descriptor, value, drop_untyped_nones)
-        return ComponentColumn(descriptor, inst)
+from .dynamic_archetype import DynamicArchetype
 
 
 class AnyValues(AsComponents):
@@ -251,27 +77,51 @@ class AnyValues(AsComponents):
             The components to be logged.
 
         """
-        global ANY_VALUE_TYPE_REGISTRY
+        self._builder = DynamicArchetype._default_without_archetype(drop_untyped_nones, **kwargs)
+        self._builder._with_name(self.__class__.__name__)
 
-        self.component_batches = []
-
-        with catch_and_log_exceptions(self.__class__.__name__):
-            for name, value in kwargs.items():
-                batch = AnyBatchValue(name, value, drop_untyped_nones=drop_untyped_nones)
-                if batch.is_valid():
-                    self.component_batches.append(DescribedComponentBatch(batch, batch.descriptor))
-
+    @deprecated(
+        "`rr.AnyValues.with_field` is deprecated, use `rr.AnyValues.with_component_from_data` instead.",
+    )
     def with_field(
         self, descriptor: str | ComponentDescriptor, value: Any, drop_untyped_nones: bool = True
     ) -> AnyValues:
+        return self.with_component_from_data(descriptor, value, drop_untyped_nones)
+
+    def with_component_from_data(
+        self, descriptor: str | ComponentDescriptor, value: Any, drop_untyped_nones: bool = True
+    ) -> AnyValues:
         """Adds an `AnyValueBatch` to this `AnyValues` bundle."""
-        batch = AnyBatchValue(descriptor, value, drop_untyped_nones=drop_untyped_nones)
-        if batch.is_valid():
-            self.component_batches.append(DescribedComponentBatch(batch, batch.descriptor))
+        # TODO(#10908): Prune this type in 0.26
+        if isinstance(descriptor, ComponentDescriptor):
+            warnings.warn(
+                "`rr.AnyValues.with_field` using a component descriptor is deprecated, "
+                "use DynamicArchetype if trying to specify archetype grouping of values.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self._builder._with_descriptor_internal(descriptor, value, drop_untyped_nones=drop_untyped_nones)
+        else:
+            self._builder.with_component_from_data(descriptor, value, drop_untyped_nones=drop_untyped_nones)
+        return self
+
+    @deprecated(
+        "`rr.AnyValues.with_component` is deprecated, use `rr.AnyValues.with_component_override` instead.",
+    )
+    def with_component(self, field: str, component_type: str, value: Any, drop_untyped_nones: bool = True) -> AnyValues:
+        """Adds an `AnyValueBatch` to this `AnyValues` bundle with name and component type."""
+        self._builder.with_component_override(field, component_type, value, drop_untyped_nones=drop_untyped_nones)
+        return self
+
+    def with_component_override(
+        self, field: str, component_type: str, value: Any, drop_untyped_nones: bool = True
+    ) -> AnyValues:
+        """Adds an `AnyValueBatch` to this `AnyValues` bundle with name and component type."""
+        self._builder.with_component_override(field, component_type, value, drop_untyped_nones=drop_untyped_nones)
         return self
 
     def as_component_batches(self) -> list[DescribedComponentBatch]:
-        return self.component_batches
+        return self._builder.as_component_batches()
 
     @classmethod
     def columns(cls, drop_untyped_nones: bool = True, **kwargs: Any) -> ComponentColumnList:
@@ -326,5 +176,9 @@ class AnyValues(AsComponents):
         """
         inst = cls(drop_untyped_nones, **kwargs)
         return ComponentColumnList([
-            ComponentColumn(batch.component_descriptor(), batch) for batch in inst.component_batches
+            ComponentColumn(batch.component_descriptor(), batch) for batch in inst._builder.as_component_batches()
         ])
+
+    @property
+    def component_batches(self) -> list[DescribedComponentBatch]:
+        return self._builder.component_batches

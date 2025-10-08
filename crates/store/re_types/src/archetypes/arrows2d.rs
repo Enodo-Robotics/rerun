@@ -187,31 +187,16 @@ impl Arrows2D {
             component_type: Some("rerun.components.ClassId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Arrows2DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Arrows2D::descriptor_vectors()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Arrows2D::descriptor_vectors()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            Arrows2D::descriptor_origins(),
-            Arrows2D::descriptor_indicator(),
-        ]
-    });
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Arrows2D::descriptor_origins()]);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 6usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Arrows2D::descriptor_radii(),
             Arrows2D::descriptor_colors(),
@@ -222,12 +207,11 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 9usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 8usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Arrows2D::descriptor_vectors(),
             Arrows2D::descriptor_origins(),
-            Arrows2D::descriptor_indicator(),
             Arrows2D::descriptor_radii(),
             Arrows2D::descriptor_colors(),
             Arrows2D::descriptor_labels(),
@@ -238,16 +222,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 9usize]> =
     });
 
 impl Arrows2D {
-    /// The total number of components in the archetype: 1 required, 2 recommended, 6 optional
-    pub const NUM_COMPONENTS: usize = 9usize;
+    /// The total number of components in the archetype: 1 required, 1 recommended, 6 optional
+    pub const NUM_COMPONENTS: usize = 8usize;
 }
 
-/// Indicator component for the [`Arrows2D`] [`::re_types_core::Archetype`]
-pub type Arrows2DIndicator = ::re_types_core::GenericIndicatorComponent<Arrows2D>;
-
 impl ::re_types_core::Archetype for Arrows2D {
-    type Indicator = Arrows2DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Arrows2D".into()
@@ -256,14 +235,6 @@ impl ::re_types_core::Archetype for Arrows2D {
     #[inline]
     fn display_name() -> &'static str {
         "Arrows 2D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Arrows2DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -341,7 +312,6 @@ impl ::re_types_core::AsComponents for Arrows2D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.vectors.clone(),
             self.origins.clone(),
             self.radii.clone(),
@@ -467,12 +437,7 @@ impl Arrows2D {
                 .map(|class_ids| class_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -501,7 +466,7 @@ impl Arrows2D {
             .or(len_draw_order)
             .or(len_class_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// All the vectors for each arrow in the batch.

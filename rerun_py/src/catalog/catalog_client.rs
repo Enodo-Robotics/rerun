@@ -1,11 +1,11 @@
+use pyo3::exceptions::PyValueError;
 use pyo3::{
     Py, PyAny, PyResult, Python,
     exceptions::{PyLookupError, PyRuntimeError},
     pyclass, pymethods,
     types::PyAnyMethods as _,
 };
-
-use re_protos::catalog::v1alpha1::{EntryFilter, EntryKind};
+use re_protos::cloud::v1alpha1::{EntryFilter, EntryKind};
 
 use crate::catalog::{
     ConnectionHandle, PyDatasetEntry, PyEntry, PyEntryId, PyRerunHtmlTable, PyTableEntry, to_py_err,
@@ -30,6 +30,11 @@ impl PyCatalogClientInternal {
 
 #[pymethods]
 impl PyCatalogClientInternal {
+    #[staticmethod]
+    pub fn datafusion_major_version() -> u64 {
+        datafusion_ffi::version()
+    }
+
     /// Create a new catalog client object.
     #[new]
     #[pyo3(text_signature = "(self, addr, token=None)")]
@@ -43,7 +48,7 @@ impl PyCatalogClientInternal {
 
         let origin = addr.as_str().parse::<re_uri::Origin>().map_err(to_py_err)?;
 
-        let connection_registry = re_grpc_client::ConnectionRegistry::new();
+        let connection_registry = re_redap_client::ConnectionRegistry::new();
 
         let token = token
             .map(TryFrom::try_from)
@@ -222,8 +227,6 @@ impl PyCatalogClientInternal {
         Py::new(py, (dataset, entry))
     }
 
-    //TODO(#9360): `dataset_from_url()`
-
     /// Get a table by name or id.
     ///
     /// Note: the entry table is named `__entries`.
@@ -272,6 +275,44 @@ impl PyCatalogClientInternal {
 
         Py::new(py, (dataset, entry))
     }
+
+    fn register_table(
+        self_: Py<Self>,
+        py: Python<'_>,
+        name: String,
+        url: String,
+    ) -> PyResult<Py<PyTableEntry>> {
+        let connection = self_.borrow_mut(py).connection.clone();
+
+        let url = url
+            .parse::<url::Url>()
+            .map_err(|err| PyValueError::new_err(format!("Invalid URL: {err}")))?;
+
+        let table_entry = connection.register_table(py, name, url)?;
+
+        let entry_id = Py::new(py, PyEntryId::from(table_entry.details.id))?;
+
+        let entry = PyEntry {
+            client: self_.clone_ref(py),
+            id: entry_id,
+            details: table_entry.details,
+        };
+
+        let table = PyTableEntry::default();
+
+        Py::new(py, (table, entry))
+    }
+
+    // ---
+
+    /// Perform global maintenance tasks on the server.
+    fn do_global_maintenance(self_: Py<Self>, py: Python<'_>) -> PyResult<()> {
+        let connection = self_.borrow_mut(py).connection.clone();
+
+        connection.do_global_maintenance(py)
+    }
+
+    // ---
 
     /// The DataFusion context (if available).
     pub fn ctx(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {

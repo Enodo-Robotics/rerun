@@ -1,14 +1,14 @@
 use std::hash::Hash;
 
 use egui::{
-    Align2, CollapsingResponse, Color32, NumExt as _, Rangef, Rect, Widget as _, WidgetText,
+    CollapsingResponse, Color32, NumExt as _, Rangef, Rect, Widget as _, WidgetText,
     emath::{GuiRounding as _, Rot2},
     pos2,
 };
 
 use crate::alert::Alert;
 use crate::{
-    DesignTokens, Icon, LabelStyle, icons,
+    ContextExt as _, DesignTokens, Icon, LabelStyle, icons,
     list_item::{self, LabelContent},
 };
 
@@ -29,6 +29,25 @@ pub trait UiExt {
 
     fn tokens(&self) -> &'static DesignTokens {
         crate::design_tokens_of(self.theme())
+    }
+
+    #[inline]
+    #[track_caller]
+    fn sanity_check(&self) {
+        // TODO(emilk/egui#7537): add the contents of this function as a callback in egui instead.
+        let ui = self.ui();
+
+        if cfg!(debug_assertions)
+            && ui.is_tooltip()
+            && ui.spacing().tooltip_width + 1000.0 < ui.max_rect().width()
+        {
+            panic!("DEBUG ASSERT: Huge tooltip: {}", ui.max_rect().size());
+        }
+    }
+
+    #[inline]
+    fn is_tooltip(&self) -> bool {
+        self.ui().layer_id().order == egui::Order::Tooltip
     }
 
     /// Shows a success label with a large border.
@@ -108,7 +127,12 @@ pub trait UiExt {
         rect
     }
 
-    fn medium_icon_toggle_button(&mut self, icon: &Icon, selected: &mut bool) -> egui::Response {
+    fn medium_icon_toggle_button(
+        &mut self,
+        icon: &Icon,
+        alt_text: impl Into<String>,
+        selected: &mut bool,
+    ) -> egui::Response {
         let size_points = egui::Vec2::splat(16.0); // TODO(emilk): get from design tokens
 
         let tint = if *selected {
@@ -116,9 +140,12 @@ pub trait UiExt {
         } else {
             self.ui().visuals().widgets.noninteractive.fg_stroke.color
         };
-        let mut response = self
-            .ui_mut()
-            .add(egui::ImageButton::new(icon.as_image().fit_to_exact_size(size_points)).tint(tint));
+        let mut response = self.ui_mut().add(egui::Button::new(
+            icon.as_image()
+                .fit_to_exact_size(size_points)
+                .alt_text(alt_text.into())
+                .tint(tint),
+        ));
         if response.clicked() {
             *selected = !*selected;
             response.mark_changed();
@@ -280,57 +307,28 @@ pub trait UiExt {
         &self,
         popup_id: egui::Id,
         widget_response: &egui::Response,
-        vertical_offset: f32,
         add_contents: impl FnOnce(&mut egui::Ui) -> R,
     ) -> Option<R> {
-        let ui = self.ui();
-
-        if !ui.memory_mut(|mem| {
-            let is_open = mem.is_popup_open(popup_id);
-            if is_open {
-                mem.keep_popup_open(popup_id);
-            }
-            is_open
-        }) {
-            return None;
-        }
-
-        let pos = widget_response.rect.left_bottom() + egui::vec2(0.0, vertical_offset);
-        let pivot = Align2::LEFT_TOP;
-
         let mut ret = None;
-        egui::Area::new(popup_id)
-            .order(egui::Order::Foreground)
-            .constrain(true)
-            .fixed_pos(pos)
-            .pivot(pivot)
-            .show(ui.ctx(), |ui| {
-                let frame = egui::Frame {
-                    fill: ui.visuals().panel_fill,
-                    ..Default::default()
-                };
-                let frame_margin = frame.total_margin();
-                frame.show(ui, |ui| {
-                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                        ui.set_width(widget_response.rect.width() - frame_margin.sum().x);
 
-                        crate::list_item::list_item_scope(ui, popup_id, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                egui::Frame {
-                                    //TODO(ab): use design token
-                                    inner_margin: egui::Margin::symmetric(8, 0),
-                                    ..Default::default()
-                                }
-                                .show(ui, |ui| ret = Some(add_contents(ui)))
-                            })
+        egui::Popup::from_response(widget_response)
+            .id(popup_id)
+            .frame(egui::Frame::default())
+            .open_memory(None)
+            .gap(4.0)
+            .layout(egui::Layout::top_down_justified(egui::Align::LEFT))
+            .show(|ui| {
+                ui.set_width(widget_response.rect.width());
+                let frame = ui.tokens().popup_frame(ui.style());
+                frame.show(ui, |ui| {
+                    crate::list_item::list_item_scope(ui, popup_id, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ret = Some(add_contents(ui));
                         })
                     })
                 })
             });
 
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) || widget_response.clicked_elsewhere() {
-            ui.memory_mut(|mem| mem.close_popup(popup_id));
-        }
         ret
     }
 
@@ -377,11 +375,9 @@ pub trait UiExt {
                     ui.full_span(),
                     ui.available_rect_before_wrap().y_range(),
                 );
-                let hline_stroke = ui.style().visuals.widgets.noninteractive.bg_stroke;
 
-                ui.painter().hline(rect.x_range(), rect.top(), hline_stroke);
                 ui.painter()
-                    .hline(rect.x_range(), rect.bottom(), hline_stroke);
+                    .rect_filled(rect, 0.0, ui.tokens().section_header_color);
 
                 // draw label
                 let resp = ui.strong(label);
@@ -1071,26 +1067,31 @@ pub trait UiExt {
                             ui.data_mut(|d| {
                                 d.insert_persisted(has_shown_help_id, true);
                             });
+
+                            #[cfg(feature = "analytics")]
+                            if let Some(analytics) = re_analytics::Analytics::global_or_init() {
+                                analytics.record(re_analytics::event::HelpButtonFirstClicked {});
+                            }
                         }
                     }
                 })
                 .0;
 
-            if let Some(where_to_paint_background) = where_to_paint_background {
-                if !button_response.hovered() {
-                    let mut bg_rect = button_response.rect.expand(2.0);
+            if let Some(where_to_paint_background) = where_to_paint_background
+                && !button_response.hovered()
+            {
+                let mut bg_rect = button_response.rect.expand(2.0);
 
-                    // Hack: ensure we don't paint outside the lines on the Y-axis.
-                    // Yes, we only do so for the Y axis, because if we do it for the X axis too
-                    // then the background won't be centered behind the help icon.
-                    bg_rect.min.y = bg_rect.min.y.max(ui.max_rect().min.y);
-                    bg_rect.max.y = bg_rect.max.y.min(ui.max_rect().max.y);
+                // Hack: ensure we don't paint outside the lines on the Y-axis.
+                // Yes, we only do so for the Y axis, because if we do it for the X axis too
+                // then the background won't be centered behind the help icon.
+                bg_rect.min.y = bg_rect.min.y.max(ui.max_rect().min.y);
+                bg_rect.max.y = bg_rect.max.y.min(ui.max_rect().max.y);
 
-                    ui.painter().set(
-                        where_to_paint_background,
-                        egui::Shape::rect_filled(bg_rect, 4.0, ui.tokens().highlight_color),
-                    );
-                }
+                ui.painter().set(
+                    where_to_paint_background,
+                    egui::Shape::rect_filled(bg_rect, 4.0, ui.tokens().highlight_color),
+                );
             }
 
             if let Some(help_ui) = help_ui.take() {
@@ -1240,6 +1241,54 @@ pub trait UiExt {
         } else {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         }
+    }
+
+    /// Display some UI that may optionally include extras (see [`crate::ContextExt::show_extras`]).
+    ///
+    /// This assumes that the content will change based on whether extras are shown or not, so it
+    /// takes care of triggering a sizing pass and repaint as required.
+    ///
+    /// The closure is passed a `bool` indicating whether extras are shown or not.
+    fn with_optional_extras<R>(&mut self, content: impl FnOnce(&mut egui::Ui, bool) -> R) -> R {
+        let ui = self.ui_mut();
+
+        let show_extras = ui.ctx().show_extras();
+
+        let content_changed = ui.data_mut(|data| {
+            let stored_show_extras = data
+                .get_temp_mut_or_insert_with(ui.id().with("__stored_show_extra__"), || show_extras);
+            if *stored_show_extras != show_extras {
+                *stored_show_extras = show_extras;
+                true
+            } else {
+                false
+            }
+        });
+
+        let mut builder = egui::UiBuilder::new();
+        if content_changed {
+            builder = builder.sizing_pass();
+            ui.ctx().request_repaint();
+        }
+
+        ui.scope_builder(builder, |ui| content(ui, show_extras))
+            .inner
+    }
+
+    /// Menu item with an icon and text.
+    fn icon_and_text_menu_item(
+        &mut self,
+        icon: &Icon,
+        text: impl Into<WidgetText>,
+    ) -> egui::Response {
+        let ui = self.ui_mut();
+        let tokens = ui.tokens();
+        ui.add(egui::Button::image_and_text(
+            icon.as_image()
+                .tint(tokens.label_button_icon_color)
+                .fit_to_exact_size(tokens.small_icon_size),
+            text,
+        ))
     }
 }
 

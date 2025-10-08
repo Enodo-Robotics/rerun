@@ -11,15 +11,14 @@ use arrow::{
 };
 use itertools::Itertools as _;
 
+use crate::{ChunkStore, ColumnMetadata};
 use re_chunk::{ComponentIdentifier, LatestAtQuery, RangeQuery, TimelineName};
-use re_log_types::{EntityPath, ResolvedTimeRange, TimeInt, Timeline};
+use re_log_types::{AbsoluteTimeRange, EntityPath, TimeInt, Timeline};
 use re_sorbet::{
     ChunkColumnDescriptors, ColumnSelector, ComponentColumnDescriptor, ComponentColumnSelector,
     IndexColumnDescriptor, TimeColumnSelector,
 };
 use tap::Tap as _;
-
-use crate::{ChunkStore, ColumnMetadata};
 
 // --- Queries v2 ---
 
@@ -97,9 +96,9 @@ pub type Index = TimelineName;
 //            `Index` in this case should also be implemented on tuples (`(I1, I2, ...)`).
 pub type IndexValue = TimeInt;
 
-// TODO(cmc): Ultimately, this shouldn't be hardcoded to `ResolvedTimeRange`, but to a generic `I: Index`.
+// TODO(cmc): Ultimately, this shouldn't be hardcoded to `AbsoluteTimeRange`, but to a generic `I: Index`.
 //            `Index` in this case should also be implemented on tuples (`(I1, I2, ...)`).
-pub type IndexRange = ResolvedTimeRange;
+pub type IndexRange = AbsoluteTimeRange;
 
 /// Specifies whether static columns should be included in the query.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
@@ -163,14 +162,6 @@ pub struct QueryExpression {
     /// `view_contents`: [`QueryExpression::view_contents`]
     pub include_semantically_empty_columns: bool,
 
-    /// Whether the `view_contents` should ignore columns corresponding to indicator components.
-    ///
-    /// Indicator components are marker components, generally automatically inserted by Rerun, that
-    /// helps keep track of the original context in which a piece of data was logged/sent.
-    ///
-    /// `view_contents`: [`QueryExpression::view_contents`]
-    pub include_indicator_columns: bool,
-
     /// Whether the `view_contents` should ignore columns corresponding to `Clear`-related components.
     ///
     /// `view_contents`: [`QueryExpression::view_contents`]
@@ -202,7 +193,7 @@ pub struct QueryExpression {
     /// * This has no effect if `filtered_index` isn't set.
     /// * This has no effect if [`QueryExpression::using_index_values`] is set.
     ///
-    /// Example: `ResolvedTimeRange(10, 20)`.
+    /// Example: `AbsoluteTimeRange(10, 20)`.
     pub filtered_index_range: Option<IndexRange>,
 
     /// The specific index values used to filter out _rows_ from the view contents.
@@ -293,7 +284,7 @@ impl QueryExpression {
         if let Some(using_index_values) = &self.using_index_values {
             return Some(RangeQuery::new(
                 index,
-                ResolvedTimeRange::new(
+                AbsoluteTimeRange::new(
                     using_index_values.first().copied()?,
                     using_index_values.last().copied()?,
                 ),
@@ -303,7 +294,7 @@ impl QueryExpression {
         if let Some(filtered_index_values) = &self.filtered_index_values {
             return Some(RangeQuery::new(
                 index,
-                ResolvedTimeRange::new(
+                AbsoluteTimeRange::new(
                     filtered_index_values.first().copied()?,
                     filtered_index_values.last().copied()?,
                 ),
@@ -354,7 +345,6 @@ impl ChunkStore {
             .map(|((entity_path, component_descr), (metadata, datatype))| {
                 let ColumnMetadata {
                     is_static,
-                    is_indicator,
                     is_tombstone,
                     is_semantically_empty,
                 } = metadata;
@@ -376,7 +366,6 @@ impl ChunkStore {
                     component: component_descr.component,
                     component_type: component_descr.component_type,
                     is_static,
-                    is_indicator,
                     is_tombstone,
                     is_semantically_empty,
                 }
@@ -431,7 +420,6 @@ impl ChunkStore {
             archetype: None,
             component: selector.component.as_str().into(),
             is_static: false,
-            is_indicator: false,
             is_tombstone: false,
             is_semantically_empty: false,
         };
@@ -452,16 +440,14 @@ impl ChunkStore {
 
         if let Some(ColumnMetadata {
             is_static,
-            is_indicator,
             is_tombstone,
             is_semantically_empty,
         }) = self.lookup_column_metadata(&selector.entity_path, component_descr)
         {
             result.is_static = is_static;
-            result.is_indicator = is_indicator;
             result.is_tombstone = is_tombstone;
             result.is_semantically_empty = is_semantically_empty;
-        };
+        }
 
         result
     }
@@ -474,10 +460,17 @@ impl ChunkStore {
     pub fn schema_for_query(&self, query: &QueryExpression) -> ChunkColumnDescriptors {
         re_tracing::profile_function!();
 
+        let filter = Self::create_component_filter_from_query(query);
+
+        self.schema().filter_components(filter)
+    }
+
+    pub fn create_component_filter_from_query(
+        query: &QueryExpression,
+    ) -> impl Fn(&ComponentColumnDescriptor) -> bool {
         let QueryExpression {
             view_contents,
             include_semantically_empty_columns,
-            include_indicator_columns,
             include_tombstone_columns,
             include_static_columns,
             filtered_index: _,
@@ -489,7 +482,7 @@ impl ChunkStore {
             selection: _,
         } = query;
 
-        let filter = |column: &ComponentColumnDescriptor| {
+        move |column: &ComponentColumnDescriptor| {
             let is_part_of_view_contents = || {
                 view_contents.as_ref().is_none_or(|view_contents| {
                     view_contents
@@ -505,8 +498,6 @@ impl ChunkStore {
             let passes_semantically_empty_check =
                 || *include_semantically_empty_columns || !column.is_semantically_empty;
 
-            let passes_indicator_check = || *include_indicator_columns || !column.is_indicator;
-
             let passes_tombstone_check = || *include_tombstone_columns || !column.is_tombstone;
 
             let passes_static_check = || match include_static_columns {
@@ -517,11 +508,8 @@ impl ChunkStore {
 
             is_part_of_view_contents()
                 && passes_semantically_empty_check()
-                && passes_indicator_check()
                 && passes_tombstone_check()
                 && passes_static_check()
-        };
-
-        self.schema().filter_components(filter)
+        }
     }
 }

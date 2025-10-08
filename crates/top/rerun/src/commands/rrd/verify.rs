@@ -87,9 +87,10 @@ impl Verifier {
         for (component_descriptor, column) in chunk_batch.component_columns() {
             if let Err(err) = self.verify_component_column(component_descriptor, column) {
                 self.errors.insert(format!(
-                    "{source}: Failed to deserialize column {}: {}",
+                    "{source}: Failed to deserialize column {}: {}. Column metadata: {:?}",
                     component_descriptor.column_name(re_sorbet::BatchType::Dataframe),
-                    re_error::format(err)
+                    re_error::format(err),
+                    chunk_batch.arrow_batch_metadata()
                 ));
             }
         }
@@ -108,7 +109,7 @@ impl Verifier {
 
         let Some(component_type) = component_type else {
             re_log::debug_once!(
-                "Encountered component descriptor without component type: {}",
+                "Encountered component descriptor without component type: '{}'",
                 column_descriptor.component_descriptor()
             );
             return Ok(());
@@ -119,11 +120,11 @@ impl Verifier {
             return Ok(());
         }
 
-        if column_descriptor
-            .component_descriptor()
-            .is_indicator_component()
-        {
+        if component.starts_with("rerun.components.") && component.ends_with("Indicator") {
             // Lacks reflection and data
+            anyhow::bail!(
+                "Indicators are deprecated and should be removed on ingestion in re_sorbet."
+            );
         } else {
             // Verify data
             let component_reflection = self
@@ -139,7 +140,7 @@ impl Verifier {
             }
 
             let list_array = column.as_list_opt::<i32>().ok_or_else(|| {
-                anyhow::anyhow!("Expected list array, found {:?}", column.data_type())
+                anyhow::anyhow!("Expected list array, found {}", column.data_type())
             })?;
 
             assert_eq!(column.len() + 1, list_array.offsets().len());

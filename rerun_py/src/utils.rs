@@ -1,6 +1,7 @@
-use pyo3::{Python, prelude::*};
 use std::ffi::CString;
 use std::{future::Future, sync::OnceLock};
+
+use pyo3::{Python, prelude::*};
 use tokio::runtime::Runtime;
 
 /// Utility to get the Tokio Runtime from Python
@@ -42,6 +43,7 @@ pub fn py_rerun_warn_cstr(msg: &std::ffi::CStr) -> PyResult<()> {
 }
 
 /// Logs a warning using rerun logging system and issues the warning to python runtime.
+#[allow(dead_code)]
 pub fn py_rerun_warn(msg: &str) -> PyResult<()> {
     let cmsg = CString::new(msg)?;
     py_rerun_warn_cstr(&cmsg)

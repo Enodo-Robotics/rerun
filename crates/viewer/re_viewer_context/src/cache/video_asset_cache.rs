@@ -5,6 +5,7 @@ use std::sync::{
 
 use ahash::HashMap;
 
+use re_byte_size::SizeBytes as _;
 use re_chunk::RowId;
 use re_chunk_store::ChunkStoreEvent;
 use re_log_types::hash::Hash64;
@@ -12,7 +13,9 @@ use re_renderer::{external::re_video::VideoLoadError, video::Video};
 use re_types::{ComponentDescriptor, components::MediaType};
 use re_video::DecodeSettings;
 
-use crate::{Cache, cache::filter_blob_removed_events, image_info::StoredBlobCacheKey};
+use crate::{
+    Cache, CacheMemoryReport, cache::filter_blob_removed_events, image_info::StoredBlobCacheKey,
+};
 
 // ----------------------------------------------------------------------------
 
@@ -21,6 +24,19 @@ struct Entry {
 
     /// Keeps failed loads around, so we can don't try again and again.
     video: Arc<Result<Video, VideoLoadError>>,
+}
+
+impl re_byte_size::SizeBytes for Entry {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            used_this_frame: _,
+            video,
+        } = self;
+        match video.as_ref() {
+            Ok(video) => video.heap_size_bytes(),
+            Err(_) => 100, // close enough
+        }
+    }
 }
 
 /// Caches videos assets and their players based on media type & row id.
@@ -97,6 +113,7 @@ impl Cache for VideoAssetCache {
         });
 
         // Of the remaining video data, remove all unused decoders.
+        #[expect(clippy::iter_over_hash_type)]
         for per_key in self.0.values() {
             for v in per_key.values() {
                 v.used_this_frame.store(false, Ordering::Release);
@@ -104,6 +121,14 @@ impl Cache for VideoAssetCache {
                     video.begin_frame();
                 }
             }
+        }
+    }
+
+    fn memory_report(&self) -> CacheMemoryReport {
+        CacheMemoryReport {
+            bytes_cpu: self.0.total_size_bytes(),
+            bytes_gpu: None,
+            per_cache_item_info: Vec::new(),
         }
     }
 
@@ -117,7 +142,11 @@ impl Cache for VideoAssetCache {
         // but it's almost entirely due to the decoder trying to retrieve a frame.
     }
 
-    fn on_store_events(&mut self, events: &[ChunkStoreEvent]) {
+    fn name(&self) -> &'static str {
+        "Video Assets"
+    }
+
+    fn on_store_events(&mut self, events: &[&ChunkStoreEvent]) {
         re_tracing::profile_function!();
 
         let cache_key_removed = filter_blob_removed_events(events);

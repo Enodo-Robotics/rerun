@@ -1,12 +1,14 @@
 # This is used by `scripts/rust_checks.py` wasm checks so we can forbid some methods that are not available in wasm.
 #
+# Use it with `pixi run rs-check --only wasm`
+#
 # We cannot forbid all these methods in the main `clippy.toml` because of
 # https://github.com/rust-lang/rust-clippy/issues/10406
 
 # -----------------------------------------------------------------------------
 # Section identical to the main clippy.toml:
 
-msrv = "1.85"
+msrv = "1.88"
 
 allow-unwrap-in-tests = true
 
@@ -27,7 +29,7 @@ too-many-lines-threshold = 600 # TODO(emilk): decrease this
 
 # https://rust-lang.github.io/rust-clippy/master/index.html#disallowed_macros
 disallowed-macros = [
-  'dbg',
+  'std::dbg',
 
   { path = "egui::hex_color", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
 
@@ -51,20 +53,20 @@ disallowed-methods = [
   { path = "crossbeam::channel::Receiver::recv_timeout", reason = "Cannot block on Web" },
   { path = "crossbeam::channel::Receiver::recv", reason = "Cannot block on Web" },
   { path = "egui_extras::TableBody::row", reason = "`row` doesn't scale. Use `rows` instead." },
-  { path = "egui::Color32::from_additive_luminance", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Color32::from_black_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Color32::from_gray", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Color32::from_rgb", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Color32::from_rgba_premultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Color32::from_rgba_unmultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Color32::from_white_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_additive_luminance", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_black_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_gray", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_rgb", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_rgba_premultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_rgba_unmultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
-  { path = "egui::Rgba::from_white_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_additive_luminance", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_black_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_gray", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_rgb", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_rgba_premultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_rgba_unmultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Color32::from_white_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_black_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_gray", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_luminance_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_rgb", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_rgba_premultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_rgba_unmultiplied", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
+  { path = "ecolor::Rgba::from_white_alpha", reason = "Do not hard-code colors - declare them design_tokens.rs instead, and define in light/dark_theme.json" },
   { path = "egui::Ui::checkbox", reason = "Use `re_checkbox` from `re_ui::UiEx" },
   { path = "egui::Ui::radio_value", reason = "Use `re_radio_value` from `re_ui::UiEx" },
   { path = "glam::Vec2::normalize", reason = "normalize() can create NaNs. Use try_normalize or normalize_or_zero" },
@@ -88,7 +90,7 @@ disallowed-methods = [
   { path = "std::sync::mpsc::Receiver::recv", reason = "Cannot block on Web" },
   { path = "std::thread::sleep", reason = "Can't block on web" },
   { path = "std::thread::spawn", reason = "Cannot spawn threads on wasm" },
-  { path = "std::time::Duration::elapsed", reason = "use `web-time` crate instead for wasm/web compatibility" },
+  { path = "std::time::Instant::elapsed", reason = "use `web-time` crate instead for wasm/web compatibility" },
   { path = "std::time::Instant::now", reason = "use `web-time` crate instead for wasm/web compatibility" },
   { path = "std::time::SystemTime::now", reason = "use `web-time` or `time` crates instead for wasm/web compatibility" },
   { path = "tokio::task::spawn_blocking", reason = "no Tokio runtime on web" },
@@ -99,7 +101,7 @@ disallowed-methods = [
 disallowed-types = [
   { path = "egui::Checkbox", reason = "Use `re_checkbox` from `re_ui::UiEx" },
   { path = "instant::SystemTime", reason = "Known bugs. Use web-time." },
-  { path = "ring::digest::SHA1_FOR_LEGACY_USE_ONLY", reason = "SHA1 is cryptographically broken" },
+  { path = "once_cell::sync::OnceCell", reason = "Use `std::sync::OnceLock` instead" },
   { path = "std::fs::File", reason = "Can't access files on web" },
   { path = "std::sync::Condvar", reason = "Use parking_lot instead" },
   { path = "std::sync::Mutex", reason = "Use parking_lot instead" },
@@ -113,16 +115,19 @@ doc-valid-idents = [
   # You must also update the same list in the root `clippy.toml`!
   "..",
   "AOMedia",
+  "GiB",
   "GitHub",
   "GLB",
   "GLTF",
   "iOS",
   "macOS",
   "MessagePack",
+  "MiB",
   "MiMalloc",
   "NaN",
   "OBJ",
   "OpenGL",
+  "OpenID",
   "PyPI",
   "sRGB",
   "sRGBA",

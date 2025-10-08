@@ -69,7 +69,8 @@ fn memory_use<R>(run: impl Fn() -> R) -> (usize, usize) {
 // ----------------------------------------------------------------------------
 
 use re_chunk::{
-    ChunkBatcher, ChunkBatcherConfig, PendingRow, external::crossbeam::channel::TryRecvError,
+    BatcherHooks, ChunkBatcher, ChunkBatcherConfig, PendingRow,
+    external::crossbeam::channel::TryRecvError,
 };
 use re_chunk_store::{ChunkStore, ChunkStoreConfig};
 use re_log_types::{TimePoint, Timeline};
@@ -88,14 +89,17 @@ fn scalar_memory_overhead() {
 
     let (total_mem_use_global, _total_mem_use_local) = memory_use(|| {
         let mut store = ChunkStore::new(
-            re_log_types::StoreId::random(re_log_types::StoreKind::Recording),
+            re_log_types::StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
             ChunkStoreConfig::default(),
         );
 
-        let batcher = ChunkBatcher::new(ChunkBatcherConfig {
-            flush_num_rows: 1000,
-            ..ChunkBatcherConfig::NEVER
-        })
+        let batcher = ChunkBatcher::new(
+            ChunkBatcherConfig {
+                flush_num_rows: 1000,
+                ..ChunkBatcherConfig::NEVER
+            },
+            BatcherHooks::NONE,
+        )
         .unwrap();
 
         for i in 0..NUM_SCALARS {

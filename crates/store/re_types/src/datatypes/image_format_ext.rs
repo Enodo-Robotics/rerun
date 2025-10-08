@@ -25,6 +25,19 @@ impl ImageFormat {
         }
     }
 
+    /// Create a new grayscale image format with 8 bit for the single channel with the given
+    /// resolution.
+    #[inline]
+    pub fn l8([width, height]: [u32; 2]) -> Self {
+        Self {
+            width,
+            height,
+            pixel_format: None,
+            channel_datatype: Some(ChannelDatatype::U8),
+            color_model: Some(ColorModel::L),
+        }
+    }
+
     /// Create a new rgb image format with 8 bit per channel with the given resolution.
     #[inline]
     pub fn rgb8([width, height]: [u32; 2]) -> Self {
@@ -106,7 +119,7 @@ impl ImageFormat {
             let bits_per_pixel = self.color_model.unwrap_or_default().num_channels()
                 * self.channel_datatype.unwrap_or_default().bits();
             // rounding upwards:
-            (self.width as usize * self.height as usize * bits_per_pixel + 7) / 8
+            (self.width as usize * self.height as usize * bits_per_pixel).div_ceil(8)
         }
     }
 

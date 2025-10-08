@@ -1,10 +1,56 @@
-use egui::{CursorIcon, Id, NumExt as _, Rect};
+use egui::{Color32, CursorIcon, Id, NumExt as _, Rect};
 
-use re_log_types::{Duration, ResolvedTimeRangeF, TimeInt, TimeReal, TimeType};
+use re_log_types::{AbsoluteTimeRange, AbsoluteTimeRangeF, Duration, TimeInt, TimeReal, TimeType};
 use re_ui::UiExt as _;
 use re_viewer_context::{Looping, TimeControl};
 
 use super::time_ranges_ui::TimeRangesUi;
+
+/// Paints a rect on the timeline given a time range.
+pub fn paint_timeline_range(
+    highlighted_range: AbsoluteTimeRange,
+    time_ranges_ui: &TimeRangesUi,
+    painter: &egui::Painter,
+    rect: Rect,
+    color: Color32,
+) {
+    let x_from = time_ranges_ui.x_from_time_f32(highlighted_range.min().into());
+    let x_to = time_ranges_ui.x_from_time_f32(highlighted_range.max().into());
+
+    if let (Some(x_from), Some(x_to)) = (x_from, x_to) {
+        let visible_history_area_rect =
+            Rect::from_x_y_ranges(x_from..=x_to, rect.y_range()).intersect(rect);
+
+        painter.rect_filled(visible_history_area_rect, 0.0, color);
+    }
+}
+
+fn loop_selection_color(time_ctrl: &TimeControl, tokens: &re_ui::DesignTokens) -> Color32 {
+    // Display in a brighter color when active
+    if time_ctrl.looping() == Looping::Selection {
+        tokens.loop_selection_color
+    } else {
+        tokens.loop_selection_color.gamma_multiply(0.7)
+    }
+}
+
+pub fn collapsed_loop_selection_ui(
+    time_ctrl: &TimeControl,
+    painter: &egui::Painter,
+    time_ranges_ui: &TimeRangesUi,
+    ui: &egui::Ui,
+    time_range_rect: Rect,
+) {
+    if let Some(loop_range) = time_ctrl.loop_selection() {
+        paint_timeline_range(
+            loop_range.to_int(),
+            time_ranges_ui,
+            painter,
+            time_range_rect,
+            loop_selection_color(time_ctrl, ui.tokens()),
+        );
+    }
+}
 
 pub fn loop_selection_ui(
     time_ctrl: &mut TimeControl,
@@ -28,11 +74,7 @@ pub fn loop_selection_ui(
 
     let is_active = time_ctrl.looping() == Looping::Selection;
 
-    let selection_color = if is_active {
-        tokens.loop_selection_color
-    } else {
-        tokens.loop_selection_color.gamma_multiply(0.7)
-    };
+    let selection_color = loop_selection_color(time_ctrl, tokens);
 
     let pointer_pos = ui.input(|i| i.pointer.hover_pos());
     let is_pointer_in_timeline =
@@ -145,12 +187,11 @@ pub fn loop_selection_ui(
         if is_pointer_in_timeline
             && !is_anything_being_dragged
             && ui.input(|i| i.pointer.primary_down() && i.modifiers.shift_only())
+            && let Some(time) = time_ranges_ui.time_from_x_f32(pointer_pos.x)
         {
-            if let Some(time) = time_ranges_ui.time_from_x_f32(pointer_pos.x) {
-                time_ctrl.set_loop_selection(ResolvedTimeRangeF::point(time));
-                time_ctrl.set_looping(Looping::Selection);
-                ui.ctx().set_dragged_id(right_edge_id);
-            }
+            time_ctrl.set_loop_selection(AbsoluteTimeRangeF::point(time));
+            time_ctrl.set_looping(Looping::Selection);
+            ui.ctx().set_dragged_id(right_edge_id);
         }
     }
 }
@@ -158,7 +199,7 @@ pub fn loop_selection_ui(
 fn initial_time_selection(
     time_ranges_ui: &TimeRangesUi,
     time_type: TimeType,
-) -> Option<ResolvedTimeRangeF> {
+) -> Option<AbsoluteTimeRangeF> {
     let ranges = &time_ranges_ui.segments;
 
     // Try to find a long duration first, then fall back to shorter
@@ -172,14 +213,14 @@ fn initial_time_selection(
                         if seconds > min_duration {
                             let one_sec =
                                 TimeInt::new_temporal(Duration::from_secs(1.0).as_nanos());
-                            return Some(ResolvedTimeRangeF::new(
+                            return Some(AbsoluteTimeRangeF::new(
                                 range.min(),
                                 range.min() + one_sec,
                             ));
                         }
                     }
                     TimeType::Sequence => {
-                        return Some(ResolvedTimeRangeF::new(
+                        return Some(AbsoluteTimeRangeF::new(
                             range.min(),
                             TimeReal::from(range.min())
                                 + TimeReal::from((range.max() - range.min()).as_f64() / 2.0),
@@ -196,7 +237,7 @@ fn initial_time_selection(
         None // not enough to show anything meaningful
     } else {
         let end = (ranges.len() / 2).at_least(1);
-        Some(ResolvedTimeRangeF::new(
+        Some(AbsoluteTimeRangeF::new(
             ranges[0].tight_time.min(),
             ranges[end].tight_time.max(),
         ))
@@ -206,7 +247,7 @@ fn initial_time_selection(
 fn drag_right_loop_selection_edge(
     ui: &egui::Ui,
     time_ranges_ui: &TimeRangesUi,
-    selected_range: &mut ResolvedTimeRangeF,
+    selected_range: &mut AbsoluteTimeRangeF,
     right_edge_id: Id,
 ) -> Option<()> {
     use egui::emath::smart_aim::best_in_range_f64;
@@ -234,7 +275,7 @@ fn drag_right_loop_selection_edge(
 fn drag_left_loop_selection_edge(
     ui: &egui::Ui,
     time_ranges_ui: &TimeRangesUi,
-    selected_range: &mut ResolvedTimeRangeF,
+    selected_range: &mut AbsoluteTimeRangeF,
     left_edge_id: Id,
 ) -> Option<()> {
     use egui::emath::smart_aim::best_in_range_f64;
@@ -262,7 +303,7 @@ fn drag_left_loop_selection_edge(
 fn on_drag_loop_selection(
     ui: &egui::Ui,
     time_ranges_ui: &TimeRangesUi,
-    selected_range: &mut ResolvedTimeRangeF,
+    selected_range: &mut AbsoluteTimeRangeF,
 ) -> Option<()> {
     let pointer_delta = ui.input(|i| i.pointer.delta());
 
@@ -272,7 +313,7 @@ fn on_drag_loop_selection(
     let min_time = time_ranges_ui.time_from_x_f32(min_x)?;
     let max_time = time_ranges_ui.time_from_x_f32(max_x)?;
 
-    let mut new_range = ResolvedTimeRangeF::new(min_time, max_time);
+    let mut new_range = AbsoluteTimeRangeF::new(min_time, max_time);
 
     if egui::emath::almost_equal(
         selected_range.length().as_f32(),
@@ -290,7 +331,7 @@ fn on_drag_loop_selection(
 
 fn paint_range_text(
     time_ctrl: &TimeControl,
-    selected_range: ResolvedTimeRangeF,
+    selected_range: AbsoluteTimeRangeF,
     ui: &egui::Ui,
     painter: &egui::Painter,
     selection_rect: Rect,

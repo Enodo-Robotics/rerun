@@ -1,3 +1,5 @@
+use std::{collections::BTreeMap, sync::LazyLock};
+
 use ahash::{HashMap, HashMapExt as _, HashSet};
 use anyhow::Context as _;
 use itertools::Itertools as _;
@@ -9,11 +11,14 @@ use re_chunk_store::{
 };
 use re_entity_db::{EntityDb, StoreBundle};
 use re_global_context::RecordingOrTable;
-use re_log_types::{ApplicationId, ResolvedTimeRange, StoreId, StoreKind, TableId};
-use re_query::CachesStats;
+use re_log_types::{AbsoluteTimeRange, ApplicationId, StoreId, StoreKind, TableId};
+use re_query::QueryCachesStats;
 use re_types::{archetypes, components::Timestamp};
 
-use crate::{BlueprintUndoState, Caches, StorageContext, StoreContext, TableStore, TableStores};
+use crate::{
+    BlueprintUndoState, CacheMemoryReport, Caches, StorageContext, StoreContext, TableStore,
+    TableStores,
+};
 
 /// Interface for accessing all blueprints and recordings
 ///
@@ -53,7 +58,7 @@ pub struct StoreHub {
     /// These applications should enable the heuristics early next frame.
     should_enable_heuristics_by_app_id: HashSet<ApplicationId>,
 
-    /// Things that need caching.
+    /// Viewer caches (e.g. image decode cache).
     caches_per_recording: HashMap<StoreId, Caches>,
 
     /// The [`ChunkStoreGeneration`] from when the [`EntityDb`] was last saved
@@ -82,16 +87,30 @@ pub struct BlueprintPersistence {
     pub validator: Option<Box<BlueprintValidator>>,
 }
 
+/// Convenient information used for `MemoryPanel`.
+///
+/// This is per [`StoreId`], which could be either a recording or a blueprint.
+pub struct StoreStats {
+    pub store_config: ChunkStoreConfig,
+    pub store_stats: ChunkStoreStats,
+
+    /// These are the query caches.
+    pub query_cache_stats: QueryCachesStats,
+
+    /// Memory reports for caches.
+    pub cache_memory_reports: HashMap<&'static str, CacheMemoryReport>,
+
+    /// CPU memory of the viewer caches, e.g. image decode caches etc.
+    pub viewer_cache_size: u64,
+}
+
 /// Convenient information used for `MemoryPanel`
 #[derive(Default)]
 pub struct StoreHubStats {
-    pub blueprint_stats: ChunkStoreStats,
-    pub blueprint_cached_stats: CachesStats,
-    pub blueprint_config: ChunkStoreConfig,
+    pub store_stats: BTreeMap<StoreId, StoreStats>,
 
-    pub recording_stats2: ChunkStoreStats,
-    pub recording_cached_stats: CachesStats,
-    pub recording_config2: ChunkStoreConfig,
+    /// Memory used by each [`TableStore`].
+    pub table_stats: BTreeMap<TableId, u64>,
 }
 
 impl StoreHub {
@@ -102,8 +121,9 @@ impl StoreHub {
 
     /// Blueprint ID used for the default welcome screen blueprint
     fn welcome_screen_blueprint_id() -> StoreId {
-        StoreId::from_string(
+        StoreId::new(
             StoreKind::Blueprint,
+            Self::welcome_screen_app_id(),
             Self::welcome_screen_app_id().to_string(),
         )
     }
@@ -142,13 +162,6 @@ impl StoreHub {
             store_bundle.blueprint_entry(&Self::welcome_screen_blueprint_id());
         (setup_welcome_screen_blueprint)(welcome_screen_blueprint);
 
-        let table_stores = if std::env::var("RERUN_EXPERIMENTAL_TABLE").is_ok() {
-            let table_id = TableId::new("test123".to_owned());
-            std::iter::once((table_id, TableStore::dummy())).collect()
-        } else {
-            TableStores::default()
-        };
-
         Self {
             persistence,
             active_recording_or_table: None,
@@ -164,7 +177,7 @@ impl StoreHub {
             blueprint_last_save: Default::default(),
             blueprint_last_gc: Default::default(),
 
-            table_stores,
+            table_stores: TableStores::default(),
         }
     }
 
@@ -182,10 +195,10 @@ impl StoreHub {
     /// All of the returned references to blueprints and recordings will have a
     /// matching [`ApplicationId`].
     pub fn read_context(&mut self) -> (StorageContext<'_>, Option<StoreContext<'_>>) {
-        static EMPTY_ENTITY_DB: once_cell::sync::Lazy<EntityDb> =
-            once_cell::sync::Lazy::new(|| EntityDb::new(re_log_types::StoreId::empty_recording()));
-        static EMPTY_CACHES: once_cell::sync::Lazy<Caches> =
-            once_cell::sync::Lazy::new(Default::default);
+        static EMPTY_ENTITY_DB: LazyLock<EntityDb> =
+            LazyLock::new(|| EntityDb::new(re_log_types::StoreId::empty_recording()));
+        static EMPTY_CACHES: LazyLock<Caches> =
+            LazyLock::new(|| Caches::new(re_log_types::StoreId::empty_recording()));
 
         let store_context = 'ctx: {
             // If we have an app-id, then use it to look up the blueprint.
@@ -195,28 +208,27 @@ impl StoreHub {
 
             // Defensive coding: Check that default and active blueprints exists,
             // in case some of our book-keeping is broken.
-            if let Some(blueprint_id) = self.default_blueprint_by_app_id.get(&app_id) {
-                if !self.store_bundle.contains(blueprint_id) {
-                    self.default_blueprint_by_app_id.remove(&app_id);
-                }
+            if let Some(blueprint_id) = self.default_blueprint_by_app_id.get(&app_id)
+                && !self.store_bundle.contains(blueprint_id)
+            {
+                self.default_blueprint_by_app_id.remove(&app_id);
             }
-            if let Some(blueprint_id) = self.active_blueprint_by_app_id.get(&app_id) {
-                if !self.store_bundle.contains(blueprint_id) {
-                    self.active_blueprint_by_app_id.remove(&app_id);
-                }
+            if let Some(blueprint_id) = self.active_blueprint_by_app_id.get(&app_id)
+                && !self.store_bundle.contains(blueprint_id)
+            {
+                self.active_blueprint_by_app_id.remove(&app_id);
             }
 
             // If there's no active blueprint for this app, we must use the default blueprint, UNLESS
             // we're about to enable heuristics for this app.
             if !self.active_blueprint_by_app_id.contains_key(&app_id)
                 && !self.should_enable_heuristics_by_app_id.contains(&app_id)
+                && let Some(blueprint_id) = self.default_blueprint_by_app_id.get(&app_id).cloned()
             {
-                if let Some(blueprint_id) = self.default_blueprint_by_app_id.get(&app_id).cloned() {
-                    self.set_cloned_blueprint_active_for_app(&app_id, &blueprint_id)
-                        .unwrap_or_else(|err| {
-                            re_log::warn!("Failed to make blueprint active: {err}");
-                        });
-                }
+                self.set_cloned_blueprint_active_for_app(&blueprint_id)
+                    .unwrap_or_else(|err| {
+                        re_log::warn!("Failed to make blueprint active: {err}");
+                    });
             }
 
             let active_blueprint = {
@@ -224,9 +236,7 @@ impl StoreHub {
                 let active_blueprint_id = self
                     .active_blueprint_by_app_id
                     .entry(app_id.clone())
-                    .or_insert_with(|| {
-                        StoreId::from_string(StoreKind::Blueprint, app_id.clone().0)
-                    });
+                    .or_insert_with(|| StoreId::default_blueprint(app_id.clone()));
 
                 // Get or create the blueprint:
                 self.store_bundle.blueprint_entry(active_blueprint_id);
@@ -258,7 +268,6 @@ impl StoreHub {
             let caches = self.active_caches();
 
             Some(StoreContext {
-                app_id,
                 blueprint: active_blueprint,
                 default_blueprint,
                 recording: recording.unwrap_or(&EMPTY_ENTITY_DB),
@@ -308,16 +317,16 @@ impl StoreHub {
 
         match removed_store.store_kind() {
             StoreKind::Recording => {
-                if let Some(app_id) = removed_store.app_id().cloned() {
-                    let any_other_recordings_for_this_app = self
-                        .store_bundle
-                        .recordings()
-                        .any(|rec| rec.app_id() == Some(&app_id));
+                let app_id = removed_store.application_id();
 
-                    if !any_other_recordings_for_this_app {
-                        re_log::trace!("Removed last recording of {app_id}. Closing app.");
-                        self.close_app(&app_id);
-                    }
+                let any_other_recordings_for_this_app = self
+                    .store_bundle
+                    .recordings()
+                    .any(|rec| rec.application_id() == app_id);
+
+                if !any_other_recordings_for_this_app {
+                    re_log::trace!("Removed last recording of {app_id}. Closing app.");
+                    self.close_app(app_id);
                 }
             }
             StoreKind::Blueprint => {
@@ -357,12 +366,31 @@ impl StoreHub {
         }
     }
 
+    /// Tries to find a recording store by its data source.
+    ///
+    /// Ignores any blueprint stores.
+    ///
+    /// If the data source is a grpc uri, it will ignore any fragments.
+    /// If the data source is a http url, it will ignore the follow flag.
+    pub fn find_recording_store_by_source(
+        &self,
+        data_source: &re_smart_channel::SmartChannelSource,
+    ) -> Option<&EntityDb> {
+        self.store_bundle.entity_dbs().find(|db| {
+            db.store_id().is_recording()
+                && db
+                    .data_source
+                    .as_ref()
+                    .is_some_and(|ds| ds.is_same_ignoring_uri_fragments(data_source))
+        })
+    }
+
     /// Remove all open recordings and applications, and go to the welcome page.
     pub fn clear_entries(&mut self) {
         // Keep only the welcome screen:
         let mut store_ids_retained = HashSet::default();
         self.store_bundle.retain(|db| {
-            if db.app_id() == Some(&Self::welcome_screen_app_id()) {
+            if db.application_id() == &Self::welcome_screen_app_id() {
                 store_ids_retained.insert(db.store_id().clone());
                 true
             } else {
@@ -374,6 +402,7 @@ impl StoreHub {
 
         self.table_stores.clear();
         self.active_application_id = Some(Self::welcome_screen_app_id());
+        self.active_recording_or_table = None;
     }
 
     // ---------------------
@@ -387,10 +416,10 @@ impl StoreHub {
     pub fn set_active_app(&mut self, app_id: ApplicationId) {
         // If we don't know of a blueprint for this `ApplicationId` yet,
         // try to load one from the persisted store
-        if !self.active_blueprint_by_app_id.contains_key(&app_id) {
-            if let Err(err) = self.try_to_load_persisted_blueprint(&app_id) {
-                re_log::warn!("Failed to load persisted blueprint: {err}");
-            }
+        if !self.active_blueprint_by_app_id.contains_key(&app_id)
+            && let Err(err) = self.try_to_load_persisted_blueprint(&app_id)
+        {
+            re_log::warn!("Failed to load persisted blueprint: {err}");
         }
 
         if self.active_application_id.as_ref() == Some(&app_id) {
@@ -411,7 +440,7 @@ impl StoreHub {
                 &archetypes::RecordingInfo::descriptor_start_time(),
             )
         }) {
-            if rec.app_id() == Some(&app_id) {
+            if rec.application_id() == &app_id {
                 self.active_application_id = Some(app_id.clone());
                 self.active_recording_or_table = Some(RecordingOrTable::Recording {
                     store_id: rec.store_id().clone(),
@@ -429,7 +458,7 @@ impl StoreHub {
 
         let mut store_ids_removed = HashSet::default();
         self.store_bundle.retain(|db| {
-            if db.app_id() == Some(app_id) {
+            if db.application_id() == app_id {
                 store_ids_removed.insert(db.store_id().clone());
                 false
             } else {
@@ -457,10 +486,8 @@ impl StoreHub {
 
     /// The recording id for the active recording.
     #[inline]
-    pub fn active_recording_id(&self) -> Option<&StoreId> {
-        self.active_recording_or_table
-            .as_ref()
-            .and_then(|e| e.recording_ref())
+    pub fn active_store_id(&self) -> Option<&StoreId> {
+        self.active_recording_or_table.as_ref()?.recording_ref()
     }
 
     /// Directly access the [`EntityDb`] for the active recording.
@@ -468,6 +495,15 @@ impl StoreHub {
     pub fn active_recording(&self) -> Option<&EntityDb> {
         match self.active_recording_or_table.as_ref() {
             Some(RecordingOrTable::Recording { store_id }) => self.store_bundle.get(store_id),
+            _ => None,
+        }
+    }
+
+    /// Directly access the [`EntityDb`] for the active recording.
+    #[inline]
+    pub fn active_recording_mut(&mut self) -> Option<&mut EntityDb> {
+        match self.active_recording_or_table.as_mut() {
+            Some(RecordingOrTable::Recording { store_id }) => self.store_bundle.get_mut(store_id),
             _ => None,
         }
     }
@@ -483,31 +519,29 @@ impl StoreHub {
     /// present if there's an active recording.
     #[inline]
     pub fn active_caches(&self) -> Option<&Caches> {
-        self.active_recording_id().and_then(|store_id| {
-            let caches = self.caches_per_recording.get(store_id);
+        let store_id = self.active_store_id()?;
+        let caches = self.caches_per_recording.get(store_id);
 
-            debug_assert!(
-                caches.is_some(),
-                "active recordings should always have associated caches",
-            );
+        debug_assert!(
+            caches.is_some(),
+            "active recordings should always have associated caches",
+        );
 
-            caches
-        })
+        caches
     }
 
     /// Change the active/visible recording id.
     ///
     /// This will also change the application-id to match the newly active recording.
     pub fn set_active_recording_id(&mut self, recording_id: StoreId) {
-        debug_assert_eq!(recording_id.kind, StoreKind::Recording);
+        debug_assert!(recording_id.is_recording());
 
         // If this recording corresponds to an app that we know about, then update the app-id.
         if let Some(app_id) = self
             .store_bundle
             .get(&recording_id)
             .as_ref()
-            .and_then(|recording| recording.app_id())
-            .cloned()
+            .map(|recording| recording.application_id().clone())
         {
             self.set_active_app(app_id);
         }
@@ -517,15 +551,18 @@ impl StoreHub {
         });
 
         // Make sure the active recording has associated caches, always.
-        _ = self.caches_per_recording.entry(recording_id).or_default();
+        _ = self
+            .caches_per_recording
+            .entry(recording_id.clone())
+            .or_insert_with(|| Caches::new(recording_id));
     }
 
     /// Activate a recording by its [`StoreId`].
-    pub fn set_activate_recording(&mut self, store_id: StoreId) {
-        match store_id.kind {
+    pub fn set_active_recording(&mut self, store_id: StoreId) {
+        match store_id.kind() {
             StoreKind::Recording => self.set_active_recording_id(store_id),
             StoreKind::Blueprint => {
-                re_log::debug!("Tried to activate the blueprint {store_id} as a recording.");
+                re_log::debug!("Tried to activate the blueprint {store_id:?} as a recording.");
             }
         }
     }
@@ -538,32 +575,32 @@ impl StoreHub {
     }
 
     pub fn default_blueprint_for_app(&self, app_id: &ApplicationId) -> Option<&EntityDb> {
-        self.default_blueprint_id_for_app(app_id)
-            .and_then(|id| self.store_bundle.get(id))
+        let id = self.default_blueprint_id_for_app(app_id)?;
+        self.store_bundle.get(id)
     }
 
     /// Change which blueprint is the default for a given [`ApplicationId`]
     #[inline]
-    pub fn set_default_blueprint_for_app(
-        &mut self,
-        app_id: &ApplicationId,
-        blueprint_id: &StoreId,
-    ) -> anyhow::Result<()> {
+    pub fn set_default_blueprint_for_app(&mut self, blueprint_id: &StoreId) -> anyhow::Result<()> {
         let blueprint = self
             .store_bundle
             .get(blueprint_id)
             .context("missing blueprint")?;
 
         // TODO(#6282): Improve this error message.
-        if let Some(validator) = &self.persistence.validator {
-            if !(validator)(blueprint) {
-                anyhow::bail!("Blueprint failed validation");
-            }
+        if let Some(validator) = &self.persistence.validator
+            && !(validator)(blueprint)
+        {
+            anyhow::bail!("Blueprint failed validation");
         }
 
-        re_log::trace!("Switching default blueprint for '{app_id}' to '{blueprint_id}'");
+        re_log::trace!(
+            "Switching default blueprint for '{:?}' to '{:?}'",
+            blueprint_id.application_id(),
+            blueprint_id
+        );
         self.default_blueprint_by_app_id
-            .insert(app_id.clone(), blueprint_id.clone());
+            .insert(blueprint_id.application_id().clone(), blueprint_id.clone());
 
         Ok(())
     }
@@ -573,8 +610,14 @@ impl StoreHub {
 
     /// What is the active blueprint for the active application?
     pub fn active_blueprint_id(&self) -> Option<&StoreId> {
-        self.active_app()
-            .and_then(|app_id| self.active_blueprint_id_for_app(app_id))
+        let app_id = self.active_app()?;
+        self.active_blueprint_id_for_app(app_id)
+    }
+
+    /// Active blueprint for currently active application.
+    pub fn active_blueprint(&self) -> Option<&EntityDb> {
+        let id = self.active_blueprint_id()?;
+        self.store_bundle.get(id)
     }
 
     pub fn active_blueprint_id_for_app(&self, app_id: &ApplicationId) -> Option<&StoreId> {
@@ -582,8 +625,8 @@ impl StoreHub {
     }
 
     pub fn active_blueprint_for_app(&self, app_id: &ApplicationId) -> Option<&EntityDb> {
-        self.active_blueprint_id_for_app(app_id)
-            .and_then(|id| self.store_bundle.get(id))
+        let id = self.active_blueprint_id_for_app(app_id)?;
+        self.store_bundle.get(id)
     }
 
     /// Make blueprint active for a given [`ApplicationId`]
@@ -592,13 +635,13 @@ impl StoreHub {
     //TODO(jleibs): In the future this can probably be handled with snapshots instead.
     pub fn set_cloned_blueprint_active_for_app(
         &mut self,
-        app_id: &ApplicationId,
         blueprint_id: &StoreId,
     ) -> anyhow::Result<()> {
-        let new_id = StoreId::random(StoreKind::Blueprint);
+        let app_id = blueprint_id.application_id().clone();
+        let new_id = StoreId::random(StoreKind::Blueprint, app_id.clone());
 
         re_log::trace!(
-            "Cloning '{blueprint_id}' as '{new_id}' the active blueprint for '{app_id}' to '{blueprint_id}'"
+            "Cloning '{blueprint_id:?}' as '{new_id:?}' the active blueprint for '{app_id}'"
         );
 
         let blueprint = self
@@ -607,18 +650,17 @@ impl StoreHub {
             .context("missing blueprint")?;
 
         // TODO(#6282): Improve this error message.
-        if let Some(validator) = &self.persistence.validator {
-            if !(validator)(blueprint) {
-                anyhow::bail!("Blueprint failed validation");
-            }
+        if let Some(validator) = &self.persistence.validator
+            && !(validator)(blueprint)
+        {
+            anyhow::bail!("Blueprint failed validation");
         }
 
         let new_blueprint = blueprint.clone_with_new_id(new_id.clone())?;
 
         self.store_bundle.insert(new_blueprint);
 
-        self.active_blueprint_by_app_id
-            .insert(app_id.clone(), new_id);
+        self.active_blueprint_by_app_id.insert(app_id, new_id);
 
         Ok(())
     }
@@ -632,11 +674,11 @@ impl StoreHub {
 
     /// Clear the currently active blueprint
     pub fn clear_active_blueprint(&mut self) {
-        if let Some(app_id) = &self.active_application_id {
-            if let Some(blueprint_id) = self.active_blueprint_by_app_id.remove(app_id) {
-                re_log::debug!("Clearing blueprint for {app_id}: {blueprint_id}");
-                self.remove_store(&blueprint_id);
-            }
+        if let Some(app_id) = &self.active_application_id
+            && let Some(blueprint_id) = self.active_blueprint_by_app_id.remove(app_id)
+        {
+            re_log::debug!("Clearing blueprint for {app_id}: {blueprint_id:?}");
+            self.remove_store(&blueprint_id);
         }
     }
 
@@ -680,13 +722,14 @@ impl StoreHub {
     pub fn purge_fraction_of_ram(&mut self, fraction_to_purge: f32) {
         re_tracing::profile_function!();
 
+        #[expect(clippy::iter_over_hash_type)]
+        for cache in self.caches_per_recording.values_mut() {
+            cache.purge_memory();
+        }
+
         let Some(store_id) = self.store_bundle.find_oldest_modified_recording() else {
             return;
         };
-
-        if let Some(caches) = self.caches_per_recording.get_mut(&store_id) {
-            caches.purge_memory();
-        }
 
         let store_bundle = &mut self.store_bundle;
 
@@ -779,14 +822,14 @@ impl StoreHub {
                 }
 
                 let mut protected_time_ranges = IntMap::default();
-                if let Some(undo) = undo_state.get(blueprint_id) {
-                    if let Some(time) = undo.oldest_undo_point() {
-                        // Save everything that we could want to undo to:
-                        protected_time_ranges.insert(
-                            crate::blueprint_timeline(),
-                            ResolvedTimeRange::new(time, re_chunk::TimeInt::MAX),
-                        );
-                    }
+                if let Some(undo) = undo_state.get(blueprint_id)
+                    && let Some(time) = undo.oldest_undo_point()
+                {
+                    // Save everything that we could want to undo to:
+                    protected_time_ranges.insert(
+                        crate::blueprint_timeline(),
+                        AbsoluteTimeRange::new(time, re_chunk::TimeInt::MAX),
+                    );
                 }
 
                 let store_events = blueprint.gc(&GarbageCollectionOptions {
@@ -811,11 +854,14 @@ impl StoreHub {
 
     /// See [`crate::Caches::begin_frame`].
     pub fn begin_frame_caches(&mut self) {
-        if let Some(store_id) = self.active_recording_id().cloned() {
-            if let Some(caches) = self.caches_per_recording.get_mut(&store_id) {
+        self.caches_per_recording.retain(|store_id, caches| {
+            if self.store_bundle.contains(store_id) {
                 caches.begin_frame();
+                true // keep caches for existing recordings
+            } else {
+                false // remove caches for recordings that no longer exist
             }
-        }
+        });
     }
 
     /// Persist any in-use blueprints to durable storage.
@@ -830,13 +876,14 @@ impl StoreHub {
         // save the blueprints referenced by `blueprint_by_app_id`, even though
         // there may be other Blueprints in the Hub.
 
+        #[expect(clippy::iter_over_hash_type)]
         for (app_id, blueprint_id) in &self.active_blueprint_by_app_id {
             if app_id == &Self::welcome_screen_app_id() {
                 continue; // Don't save changes to the welcome screen
             }
 
             let Some(blueprint) = self.store_bundle.get_mut(blueprint_id) else {
-                re_log::debug!("Failed to find blueprint {blueprint_id}.");
+                re_log::debug!("Failed to find blueprint {blueprint_id:?}.");
                 continue;
             };
             if self.blueprint_last_save.get(blueprint_id) == Some(&blueprint.generation()) {
@@ -873,18 +920,14 @@ impl StoreHub {
                     StoreKind::Blueprint => {}
                 }
 
-                if store.app_id() != Some(app_id) {
-                    if let Some(store_app_id) = store.app_id() {
-                        anyhow::bail!("Found app_id {store_app_id}; expected {app_id}");
-                    } else {
-                        anyhow::bail!("Found store without an app_id");
-                    }
+                if store.application_id() != app_id {
+                    anyhow::bail!("Found app_id {}; expected {app_id}", store.application_id());
                 }
 
                 // We found the blueprint we were looking for; make it active.
                 // borrow-checker won't let us just call `self.set_blueprint_for_app_id`
                 re_log::debug!(
-                    "Activating new blueprint {} for {app_id}; loaded from disk",
+                    "Activating new blueprint {:?} for {app_id}; loaded from disk",
                     store.store_id(),
                 );
                 self.active_blueprint_by_app_id
@@ -898,58 +941,58 @@ impl StoreHub {
         Ok(())
     }
 
-    /// Populate a [`StoreHubStats`] based on the active app.
-    //
-    // TODO(jleibs): We probably want stats for all recordings, not just the active recording.
+    /// Populate a [`StoreHubStats`].
     pub fn stats(&self) -> StoreHubStats {
         re_tracing::profile_function!();
 
-        // If we have an app-id, then use it to look up the blueprint.
-        let blueprint = self
-            .active_application_id
-            .as_ref()
-            .and_then(|app_id| self.active_blueprint_by_app_id.get(app_id))
-            .and_then(|blueprint_id| self.store_bundle.get(blueprint_id))
-            .map(|entity_db| entity_db.storage_engine());
-        let blueprint = blueprint.as_ref();
+        let Self {
+            persistence: _,
+            active_recording_or_table: _,
+            active_application_id: _,
+            default_blueprint_by_app_id: _,
+            active_blueprint_by_app_id: _,
+            store_bundle,
+            table_stores,
+            should_enable_heuristics_by_app_id: _,
+            caches_per_recording,
+            blueprint_last_save: _,
+            blueprint_last_gc: _,
+        } = self;
 
-        let blueprint_stats = blueprint
-            .map(|engine| engine.store().stats())
-            .unwrap_or_default();
+        let mut store_stats = BTreeMap::new();
 
-        let blueprint_cached_stats = blueprint
-            .map(|engine| engine.cache().stats())
-            .unwrap_or_default();
+        for store in store_bundle.entity_dbs() {
+            let store_id = store.store_id();
+            let engine = store.storage_engine();
+            let cache_memory_reports = caches_per_recording
+                .get(store_id)
+                .map(|caches| caches.memory_reports())
+                .unwrap_or_default();
+            store_stats.insert(
+                store_id.clone(),
+                StoreStats {
+                    store_config: engine.store().config().clone(),
+                    store_stats: engine.store().stats(),
+                    query_cache_stats: engine.cache().stats(),
+                    viewer_cache_size: cache_memory_reports
+                        .values()
+                        .map(|report| report.bytes_cpu)
+                        .sum(),
+                    cache_memory_reports,
+                },
+            );
+        }
 
-        let blueprint_config = blueprint
-            .map(|engine| engine.store().config().clone())
-            .unwrap_or_default();
+        let mut table_stats = BTreeMap::new();
 
-        let recording = self
-            .active_recording()
-            .map(|entity_db| entity_db.storage_engine());
-        let recording = recording.as_ref();
-
-        let recording_stats2 = recording
-            .map(|engine| engine.store().stats())
-            .unwrap_or_default();
-
-        let recording_cached_stats = recording
-            .map(|engine| engine.cache().stats())
-            .unwrap_or_default();
-
-        let recording_config2 = recording
-            .map(|engine| engine.store().config().clone())
-            .unwrap_or_default();
+        #[expect(clippy::iter_over_hash_type)]
+        for (table_id, table_store) in table_stores {
+            table_stats.insert(table_id.clone(), table_store.total_size_bytes());
+        }
 
         StoreHubStats {
-            blueprint_stats,
-            blueprint_cached_stats,
-            blueprint_config,
-
-            recording_stats2,
-            recording_cached_stats,
-            recording_config2,
+            store_stats,
+            table_stats,
         }
     }
 }

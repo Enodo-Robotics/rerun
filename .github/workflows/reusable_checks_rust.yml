@@ -15,11 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # web_sys_unstable_apis is required to enable the web_sys clipboard API which egui_web uses
-  # https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
-  # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
-  RUSTFLAGS: --cfg=web_sys_unstable_apis --deny warnings
-
+  RUSTFLAGS: --deny warnings
   RUSTDOCFLAGS: --deny warnings
 
   # Disable the GHA backend (Github's 10GB storage) since we use our own GCS backend.
@@ -78,7 +74,7 @@ jobs:
 
       - name: Rust checks (PR subset)
         if: ${{ inputs.CHANNEL == 'pr' }}
-        run: pixi run rs-check --only base_checks sdk_variations cargo_deny wasm docs
+        run: pixi run rs-check --only base_checks sdk_variations cargo_deny denied_sdk_deps wasm docs
 
       - name: Rust most checks (`main` branch subset)
         if: ${{ inputs.CHANNEL == 'main' }}
@@ -95,11 +91,10 @@ jobs:
         run: pixi run check-backwards-compatibility
 
   rs-tests:
-    name: Rust tests
+    name: Test on Linux
     # TODO(andreas): setup-vulkan doesn't work on 24.4 right now due to missing .so
     runs-on: ubuntu-22.04-large
     env:
-      RUSTFLAGS: --cfg=web_sys_unstable_apis
       RUSTDOCFLAGS: ""
     steps:
       - uses: actions/checkout@v4
@@ -135,7 +130,7 @@ jobs:
       - name: Rust tests
         run: pixi run rs-check --only tests
 
-      - name: Rust tests without --all-features
+      - name: Rust tests without --all-features (`main`/`nightly` channel)
         if: ${{ inputs.CHANNEL != 'pr' }}
         run: pixi run rs-check --only tests_without_all_features
 
@@ -152,14 +147,14 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: "macos-15"
+          - runs_on: "macos-15-xlarge"
             name: "macos"
-          - os: "windows-latest-8-cores"
+          - runs_on: "windows-latest-32-cores"
             name: "windows"
 
-    # Note: we can't use `matrix.os` here because its evaluated before the matrix stuff.
+    # Note: we can't use `matrix.runs_on` here because its evaluated before the matrix stuff.
     if: ${{ inputs.CHANNEL == 'main' || inputs.CHANNEL == 'nightly' }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -192,11 +187,18 @@ jobs:
       - name: Setup software rasterizer
         run: pixi run python ./scripts/ci/setup_software_rasterizer.py
 
-      - name: Rust tests
+      - name: Rust tests (`main` channel)
         if: ${{ inputs.CHANNEL == 'main' }}
-        run: pixi run rs-check --only tests
+        # We've seen some jobs fail on macOS because of a rendering adapter.
+        # Let's retry and hope for the best.
+        uses: nick-fields/retry@v3
+        with:
+          max_attempts: 2
+          retry_wait_seconds: 30
+          timeout_minutes: 60
+          command: pixi run rs-check --only tests
 
-      - name: Rust all checks & tests
+      - name: Rust all checks & tests (`nightly` channel)
         if: ${{ inputs.CHANNEL == 'nightly' }}
         run: pixi run rs-check
 

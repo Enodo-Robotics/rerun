@@ -132,6 +132,8 @@ class Ellipsoids3D(Ellipsoids3DExt, Archetype):
             If no rotation is specified, the axes of the ellipsoid align with the axes of the local coordinate system.
         colors:
             Optional colors for the ellipsoids.
+
+            Alpha channel is used for transparency for solid fill-mode.
         line_radii:
             Optional radii for the lines used when the ellipsoid is rendered as a wireframe.
         fill_mode:
@@ -222,6 +224,8 @@ class Ellipsoids3D(Ellipsoids3DExt, Archetype):
             If no rotation is specified, the axes of the ellipsoid align with the axes of the local coordinate system.
         colors:
             Optional colors for the ellipsoids.
+
+            Alpha channel is used for transparency for solid fill-mode.
         line_radii:
             Optional radii for the lines used when the ellipsoid is rendered as a wireframe.
         fill_mode:
@@ -255,7 +259,7 @@ class Ellipsoids3D(Ellipsoids3DExt, Archetype):
                 class_ids=class_ids,
             )
 
-        batches = inst.as_component_batches(include_indicators=False)
+        batches = inst.as_component_batches()
         if len(batches) == 0:
             return ComponentColumnList([])
 
@@ -298,8 +302,7 @@ class Ellipsoids3D(Ellipsoids3DExt, Archetype):
 
             columns.append(batch.partition(sizes))
 
-        indicator_column = cls.indicator().partition(np.zeros(len(sizes)))
-        return ComponentColumnList([indicator_column] + columns)
+        return ComponentColumnList(columns)
 
     half_sizes: components.HalfSize3DBatch | None = field(
         metadata={"component": True},
@@ -351,6 +354,8 @@ class Ellipsoids3D(Ellipsoids3DExt, Archetype):
         converter=components.ColorBatch._converter,  # type: ignore[misc]
     )
     # Optional colors for the ellipsoids.
+    #
+    # Alpha channel is used for transparency for solid fill-mode.
     #
     # (Docstring intentionally commented out to hide this field from the docs)
 

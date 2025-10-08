@@ -175,26 +175,16 @@ impl SeriesLines {
             component_type: Some("rerun.components.AggregationPolicy".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.SeriesLinesIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [SeriesLines::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 5usize]> =
+    std::sync::LazyLock::new(|| {
         [
             SeriesLines::descriptor_colors(),
             SeriesLines::descriptor_widths(),
@@ -204,10 +194,9 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 5usize]> =
+    std::sync::LazyLock::new(|| {
         [
-            SeriesLines::descriptor_indicator(),
             SeriesLines::descriptor_colors(),
             SeriesLines::descriptor_widths(),
             SeriesLines::descriptor_names(),
@@ -217,16 +206,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 6usize]> =
     });
 
 impl SeriesLines {
-    /// The total number of components in the archetype: 0 required, 1 recommended, 5 optional
-    pub const NUM_COMPONENTS: usize = 6usize;
+    /// The total number of components in the archetype: 0 required, 0 recommended, 5 optional
+    pub const NUM_COMPONENTS: usize = 5usize;
 }
 
-/// Indicator component for the [`SeriesLines`] [`::re_types_core::Archetype`]
-pub type SeriesLinesIndicator = ::re_types_core::GenericIndicatorComponent<SeriesLines>;
-
 impl ::re_types_core::Archetype for SeriesLines {
-    type Indicator = SeriesLinesIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.SeriesLines".into()
@@ -235,14 +219,6 @@ impl ::re_types_core::Archetype for SeriesLines {
     #[inline]
     fn display_name() -> &'static str {
         "Series lines"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        SeriesLinesIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -306,7 +282,6 @@ impl ::re_types_core::AsComponents for SeriesLines {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.colors.clone(),
             self.widths.clone(),
             self.names.clone(),
@@ -403,12 +378,7 @@ impl SeriesLines {
                 .map(|aggregation_policy| aggregation_policy.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -431,7 +401,7 @@ impl SeriesLines {
             .or(len_visible_series)
             .or(len_aggregation_policy)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// Color for the corresponding series.

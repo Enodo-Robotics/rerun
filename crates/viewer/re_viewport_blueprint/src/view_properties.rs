@@ -12,7 +12,7 @@ use re_viewer_context::{
 #[derive(thiserror::Error, Debug)]
 pub enum ViewPropertyQueryError {
     #[error(transparent)]
-    SerializationError(#[from] re_types::DeserializationError),
+    DeserializationError(#[from] re_types::DeserializationError),
 
     #[error(transparent)]
     ComponentFallbackError(#[from] ComponentFallbackError),
@@ -21,7 +21,7 @@ pub enum ViewPropertyQueryError {
 impl From<ViewPropertyQueryError> for ViewSystemExecutionError {
     fn from(val: ViewPropertyQueryError) -> Self {
         match val {
-            ViewPropertyQueryError::SerializationError(err) => err.into(),
+            ViewPropertyQueryError::DeserializationError(err) => err.into(),
             ViewPropertyQueryError::ComponentFallbackError(err) => err.into(),
         }
     }
@@ -103,8 +103,6 @@ impl ViewProperty {
             .ok_or(ComponentFallbackError::UnexpectedEmptyFallback.into())
     }
 
-    // TODO(#6889): It's a bit sad that we can't derive the type of `C` from the `ComponentDescriptor`, which means
-    //              that the call site has to specify the return type.
     /// Get the component array for a given type or its fallback if the component is not present or empty.
     pub fn component_array_or_fallback<C: re_types::Component>(
         &self,
@@ -126,7 +124,7 @@ impl ViewProperty {
         component_descr: &ComponentDescriptor,
     ) -> Result<Option<C>, DeserializationError> {
         self.component_array(component_descr)
-            .map(|v| v.and_then(|v| v.into_iter().next()))
+            .map(|v| v?.into_iter().next())
     }
 
     /// Get the component array for a given type, not using any fallbacks.
@@ -152,9 +150,7 @@ impl ViewProperty {
         &self,
         component_descr: &ComponentDescriptor,
     ) -> Option<re_chunk::RowId> {
-        self.query_results
-            .get(component_descr)
-            .and_then(|unit| unit.row_id())
+        self.query_results.get(component_descr)?.row_id()
     }
 
     pub fn component_raw(
@@ -162,8 +158,8 @@ impl ViewProperty {
         component_descr: &ComponentDescriptor,
     ) -> Option<arrow::array::ArrayRef> {
         self.query_results
-            .get(component_descr)
-            .and_then(|unit| unit.component_batch_raw(component_descr))
+            .get(component_descr)?
+            .component_batch_raw(component_descr)
     }
 
     fn component_or_fallback_raw(
@@ -172,10 +168,10 @@ impl ViewProperty {
         component_descr: &ComponentDescriptor,
         fallback_provider: &dyn ComponentFallbackProvider,
     ) -> arrow::array::ArrayRef {
-        if let Some(value) = self.component_raw(component_descr) {
-            if value.len() > 0 {
-                return value;
-            }
+        if let Some(value) = self.component_raw(component_descr)
+            && !value.is_empty()
+        {
+            return value;
         }
 
         fallback_provider.fallback_for(&self.query_context(ctx), component_descr)

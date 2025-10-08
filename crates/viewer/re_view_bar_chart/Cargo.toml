@@ -30,5 +30,10 @@ re_ui.workspace = true
 re_viewer_context.workspace = true
 re_viewport_blueprint.workspace = true
 
+arrow.workspace = true
 egui_plot.workspace = true
 egui.workspace = true
+
+[dev-dependencies]
+re_test_viewport.workspace = true
+re_test_context.workspace = true

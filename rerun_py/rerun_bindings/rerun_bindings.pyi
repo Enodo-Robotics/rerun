@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable, Iterator, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Callable, Optional, Self
+from typing import Any, Callable, Self
 
+import datafusion as dfn
 import pyarrow as pa
 from rerun.catalog import CatalogClient
 from typing_extensions import deprecated  # type: ignore[misc, unused-ignore]
@@ -179,7 +180,7 @@ class Schema:
     def component_columns(self) -> list[ComponentColumnDescriptor]:
         """Return a list of all the component columns in the schema."""
 
-    def column_for(self, entity_path: str, component: str) -> Optional[ComponentColumnDescriptor]:
+    def column_for(self, entity_path: str, component: str) -> ComponentColumnDescriptor | None:
         """
         Look up the column descriptor for a specific entity path and component.
 
@@ -402,7 +403,7 @@ class RecordingView:
 
         """
 
-    def select(self, *args: AnyColumn, columns: Optional[Sequence[AnyColumn]] = None) -> pa.RecordBatchReader:
+    def select(self, *args: AnyColumn, columns: Sequence[AnyColumn] | None = None) -> pa.RecordBatchReader:
         """
         Select the columns from the view.
 
@@ -436,9 +437,9 @@ class RecordingView:
 
     @deprecated(
         """Use `view(index=None)` instead.
-        See: https://www.rerun.io/docs/reference/migration/migration-0-24?speculative-link for more details.""",
+        See: https://www.rerun.io/docs/reference/migration/migration-0-24 for more details.""",
     )
-    def select_static(self, *args: AnyColumn, columns: Optional[Sequence[AnyColumn]] = None) -> pa.RecordBatchReader:
+    def select_static(self, *args: AnyColumn, columns: Sequence[AnyColumn] | None = None) -> pa.RecordBatchReader:
         """
         Select only the static columns from the view.
 
@@ -489,7 +490,6 @@ class Recording:
         index: str | None,
         contents: ViewContentsLike,
         include_semantically_empty_columns: bool = False,
-        include_indicator_columns: bool = False,
         include_tombstone_columns: bool = False,
     ) -> RecordingView:
         """
@@ -524,10 +524,6 @@ class Recording:
             Whether to include columns that are semantically empty, by default `False`.
 
             Semantically empty columns are components that are `null` or empty `[]` for every row in the recording.
-        include_indicator_columns : bool, optional
-            Whether to include indicator columns, by default `False`.
-
-            Indicator columns are components used to represent the presence of an archetype within an entity.
         include_tombstone_columns : bool, optional
             Whether to include tombstone columns, by default `False`.
 
@@ -606,8 +602,7 @@ def load_archive(path_to_rrd: str | os.PathLike[str]) -> RRDArchive:
     """
 
 # AI generated stubs for `PyRecordingStream` related class and functions
-# TODO(#9187): this will be entirely replaced with `RecordingStream` is itself written in Rust
-
+# TODO(#9187): this will be entirely replaced when `RecordingStream` is itself written in Rust
 class PyRecordingStream:
     def is_forked_child(self) -> bool:
         """
@@ -620,8 +615,122 @@ class PyRecordingStream:
         Calling operations such as flush or set_sink will result in an error.
         """
 
+class ChunkBatcherConfig:
+    """Defines the different batching thresholds used within the RecordingStream."""
+
+    def __init__(
+        self,
+        flush_tick: int | float | timedelta | None = None,
+        flush_num_bytes: int | None = None,
+        flush_num_rows: int | None = None,
+        chunk_max_rows_if_unsorted: int | None = None,
+    ) -> None:
+        """
+        Initialize the chunk batcher configuration.
+
+        Parameters
+        ----------
+        flush_tick : int | float | timedelta | None
+            Duration of the periodic tick, by default `None`.
+            Equivalent to setting: `RERUN_FLUSH_TICK_SECS` environment variable.
+
+        flush_num_bytes : int | None
+            Flush if the accumulated payload has a size in bytes equal or greater than this, by default `None`.
+            Equivalent to setting: `RERUN_FLUSH_NUM_BYTES` environment variable.
+
+        flush_num_rows : int | None
+            Flush if the accumulated payload has a number of rows equal or greater than this, by default `None`.
+            Equivalent to setting: `RERUN_FLUSH_NUM_ROWS` environment variable.
+
+        chunk_max_rows_if_unsorted : int | None
+            Split a chunk if it contains >= rows than this threshold and one or more of its timelines are unsorted,
+            by default `None`.
+            Equivalent to setting: `RERUN_CHUNK_MAX_ROWS_IF_UNSORTED` environment variable.
+
+        """
+
+    @property
+    def flush_tick(self) -> timedelta:
+        """
+        Duration of the periodic tick.
+
+        Equivalent to setting: `RERUN_FLUSH_TICK_SECS` environment variable.
+        """
+
+    @flush_tick.setter
+    def flush_tick(self, value: float | int | timedelta) -> None:
+        """
+        Duration of the periodic tick.
+
+        Equivalent to setting: `RERUN_FLUSH_TICK_SECS` environment variable.
+        """
+
+    @property
+    def flush_num_bytes(self) -> int:
+        """
+        Flush if the accumulated payload has a size in bytes equal or greater than this.
+
+        Equivalent to setting: `RERUN_FLUSH_NUM_BYTES` environment variable.
+        """
+
+    @flush_num_bytes.setter
+    def flush_num_bytes(self, value: int) -> None:
+        """
+        Flush if the accumulated payload has a size in bytes equal or greater than this.
+
+        Equivalent to setting: `RERUN_FLUSH_NUM_BYTES` environment variable.
+        """
+
+    @property
+    def flush_num_rows(self) -> int:
+        """
+        Flush if the accumulated payload has a number of rows equal or greater than this.
+
+        Equivalent to setting: `RERUN_FLUSH_NUM_ROWS` environment variable.
+        """
+
+    @flush_num_rows.setter
+    def flush_num_rows(self, value: int) -> None:
+        """
+        Flush if the accumulated payload has a number of rows equal or greater than this.
+
+        Equivalent to setting: `RERUN_FLUSH_NUM_ROWS` environment variable.
+        """
+
+    @property
+    def chunk_max_rows_if_unsorted(self) -> int:
+        """
+        Split a chunk if it contains >= rows than this threshold and one or more of its timelines are unsorted.
+
+        Equivalent to setting: `RERUN_CHUNK_MAX_ROWS_IF_UNSORTED` environment variable.
+        """
+
+    @chunk_max_rows_if_unsorted.setter
+    def chunk_max_rows_if_unsorted(self, value: int) -> None:
+        """
+        Split a chunk if it contains >= rows than this threshold and one or more of its timelines are unsorted.
+
+        Equivalent to setting: `RERUN_CHUNK_MAX_ROWS_IF_UNSORTED` environment variable.
+        """
+
+    @staticmethod
+    def DEFAULT() -> ChunkBatcherConfig:
+        """Default configuration, applicable to most use cases."""
+
+    @staticmethod
+    def LOW_LATENCY() -> ChunkBatcherConfig:
+        """Low-latency configuration, preferred when streaming directly to a viewer."""
+
+    @staticmethod
+    def ALWAYS() -> ChunkBatcherConfig:
+        """Always flushes ASAP."""
+
+    @staticmethod
+    def NEVER() -> ChunkBatcherConfig:
+        """Never flushes unless manually told to (or hitting one the builtin invariants)."""
+
 class PyMemorySinkStorage:
-    def concat_as_bytes(self, concat: Optional[PyMemorySinkStorage] = None) -> bytes:
+    def concat_as_bytes(self, concat: PyMemorySinkStorage | None = None) -> bytes:
         """
         Concatenate the contents of the [`MemorySinkStorage`] as bytes.
 
@@ -641,26 +750,55 @@ class PyMemorySinkStorage:
         """
 
 class PyBinarySinkStorage:
-    def read(self, *, flush: bool = True) -> bytes | None:
+    def read(self, *, flush: bool = True, flush_timeout_sec: float = 1e38) -> bytes | None:
         """
         Read the bytes from the binary sink.
 
-        If `flush` is `true`, the sink will be flushed before reading.
+        If `flush` is `True`, the sink will be flushed before reading.
+        If all the data was not successfully flushed within the given timeout,
+        an exception will be raised.
+
+        Parameters
+        ----------
+        flush:
+            If true (default), the stream will be flushed before reading.
+        flush_timeout_sec:
+            If `flush` is `True`, wait at most this many seconds.
+            If the timeout is reached, an error is raised.
+
         """
-    def flush(self) -> None:
-        """Flush the binary sink manually."""
+    def flush(self, *, timeout_sec: float = 1e38) -> None:
+        """
+        Flushes the binary sink and ensures that all logged messages have been encoded into the stream.
+
+        This will block until the flush is complete, or the timeout is reached, or an error occurs.
+
+        If all the data was not successfully flushed within the given timeout,
+        an exception will be raised.
+
+        Parameters
+        ----------
+        timeout_sec:
+            Wait at most this many seconds.
+            If the timeout is reached, an error is raised.
+
+        """
 
 #
 # init
 #
 
+def flush_and_cleanup_orphaned_recordings() -> None:
+    """Flush and then cleanup any orphaned recordings."""
+
 def new_recording(
     application_id: str,
-    recording_id: Optional[str] = None,
+    recording_id: str | None = None,
     make_default: bool = True,
     make_thread_default: bool = True,
     default_enabled: bool = True,
     send_properties: bool = True,
+    batcher_config: ChunkBatcherConfig | None = None,
 ) -> PyRecordingStream:
     """Create a new recording stream."""
 
@@ -685,7 +823,7 @@ def spawn(
     hide_welcome_screen: bool = False,
     detach_process: bool = True,
     executable_name: str = ...,
-    executable_path: Optional[str] = None,
+    executable_path: str | None = None,
     extra_args: list[str] = ...,
     extra_env: list[tuple[str, str]] = ...,
 ) -> None:
@@ -695,54 +833,54 @@ def spawn(
 # recordings
 #
 
-def get_application_id(recording: Optional[PyRecordingStream] = None) -> Optional[str]:
+def get_application_id(recording: PyRecordingStream | None = None) -> str | None:
     """Get the current recording stream's application ID."""
 
-def get_recording_id(recording: Optional[PyRecordingStream] = None) -> Optional[str]:
+def get_recording_id(recording: PyRecordingStream | None = None) -> str | None:
     """Get the current recording stream's recording ID."""
 
-def get_data_recording(recording: Optional[PyRecordingStream] = None) -> Optional[PyRecordingStream]:
+def get_data_recording(recording: PyRecordingStream | None = None) -> PyRecordingStream | None:
     """Returns the currently active data recording in the global scope, if any; fallbacks to the specified recording otherwise, if any."""
 
-def get_global_data_recording() -> Optional[PyRecordingStream]:
+def get_global_data_recording() -> PyRecordingStream | None:
     """Returns the currently active data recording in the global scope, if any."""
 
-def set_global_data_recording(recording: Optional[PyRecordingStream] = None) -> Optional[PyRecordingStream]:
+def set_global_data_recording(recording: PyRecordingStream | None = None) -> PyRecordingStream | None:
     """
     Replaces the currently active recording in the global scope with the specified one.
 
     Returns the previous one, if any.
     """
 
-def get_thread_local_data_recording() -> Optional[PyRecordingStream]:
+def get_thread_local_data_recording() -> PyRecordingStream | None:
     """Returns the currently active data recording in the thread-local scope, if any."""
 
-def set_thread_local_data_recording(recording: Optional[PyRecordingStream] = None) -> Optional[PyRecordingStream]:
+def set_thread_local_data_recording(recording: PyRecordingStream | None = None) -> PyRecordingStream | None:
     """
     Replaces the currently active recording in the thread-local scope with the specified one.
 
     Returns the previous one, if any.
     """
 
-def get_blueprint_recording(overrides: Optional[PyRecordingStream] = None) -> Optional[PyRecordingStream]:
+def get_blueprint_recording(overrides: PyRecordingStream | None = None) -> PyRecordingStream | None:
     """Returns the currently active blueprint recording in the global scope, if any; fallbacks to the specified recording otherwise, if any."""
 
-def get_global_blueprint_recording() -> Optional[PyRecordingStream]:
+def get_global_blueprint_recording() -> PyRecordingStream | None:
     """Returns the currently active blueprint recording in the global scope, if any."""
 
-def set_global_blueprint_recording(recording: Optional[PyRecordingStream] = None) -> Optional[PyRecordingStream]:
+def set_global_blueprint_recording(recording: PyRecordingStream | None = None) -> PyRecordingStream | None:
     """
     Replaces the currently active recording in the global scope with the specified one.
 
     Returns the previous one, if any.
     """
 
-def get_thread_local_blueprint_recording() -> Optional[PyRecordingStream]:
+def get_thread_local_blueprint_recording() -> PyRecordingStream | None:
     """Returns the currently active blueprint recording in the thread-local scope, if any."""
 
 def set_thread_local_blueprint_recording(
-    recording: Optional[PyRecordingStream] = None,
-) -> Optional[PyRecordingStream]:
+    recording: PyRecordingStream | None = None,
+) -> PyRecordingStream | None:
     """
     Replaces the currently active recording in the thread-local scope with the specified one.
 
@@ -799,14 +937,17 @@ class ComponentDescriptor:
     def or_with_overrides(self, archetype: str | None = None, component_type: str | None = None) -> ComponentDescriptor:
         """Sets `archetype` and `component_type` to the given one iff it's not already set."""
 
+    def with_builtin_archetype(self, archetype: str) -> ComponentDescriptor:
+        """Sets `archetype` in a format similar to built-in archetypes."""
+
 #
 # sinks
 #
 
-def is_enabled(recording: Optional[PyRecordingStream] = None) -> bool:
+def is_enabled(recording: PyRecordingStream | None = None) -> bool:
     """Whether the recording stream enabled."""
 
-def binary_stream(recording: Optional[PyRecordingStream] = None) -> Optional[PyBinarySinkStorage]:
+def binary_stream(recording: PyRecordingStream | None = None) -> PyBinarySinkStorage | None:
     """Create a new binary stream sink, and return the associated binary stream."""
 
 class GrpcSink:
@@ -816,7 +957,7 @@ class GrpcSink:
     Connect the recording stream to a remote Rerun Viewer on the given URL.
     """
 
-    def __init__(self, url: str | None = None, flush_timeout_sec: float | None = None) -> None:
+    def __init__(self, url: str | None = None) -> None:
         """
         Initialize a gRPC sink.
 
@@ -829,10 +970,6 @@ class GrpcSink:
             and the pathname must be `/proxy`.
 
             The default is `rerun+http://127.0.0.1:9876/proxy`.
-        flush_timeout_sec:
-            The minimum time the SDK will wait during a flush before potentially
-            dropping data if progress is not being made. Passing `None` indicates no timeout,
-            and can cause a call to `flush` to block indefinitely.
 
         """
 
@@ -856,21 +993,20 @@ class FileSink:
 
 def set_sinks(
     sinks: list[Any],
-    default_blueprint: Optional[PyMemorySinkStorage] = None,
-    recording: Optional[PyRecordingStream] = None,
+    default_blueprint: PyMemorySinkStorage | None = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Stream data to multiple sinks."""
 
 def connect_grpc(
-    url: Optional[str],
-    flush_timeout_sec: Optional[float] = ...,
-    default_blueprint: Optional[PyMemorySinkStorage] = None,
-    recording: Optional[PyRecordingStream] = None,
+    url: str | None,
+    default_blueprint: PyMemorySinkStorage | None = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Connect the recording stream to a remote Rerun Viewer on the given URL."""
 
 def connect_grpc_blueprint(
-    url: Optional[str],
+    url: str | None,
     make_active: bool,
     make_default: bool,
     blueprint_stream: PyRecordingStream,
@@ -879,8 +1015,8 @@ def connect_grpc_blueprint(
 
 def save(
     path: str,
-    default_blueprint: Optional[PyMemorySinkStorage] = None,
-    recording: Optional[PyRecordingStream] = None,
+    default_blueprint: PyMemorySinkStorage | None = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Save the recording stream to a file."""
 
@@ -888,17 +1024,17 @@ def save_blueprint(path: str, blueprint_stream: PyRecordingStream) -> None:
     """Special binding for directly savings a blueprint stream to a file."""
 
 def stdout(
-    default_blueprint: Optional[PyMemorySinkStorage] = None,
-    recording: Optional[PyRecordingStream] = None,
+    default_blueprint: PyMemorySinkStorage | None = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Save to stdout."""
 
-def memory_recording(recording: Optional[PyRecordingStream] = None) -> Optional[PyMemorySinkStorage]:
+def memory_recording(recording: PyRecordingStream | None = None) -> PyMemorySinkStorage | None:
     """Create an in-memory rrd file."""
 
 def set_callback_sink(
     callback: Callable[[bytes], Any],
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Set callback sink."""
 
@@ -906,15 +1042,16 @@ def set_callback_sink_blueprint(
     callback: Callable[[bytes], Any],
     make_active: bool,
     make_default: bool,
-    blueprint_stream: Optional[PyRecordingStream],
+    blueprint_stream: PyRecordingStream | None,
 ) -> None:
     """Set callback sink for blueprint."""
 
 def serve_grpc(
-    grpc_port: Optional[int],
+    grpc_port: int | None,
     server_memory_limit: str,
-    default_blueprint: Optional[PyMemorySinkStorage] = None,
-    recording: Optional[PyRecordingStream] = None,
+    newest_first: bool = False,
+    default_blueprint: PyMemorySinkStorage | None = None,
+    recording: PyRecordingStream | None = None,
 ) -> str:
     """
     Spawn a gRPC server which an SDK or Viewer can connect to.
@@ -922,9 +1059,7 @@ def serve_grpc(
     Returns the URI of the server so you can connect the viewer to it.
     """
 
-def serve_web_viewer(
-    web_port: Optional[int] = None, open_browser: bool = True, connect_to: Optional[str] = None
-) -> None:
+def serve_web_viewer(web_port: int | None = None, open_browser: bool = True, connect_to: str | None = None) -> None:
     """
     Serve a web-viewer over HTTP.
 
@@ -933,22 +1068,22 @@ def serve_web_viewer(
 
 def serve_web(
     open_browser: bool,
-    web_port: Optional[int],
-    grpc_port: Optional[int],
+    web_port: int | None,
+    grpc_port: int | None,
     server_memory_limit: str,
-    default_blueprint: Optional[PyMemorySinkStorage] = None,
-    recording: Optional[PyRecordingStream] = None,
+    default_blueprint: PyMemorySinkStorage | None = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Serve a web-viewer AND host a gRPC server."""
 
-def disconnect(recording: Optional[PyRecordingStream] = None) -> None:
+def disconnect(recording: PyRecordingStream | None = None) -> None:
     """
     Disconnect from remote server (if any).
 
     Subsequent log messages will be buffered and either sent on the next call to `connect_grpc` or `spawn`.
     """
 
-def flush(blocking: bool, recording: Optional[PyRecordingStream] = None) -> None:
+def flush(blocking: bool, recording: PyRecordingStream | None = None) -> None:
     """Block until outstanding data has been flushed to the sink."""
 
 #
@@ -958,43 +1093,43 @@ def flush(blocking: bool, recording: Optional[PyRecordingStream] = None) -> None
 def set_time_sequence(
     timeline: str,
     sequence: int,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Set the current time for this thread as an integer sequence."""
 
 def set_time_duration_nanos(
     timeline: str,
     nanos: int,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Set the current duration for this thread in nanoseconds."""
 
 def set_time_timestamp_nanos_since_epoch(
     timeline: str,
     nanos: int,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Set the current time for this thread in nanoseconds."""
 
 def send_recording_name(
     name: str,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Send the name of the recording."""
 
 def send_recording_start_time_nanos(
     nanos: int,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Send the start time of the recording."""
 
 def disable_timeline(
     timeline: str,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Clear time information for the specified timeline on this thread."""
 
-def reset_time(recording: Optional[PyRecordingStream] = None) -> None:
+def reset_time(recording: PyRecordingStream | None = None) -> None:
     """Clear all timeline information on this thread."""
 
 #
@@ -1005,7 +1140,7 @@ def log_arrow_msg(
     entity_path: str,
     components: dict[Any, Any],
     static_: bool,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Log an arrow message."""
 
@@ -1013,7 +1148,7 @@ def send_arrow_chunk(
     entity_path: str,
     timelines: dict[Any, Any],
     components: dict[Any, Any],
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """
     Directly send an arrow chunk to the recording stream.
@@ -1030,18 +1165,18 @@ def send_arrow_chunk(
 
 def log_file_from_path(
     file_path: str | os.PathLike[str],
-    entity_path_prefix: Optional[str] = None,
+    entity_path_prefix: str | None = None,
     static_: bool = False,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Log a file by path."""
 
 def log_file_from_contents(
     file_path: str | os.PathLike[str],
     file_contents: bytes,
-    entity_path_prefix: Optional[str] = None,
+    entity_path_prefix: str | None = None,
     static_: bool = False,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Log a file by contents."""
 
@@ -1049,11 +1184,11 @@ def send_blueprint(
     blueprint: PyMemorySinkStorage,
     make_active: bool = False,
     make_default: bool = True,
-    recording: Optional[PyRecordingStream] = None,
+    recording: PyRecordingStream | None = None,
 ) -> None:
     """Send a blueprint to the given recording stream."""
 
-def send_recording(rrd: Recording, recording: Optional[PyRecordingStream] = None) -> None:
+def send_recording(rrd: Recording, recording: PyRecordingStream | None = None) -> None:
     """
     Send all chunks from a [`PyRecording`] to the given recording stream.
 
@@ -1091,9 +1226,7 @@ def new_entity_path(parts: list[str]) -> str:
 def new_property_entity_path(parts: list[str]) -> str:
     """Create a property entity path."""
 
-def asset_video_read_frame_timestamps_nanos(
-    video_bytes_arrow_array: Any, media_type: Optional[str] = None
-) -> list[int]:
+def asset_video_read_frame_timestamps_nanos(video_bytes_arrow_array: Any, media_type: str | None = None) -> list[int]:
     """
     Reads the timestamps of all frames in a video asset.
 
@@ -1160,6 +1293,17 @@ class Entry:
     def delete(self) -> None:
         """Delete this entry from the catalog."""
 
+    def update(self, *, name: str | None = None) -> None:
+        """
+        Update this entry's properties.
+
+        Parameters
+        ----------
+        name : str | None
+            New name for the entry
+
+        """
+
 class DatasetEntry(Entry):
     @property
     def manifest_url(self) -> str:
@@ -1190,10 +1334,50 @@ class DatasetEntry(Entry):
     def partition_table(self) -> DataFusionTable:
         """Return the partition table as a Datafusion table provider."""
 
-    def partition_url(self, partition_id: str) -> str:
-        """Return the URL for the given partition."""
+    def partition_url(
+        self,
+        partition_id: str,
+        timeline: str | None = None,
+        start: datetime | int | None = None,
+        end: datetime | int | None = None,
+    ) -> str:
+        """
+        Return the URL for the given partition.
 
-    def register(self, recording_uri: str, timeout_secs: int = 60) -> str:
+        Parameters
+        ----------
+        partition_id: str
+            The ID of the partition to get the URL for.
+
+        timeline: str | None
+            The name of the timeline to display.
+
+        start: int | datetime | None
+            The start time for the partition.
+            Integer for ticks, or datetime/nanoseconds for timestamps.
+
+        end: int | datetime | None
+            The end time for the partition.
+            Integer for ticks, or datetime/nanoseconds for timestamps.
+
+        Examples
+        --------
+        # With ticks
+        >>> start_tick, end_time = 0, 10
+        >>> dataset.partition_url("some_id", "log_tick", start_tick, end_time)
+
+        # With timestamps
+        >>> start_time, end_time = datetime.now() - timedelta(seconds=4), datetime.now()
+        >>> dataset.partition_url("some_id", "real_time", start_time, end_time)
+
+        Returns
+        -------
+        str
+            The URL for the given partition.
+
+        """
+
+    def register(self, recording_uri: str, *, recording_layer: str = "base", timeout_secs: int = 60) -> str:
         """
         Register a RRD URI to the dataset and wait for completion.
 
@@ -1203,7 +1387,10 @@ class DatasetEntry(Entry):
         Parameters
         ----------
         recording_uri: str
-            The URI of the RRD to register
+            The URI of the RRD to register.
+
+        recording_layer: str
+            The layer to which the recording will be registered to.
 
         timeout_secs: int
             The timeout after which this method raises a `TimeoutError` if the task is not completed.
@@ -1215,7 +1402,7 @@ class DatasetEntry(Entry):
 
         """
 
-    def register_batch(self, recording_uris: list[str]) -> Tasks:
+    def register_batch(self, recording_uris: list[str], *, recording_layers: list[str] = []) -> Tasks:
         """
         Register a batch of RRD URIs to the dataset and return a handle to the tasks.
 
@@ -1225,7 +1412,14 @@ class DatasetEntry(Entry):
         Parameters
         ----------
         recording_uris: list[str]
-            The URIs of the RRDs to register
+            The URIs of the RRDs to register.
+
+        recording_layers: list[str]
+            The layers to which the recordings will be registered to:
+            * When empty, this defaults to `["base"]`.
+            * If longer than `recording_uris`, `recording_layers` will be truncated.
+            * If shorter than `recording_uris`, `recording_layers` will be extended by repeating its last value.
+              I.e. an empty `recording_layers` will result in `"base"` begin repeated `len(recording_layers)` times.
 
         """
 
@@ -1238,7 +1432,6 @@ class DatasetEntry(Entry):
         index: str | None,
         contents: Any,
         include_semantically_empty_columns: bool = False,
-        include_indicator_columns: bool = False,
         include_tombstone_columns: bool = False,
     ) -> DataframeQueryView:
         """
@@ -1273,10 +1466,6 @@ class DatasetEntry(Entry):
             Whether to include columns that are semantically empty, by default `False`.
 
             Semantically empty columns are components that are `null` or empty `[]` for every row in the recording.
-        include_indicator_columns : bool, optional
-            Whether to include indicator columns, by default `False`.
-
-            Indicator columns are components used to represent the presence of an archetype within an entity.
         include_tombstone_columns : bool, optional
             Whether to include tombstone columns, by default `False`.
 
@@ -1326,6 +1515,16 @@ class DatasetEntry(Entry):
     ) -> DataFusionTable:
         """Search the dataset using a vector search query."""
 
+    def do_maintenance(
+        self,
+        optimize_indexes: bool = False,
+        retrain_indexes: bool = False,
+        compact_fragments: bool = False,
+        cleanup_before: datetime | None = None,
+        unsafe_allow_recent_cleanup: bool = False,
+    ) -> None:
+        """Perform maintenance tasks on the datasets."""
+
 class TableEntry(Entry):
     """
     A table entry in the catalog.
@@ -1336,8 +1535,11 @@ class TableEntry(Entry):
     def __datafusion_table_provider__(self) -> Any:
         """Returns a DataFusion table provider capsule."""
 
-    def df(self) -> Any:
+    def df(self) -> dfn.DataFrame:
         """Registers the table with the DataFusion context and return a DataFrame."""
+
+    def to_arrow_reader(self) -> pa.RecordBatchReader:
+        """Convert this table to a [`pyarrow.RecordBatchReader`][]."""
 
 class DataframeQueryView:
     def filter_partition_id(self, partition_id: str, *args: Iterable[str]) -> Self:
@@ -1500,12 +1702,20 @@ class DataframeQueryView:
 
         """
 
-    def df(self) -> Any:
+    def df(self) -> dfn.DataFrame:
         """Register this view to the global DataFusion context and return a DataFrame."""
+
+    def to_arrow_reader(self) -> pa.RecordBatchReader:
+        """Convert this view to a [`pyarrow.RecordBatchReader`][]."""
 
 # TODO(ab): internal object, we need auto-gen stubs for these.
 class CatalogClientInternal:
     def __init__(self, addr: str, token: str | None = None) -> None: ...
+
+    # ---
+
+    @staticmethod
+    def datafusion_major_version() -> int: ...
 
     # ---
 
@@ -1527,7 +1737,12 @@ class CatalogClientInternal:
     # ---
 
     def create_dataset(self, name: str) -> DatasetEntry: ...
-    def ctx(self) -> Any: ...
+    def register_table(self, name: str, url: str) -> TableEntry: ...
+    def ctx(self) -> dfn.SessionContext: ...
+
+    # ---
+
+    def do_global_maintenance(self) -> None: ...
 
     # ---
 
@@ -1537,8 +1752,11 @@ class DataFusionTable:
     def __datafusion_table_provider__(self) -> Any:
         """Returns a DataFusion table provider capsule."""
 
-    def df(self) -> Any:
+    def df(self) -> dfn.DataFrame:
         """Register this view to the global DataFusion context and return a DataFrame."""
+
+    def to_arrow_reader(self) -> pa.RecordBatchReader:
+        """Convert this table to a [`pyarrow.RecordBatchReader`][]."""
 
     @property
     def name(self) -> str:

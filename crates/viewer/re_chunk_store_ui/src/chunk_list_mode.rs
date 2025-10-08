@@ -1,14 +1,14 @@
 use std::ops::RangeInclusive;
 
 use re_chunk_store::ChunkStore;
-use re_log_types::{EntityPath, ResolvedTimeRange, TimeInt, Timeline, TimestampFormat};
+use re_log_types::{AbsoluteTimeRange, EntityPath, TimeInt, Timeline, TimestampFormat};
 use re_types::ComponentDescriptor;
 use re_ui::{TimeDragValue, UiExt as _};
 
 #[derive(Debug)]
 pub(crate) enum ChunkListQueryMode {
     LatestAt(TimeInt),
-    Range(ResolvedTimeRange),
+    Range(AbsoluteTimeRange),
 }
 
 #[derive(Debug, Default)]
@@ -35,7 +35,7 @@ impl ChunkListMode {
     ) -> Option<()> {
         let all_timelines = chunk_store.timelines();
         let all_entities = chunk_store.all_entities_sorted();
-        let all_components = chunk_store.all_components();
+        let all_components = chunk_store.all_components_sorted();
 
         let current_timeline = match self {
             Self::All => all_timelines.values().next().copied()?,
@@ -100,7 +100,7 @@ impl ChunkListMode {
                 {
                     *self = Self::Query {
                         timeline: current_timeline,
-                        query: ChunkListQueryMode::Range(ResolvedTimeRange::EVERYTHING),
+                        query: ChunkListQueryMode::Range(AbsoluteTimeRange::EVERYTHING),
                         entity_path: current_entity.clone(),
                         component_descr: current_component.clone(),
                     };

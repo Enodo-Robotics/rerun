@@ -14,8 +14,43 @@ from rerun_bindings import (
     VectorDistanceMetric as VectorDistanceMetric,
 )
 
+from .error_utils import RerunIncompatibleDependencyVersionError, RerunMissingDependencyError
+
 if TYPE_CHECKING:
     import datafusion
+
+
+# Known FFI compatible releases of Datafusion.
+DATAFUSION_MAJOR_VERSION_COMPATIBILITY_SETS = [
+    {47, 48},
+]
+
+
+def _are_datafusion_versions_compatible(v1: int, v2: int) -> bool:
+    """
+    Determine compatibility between two DataFusion versions.
+
+    In some rare cases, we may need to have a mismatch, e.g. in some deployed Rerun Cloud docker images. So we have a
+    carefully crafted compatibility allowlist for known-to-be-ffi-compatible DataFusion releases.
+    """
+
+    if v1 == v2:
+        return True
+
+    for compat_set in DATAFUSION_MAJOR_VERSION_COMPATIBILITY_SETS:
+        if v1 in compat_set and v2 in compat_set:
+            return True
+
+    return False
+
+
+def _compatible_datafusion_version(version: int) -> list[int]:
+    """Returns a list of compatible DataFusion versions for the given version."""
+
+    for compat_set in DATAFUSION_MAJOR_VERSION_COMPATIBILITY_SETS:
+        if version in compat_set:
+            return sorted(compat_set)
+    return [version]
 
 
 class CatalogClient:
@@ -27,12 +62,23 @@ class CatalogClient:
     """
 
     def __init__(self, address: str, token: str | None = None) -> None:
+        from importlib.metadata import version
         from importlib.util import find_spec
 
         if find_spec("datafusion") is None:
-            raise ImportError(
-                "The 'datafusion' package is required to use `CatalogClient`. "
-                "You can install it with `pip install datafusion`."
+            raise RerunMissingDependencyError("datafusion", "datafusion")
+
+        # Check that we have a compatible version of datafusion.
+        # We need a version match because the FFI is currently unstable, see:
+        # https://github.com/apache/datafusion/issues/17374
+
+        expected_df_version = CatalogClientInternal.datafusion_major_version()
+        datafusion_version = version("datafusion")
+        datafusion_major_version = int(datafusion_version.split(".")[0])
+
+        if not _are_datafusion_versions_compatible(datafusion_major_version, expected_df_version):
+            raise RerunIncompatibleDependencyVersionError(
+                "datafusion", datafusion_version, _compatible_datafusion_version(expected_df_version)
             )
 
         self._raw_client = CatalogClientInternal(address, token)
@@ -116,6 +162,26 @@ class CatalogClient:
     def create_dataset(self, name: str) -> DatasetEntry:
         """Creates a new dataset with the given name."""
         return self._raw_client.create_dataset(name)
+
+    def register_table(self, name: str, url: str) -> TableEntry:
+        """
+        Registers a foreign Lance table (identified by its URL) as a new table entry with the given name.
+
+        Parameters
+        ----------
+        name
+            The name of the table entry to create. It must be unique within all entries in the catalog. An exception
+            will be raised if an entry with the same name already exists.
+
+        url
+            The URL of the Lance table to register.
+
+        """
+        return self._raw_client.register_table(name, url)
+
+    def do_global_maintenance(self) -> None:
+        """Perform maintenance tasks on the whole system."""
+        return self._raw_client.do_global_maintenance()
 
     @property
     def ctx(self) -> datafusion.SessionContext:

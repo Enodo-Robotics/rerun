@@ -81,46 +81,26 @@ impl ViewCoordinates {
             component_type: Some("rerun.components.ViewCoordinates".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.ViewCoordinatesIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [ViewCoordinates::descriptor_xyz()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [ViewCoordinates::descriptor_xyz()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [ViewCoordinates::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            ViewCoordinates::descriptor_xyz(),
-            ViewCoordinates::descriptor_indicator(),
-        ]
-    });
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [ViewCoordinates::descriptor_xyz()]);
 
 impl ViewCoordinates {
-    /// The total number of components in the archetype: 1 required, 1 recommended, 0 optional
-    pub const NUM_COMPONENTS: usize = 2usize;
+    /// The total number of components in the archetype: 1 required, 0 recommended, 0 optional
+    pub const NUM_COMPONENTS: usize = 1usize;
 }
 
-/// Indicator component for the [`ViewCoordinates`] [`::re_types_core::Archetype`]
-pub type ViewCoordinatesIndicator = ::re_types_core::GenericIndicatorComponent<ViewCoordinates>;
-
 impl ::re_types_core::Archetype for ViewCoordinates {
-    type Indicator = ViewCoordinatesIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.ViewCoordinates".into()
@@ -129,14 +109,6 @@ impl ::re_types_core::Archetype for ViewCoordinates {
     #[inline]
     fn display_name() -> &'static str {
         "View coordinates"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        ViewCoordinatesIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -177,10 +149,7 @@ impl ::re_types_core::AsComponents for ViewCoordinates {
     #[inline]
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
-        [Some(Self::indicator()), self.xyz.clone()]
-            .into_iter()
-            .flatten()
-            .collect()
+        std::iter::once(self.xyz.clone()).flatten().collect()
     }
 }
 
@@ -235,12 +204,7 @@ impl ViewCoordinates {
             .xyz
             .map(|xyz| xyz.partitioned(_lengths.clone()))
             .transpose()?];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -253,7 +217,7 @@ impl ViewCoordinates {
     ) -> SerializationResult<impl Iterator<Item = ::re_types_core::SerializedComponentColumn>> {
         let len_xyz = self.xyz.as_ref().map(|b| b.array.len());
         let len = None.or(len_xyz).unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The directions of the [x, y, z] axes.

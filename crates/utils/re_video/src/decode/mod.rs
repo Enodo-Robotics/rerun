@@ -47,7 +47,7 @@
 //!   * we have to keep in mind the EOTF that our screen at the other end will use which for today's renderpipeline is always sRGB
 //!     (meaning it's a 2.2 gamma curve with a small linear part)
 //!   * Similar to the primaries, BT.709 uses a _similar_ transfer function as sRGB, but not exactly the same
-//!      <https://www.image-engineering.de/library/technotes/714-color-spaces-rec-709-vs-srgb>
+//!     <https://www.image-engineering.de/library/technotes/714-color-spaces-rec-709-vs-srgb>
 //!        * There's reason to believe players just ignore this:
 //!           * From a [VLC issue](https://code.videolan.org/videolan/vlc/-/issues/26999):
 //!              > We do not support transfers or primaries anyway, so it does not matter
@@ -83,19 +83,18 @@ mod async_decoder_wrapper;
 mod av1;
 
 #[cfg(with_ffmpeg)]
-mod ffmpeg_h264;
+mod ffmpeg_cli;
 
 #[cfg(with_ffmpeg)]
-pub use ffmpeg_h264::{
+pub use ffmpeg_cli::FFmpegCliDecoder;
+
+#[cfg(with_ffmpeg)]
+pub use ffmpeg_cli::{
     Error as FFmpegError, FFmpegVersion, FFmpegVersionParseError, ffmpeg_download_url,
 };
 
 #[cfg(target_arch = "wasm32")]
 mod webcodecs;
-
-mod gop_detection;
-
-pub use gop_detection::{DetectGopStartError, GopStartDetection, detect_gop_start};
 
 use crate::{SampleIndex, Time, VideoDataDescription};
 
@@ -104,22 +103,16 @@ pub enum DecodeError {
     #[error("Unsupported codec: {0}")]
     UnsupportedCodec(String),
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[error("Native AV1 video decoding not supported in debug builds.")]
-    NoNativeAv1Debug,
-
     #[cfg(with_dav1d)]
     #[error("dav1d: {0}")]
     Dav1d(#[from] dav1d::Error),
 
-    #[cfg(with_dav1d)]
     #[error("To enabled native AV1 decoding, compile Rerun with the `nasm` feature enabled.")]
     Dav1dWithoutNasm,
 
     #[error(
         "Rerun does not yet support native AV1 decoding on Linux ARM64. See https://github.com/rerun-io/rerun/issues/7755"
     )]
-    #[cfg(linux_arm64)]
     NoDav1dOnLinuxArm64,
 
     #[cfg(target_arch = "wasm32")]
@@ -134,11 +127,35 @@ pub enum DecodeError {
     BadBitsPerComponent(usize),
 }
 
+impl DecodeError {
+    pub fn should_request_more_frames(&self) -> bool {
+        // Decoders often (not always!) recover from errors and will succeed eventually.
+        // Gotta keep trying!
+        match self {
+            // Unsupported codec / decoder not available:
+            Self::UnsupportedCodec(_) | Self::Dav1dWithoutNasm | Self::NoDav1dOnLinuxArm64 => false,
+
+            // Issue with AV1 decoding.
+            #[cfg(with_dav1d)]
+            Self::Dav1d(_) => true,
+
+            // Issue with WebCodecs decoding.
+            #[cfg(target_arch = "wasm32")]
+            Self::WebDecoder(_) => true,
+
+            // Issue with FFmpeg decoding.
+            #[cfg(with_ffmpeg)]
+            Self::Ffmpeg(err) => err.should_request_more_frames(),
+
+            // Unsupported format.
+            Self::BadBitsPerComponent(_) => false,
+        }
+    }
+}
+
 pub type Result<T = (), E = DecodeError> = std::result::Result<T, E>;
 
-/// Callback for decoding a single frame, called by decoders upon decoding a frame or hitting an error.
-#[allow(dead_code)] // May be unused in some configurations where we don't have any decoder.
-pub type OutputCallback = dyn Fn(Result<Frame>) + Send + Sync;
+pub type FrameResult = Result<Frame>;
 
 /// Interface for an asynchronous video decoder.
 ///
@@ -152,6 +169,13 @@ pub trait AsyncDecoder: Send + Sync {
     /// Called after submitting the last chunk.
     ///
     /// Should flush all pending frames.
+    /// If you plan on sending more chunks after calling `end_of_video`,
+    /// you MUST call [`Self::reset`] FIRST.
+    ///
+    /// Implementation note:
+    /// As of writing there's two decoders that have requirements on what happens for new frames after `end_of_video`
+    /// * WebCodec: The next submitted chunk has to be a key frame.
+    /// * FFmpeg-executable: We've shut down stdin, thus we need to restart the process. Doing this without the full context of `reset` is not possible right now.
     fn end_of_video(&mut self) -> Result<()> {
         Ok(())
     }
@@ -183,7 +207,7 @@ pub fn new_decoder(
     debug_name: &str,
     video: &crate::VideoDataDescription,
     decode_settings: &DecodeSettings,
-    on_output: impl Fn(Result<Frame>) + Send + Sync + 'static,
+    output_sender: crossbeam::channel::Sender<FrameResult>,
 ) -> Result<Box<dyn AsyncDecoder>> {
     #![allow(unused_variables, clippy::needless_return)] // With some feature flags
 
@@ -198,7 +222,7 @@ pub fn new_decoder(
     return Ok(Box::new(webcodecs::WebVideoDecoder::new(
         video,
         decode_settings.hw_acceleration,
-        on_output,
+        output_sender,
     )?));
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -212,29 +236,23 @@ pub fn new_decoder(
 
             #[cfg(with_dav1d)]
             {
-                if cfg!(debug_assertions) {
-                    return Err(DecodeError::NoNativeAv1Debug); // because debug builds of rav1d is EXTREMELY slow
-                }
-
                 re_log::trace!("Decoding AV1…");
                 return Ok(Box::new(async_decoder_wrapper::AsyncDecoderWrapper::new(
                     debug_name.to_owned(),
                     Box::new(av1::SyncDav1dDecoder::new(debug_name.to_owned())?),
-                    on_output,
+                    output_sender,
                 )));
             }
         }
 
         #[cfg(with_ffmpeg)]
-        crate::VideoCodec::H264 => {
-            re_log::trace!("Decoding H.264…");
-            Ok(Box::new(ffmpeg_h264::FFmpegCliH264Decoder::new(
-                debug_name.to_owned(),
-                &video.encoding_details,
-                on_output,
-                decode_settings.ffmpeg_path.clone(),
-            )?))
-        }
+        crate::VideoCodec::H264 | crate::VideoCodec::H265 => Ok(Box::new(FFmpegCliDecoder::new(
+            debug_name.to_owned(),
+            &video.encoding_details,
+            output_sender,
+            decode_settings.ffmpeg_path.clone(),
+            &video.codec,
+        )?)),
 
         _ => Err(DecodeError::UnsupportedCodec(
             video.human_readable_codec_string(),
@@ -304,6 +322,19 @@ pub struct FrameContent {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+impl re_byte_size::SizeBytes for FrameContent {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            data,
+            width: _,
+            height: _,
+            format: _,
+        } = self;
+        data.heap_size_bytes()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl FrameContent {
     pub fn width(&self) -> u32 {
         self.width
@@ -362,9 +393,11 @@ pub struct FrameInfo {
     /// None = unknown.
     pub frame_nr: Option<u32>,
 
-    /// Time at which this sample appears in the frame stream, in time units.
+    /// Time at which this frame appears in the frame stream, in time units.
     ///
     /// The frame should be shown at this time.
+    /// We expect this timestamp to be identical with a the presentation timestamp of the [`crate::Chunk`]
+    /// which is associated with this frame.
     /// Often synonymous with `composition_timestamp`.
     ///
     /// `decode_timestamp <= presentation_timestamp`
@@ -399,6 +432,13 @@ impl FrameInfo {
 pub struct Frame {
     pub content: FrameContent,
     pub info: FrameInfo,
+}
+
+impl re_byte_size::SizeBytes for Frame {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self { content, info: _ } = self;
+        content.heap_size_bytes()
+    }
 }
 
 /// Pixel format/layout used by [`FrameContent::data`].

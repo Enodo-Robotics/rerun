@@ -8,9 +8,10 @@ use re_log_types::{
     EntityPath, TimeInt, TimePoint, TimeType, Timeline, build_frame_nr,
     example_components::{MyPoint, MyPoints},
 };
+use re_test_context::TestContext;
 use re_time_panel::TimePanel;
 use re_types::archetypes::Points2D;
-use re_viewer_context::{CollapseScope, TimeView, blueprint_timeline, test_context::TestContext};
+use re_viewer_context::{CollapseScope, TimeView, blueprint_timeline};
 use re_viewport_blueprint::ViewportBlueprint;
 
 #[test]
@@ -282,7 +283,7 @@ fn run_time_panel_and_save_snapshot(
                     re_context_menu::collapse_expand::collapse_expand_instance_path(
                         viewer_ctx,
                         viewer_ctx.recording(),
-                        &InstancePath::entity_all("/".into()),
+                        &InstancePath::entity_all("/"),
                         CollapseScope::StreamsTree,
                         true,
                     );

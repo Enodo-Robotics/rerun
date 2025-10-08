@@ -48,7 +48,7 @@ def setup_camera_input(video_device: str | None = None) -> av.container.InputCon
         return av.open(f"video={video_device}", format="dshow")
     else:
         if video_device is None:
-            video_device = "0"
+            video_device = "/dev/video0"
 
         return av.open(video_device, format="v4l2")
 
@@ -58,6 +58,8 @@ def setup_output_stream(width: int, height: int) -> av.video.VideoStream:
 
     output_container = av.open("/dev/null", "w", format="h264")  # Use AnnexB H.264 stream.
     output_stream = output_container.add_stream("libx264")
+    # Type narrowing
+    assert isinstance(output_stream, av.video.stream.VideoStream)
     output_stream.width = width
     output_stream.height = height
 

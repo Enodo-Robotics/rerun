@@ -35,10 +35,7 @@ mod tuid;
 mod view;
 
 pub use self::{
-    archetype::{
-        Archetype, ArchetypeName, ArchetypeReflectionMarker, ComponentIdentifier,
-        GenericIndicatorComponent, NamedIndicatorComponent,
-    },
+    archetype::{Archetype, ArchetypeName, ArchetypeReflectionMarker, ComponentIdentifier},
     arrow_string::ArrowString,
     as_components::AsComponents,
     component_batch::{ComponentBatch, SerializedComponentBatch, SerializedComponentColumn},
@@ -178,30 +175,4 @@ pub fn try_serialize_field<L: Loggable>(
             None
         }
     }
-}
-
-/// Internal serialization helper for code-generated archetypes.
-///
-/// This generates a correctly sized [`SerializedComponentColumn`] for a given indicator, where the
-/// specified `num_rows` value represents the number of rows in the column.
-#[doc(hidden)] // public so we can access it from re_types too
-pub fn indicator_column<A: Archetype>(
-    num_rows: usize,
-) -> SerializationResult<SerializedComponentColumn> {
-    let SerializedComponentColumn {
-        list_array,
-        descriptor,
-    } = A::indicator().into();
-
-    let (field, _offsets, values, _nulls) = list_array.into_parts();
-
-    let offsets = arrow::buffer::OffsetBuffer::new_zeroed(num_rows);
-    let nulls = None;
-
-    arrow::array::ListArray::try_new(field, offsets, values, nulls)
-        .map(|list_array| SerializedComponentColumn {
-            list_array,
-            descriptor,
-        })
-        .map_err(Into::into)
 }

@@ -13,6 +13,8 @@
 //! cargo run-wasm --example depth_cloud
 //! ```
 
+#![expect(clippy::disallowed_methods)] // allow hardcoded colors
+
 use std::f32::consts::TAU;
 
 use glam::Vec3;
@@ -125,13 +127,16 @@ impl RenderDepthClouds {
                 pixels_per_point,
                 ..Default::default()
             },
-        );
+        )?;
 
         let command_buffer = view_builder
-            .queue_draw(GenericSkyboxDrawData::new(re_ctx, Default::default()))
-            .queue_draw(point_cloud_draw_data)
-            .queue_draw(frame_draw_data)
-            .queue_draw(image_draw_data)
+            .queue_draw(
+                re_ctx,
+                GenericSkyboxDrawData::new(re_ctx, Default::default()),
+            )
+            .queue_draw(re_ctx, point_cloud_draw_data)
+            .queue_draw(re_ctx, frame_draw_data)
+            .queue_draw(re_ctx, image_draw_data)
             .draw(re_ctx, re_renderer::Rgba::TRANSPARENT)?;
 
         Ok(framework::ViewDrawResult {
@@ -203,13 +208,16 @@ impl RenderDepthClouds {
                 pixels_per_point,
                 ..Default::default()
             },
-        );
+        )?;
 
         let command_buffer = view_builder
-            .queue_draw(GenericSkyboxDrawData::new(re_ctx, Default::default()))
-            .queue_draw(depth_cloud_draw_data)
-            .queue_draw(frame_draw_data)
-            .queue_draw(image_draw_data)
+            .queue_draw(
+                re_ctx,
+                GenericSkyboxDrawData::new(re_ctx, Default::default()),
+            )
+            .queue_draw(re_ctx, depth_cloud_draw_data)
+            .queue_draw(re_ctx, frame_draw_data)
+            .queue_draw(re_ctx, image_draw_data)
             .draw(re_ctx, re_renderer::Rgba::TRANSPARENT)?;
 
         Ok(framework::ViewDrawResult {
@@ -397,7 +405,7 @@ struct DepthTexture {
 impl DepthTexture {
     pub fn spiral(re_ctx: &re_renderer::RenderContext, dimensions: glam::UVec2) -> Self {
         let size = (dimensions.x * dimensions.y) as usize;
-        let mut data = std::iter::repeat(0f32).take(size).collect_vec();
+        let mut data = vec![0f32; size];
         spiral(dimensions).for_each(|(texcoords, d)| {
             data[(texcoords.x + texcoords.y * dimensions.x) as usize] = d;
         });
@@ -438,7 +446,7 @@ struct AlbedoTexture {
 impl AlbedoTexture {
     pub fn spiral(re_ctx: &re_renderer::RenderContext, dimensions: glam::UVec2) -> Self {
         let size = (dimensions.x * dimensions.y) as usize;
-        let mut rgba8 = std::iter::repeat(0).take(size * 4).collect_vec();
+        let mut rgba8 = vec![0; size * 4];
         spiral(dimensions).for_each(|(texcoords, d)| {
             let idx = ((texcoords.x + texcoords.y * dimensions.x) * 4) as usize;
             rgba8[idx..idx + 4].copy_from_slice(re_renderer::colormap_turbo_srgb(d).as_slice());

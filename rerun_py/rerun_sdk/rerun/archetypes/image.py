@@ -135,7 +135,7 @@ class Image(ImageExt, Archetype):
         format:
             The format of the image.
         opacity:
-            Opacity of the image, useful for layering several images.
+            Opacity of the image, useful for layering several media.
 
             Defaults to 1.0 (fully opaque).
         draw_order:
@@ -193,7 +193,7 @@ class Image(ImageExt, Archetype):
         format:
             The format of the image.
         opacity:
-            Opacity of the image, useful for layering several images.
+            Opacity of the image, useful for layering several media.
 
             Defaults to 1.0 (fully opaque).
         draw_order:
@@ -213,7 +213,7 @@ class Image(ImageExt, Archetype):
                 draw_order=draw_order,
             )
 
-        batches = inst.as_component_batches(include_indicators=False)
+        batches = inst.as_component_batches()
         if len(batches) == 0:
             return ComponentColumnList([])
 
@@ -250,8 +250,7 @@ class Image(ImageExt, Archetype):
 
             columns.append(batch.partition(sizes))
 
-        indicator_column = cls.indicator().partition(np.zeros(len(sizes)))
-        return ComponentColumnList([indicator_column] + columns)
+        return ComponentColumnList(columns)
 
     buffer: components.ImageBufferBatch | None = field(
         metadata={"component": True},
@@ -276,7 +275,7 @@ class Image(ImageExt, Archetype):
         default=None,
         converter=components.OpacityBatch._converter,  # type: ignore[misc]
     )
-    # Opacity of the image, useful for layering several images.
+    # Opacity of the image, useful for layering several media.
     #
     # Defaults to 1.0 (fully opaque).
     #

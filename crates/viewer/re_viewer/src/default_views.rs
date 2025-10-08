@@ -32,8 +32,9 @@ mod tests {
     use egui::Vec2;
     use egui_kittest::SnapshotOptions;
     use re_chunk::EntityPath;
+    use re_test_context::TestContext;
     use re_ui::UiExt as _;
-    use re_viewer_context::{ViewId, test_context::TestContext};
+    use re_viewer_context::ViewId;
 
     use super::*;
 
@@ -60,35 +61,32 @@ mod tests {
                 let mut harness = test_context
                     .setup_kittest_for_rendering()
                     .with_size([400.0, 640.0])
-                    .build(|egui_ctx| {
-                        re_ui::apply_style_and_install_loaders(egui_ctx);
-                        egui_ctx.set_theme(egui_theme);
+                    .build_ui(|ui| {
+                        ui.ctx().set_theme(egui_theme);
 
-                        egui::CentralPanel::default().show(egui_ctx, |ui| {
-                            test_context.run(egui_ctx, |viewer_ctx| {
-                                ui.set_min_size(Vec2::new(400.0, 300.0));
-                                ui.list_item_scope(entry.identifier, |ui| {
-                                    class
-                                        .selection_ui(
-                                            viewer_ctx,
-                                            ui,
-                                            state.as_mut(),
-                                            &space_origin,
-                                            view_id,
-                                        )
-                                        .expect("Failed to run selection_ui");
-                                    did_run = true;
-                                });
+                        test_context.run_ui(ui, |viewer_ctx, ui| {
+                            ui.set_min_size(Vec2::new(400.0, 300.0));
+                            ui.list_item_scope(entry.identifier, |ui| {
+                                class
+                                    .selection_ui(
+                                        viewer_ctx,
+                                        ui,
+                                        state.as_mut(),
+                                        &space_origin,
+                                        view_id,
+                                    )
+                                    .expect("Failed to run selection_ui");
+                                did_run = true;
                             });
                         });
                     });
 
                 harness.run();
 
-                let snapshot_options = SnapshotOptions::default().output_path(format!(
-                    "tests/snapshots/all_view_selecion_uis/{egui_theme:?}"
+                let snapshot_options = SnapshotOptions::new().output_path(format!(
+                    "tests/snapshots/all_view_selection_uis/{egui_theme:?}"
                 ));
-                harness.snapshot_options(&entry.identifier, &snapshot_options);
+                harness.snapshot_options(entry.identifier.to_string(), &snapshot_options);
 
                 drop(harness);
 

@@ -3,7 +3,7 @@
 #[cfg(debug_assertions)]
 use egui::containers::menu;
 use egui::containers::menu::{MenuButton, MenuConfig};
-use egui::{Button, NumExt as _};
+use egui::{Button, NumExt as _, ScrollArea};
 use re_ui::menu::menu_style;
 use re_ui::{UICommand, UiExt as _};
 use re_viewer_context::StoreContext;
@@ -19,19 +19,31 @@ impl App {
         _store_context: Option<&StoreContext<'_>>,
         ui: &mut egui::Ui,
     ) {
-        // let desired_icon_height = ui.max_rect().height() - 2.0 * ui.spacing_mut().button_padding.y;
-        let desired_icon_height = ui.max_rect().height() - 4.0; // TODO(emilk): figure out this fudge
-        let desired_icon_height = desired_icon_height.at_most(28.0); // figma size 2023-02-03
+        let desired_icon_height = if ui.max_rect().height() <= 24.0 {
+            // This is a bit of a hack to produce a sharp logo on mac on low-DPI screens.
+            // At a 16x16 size, the Rerun logo SVG just happens to have all its vertical
+            // lines at even pixel positions, making it look sharp and nice.
+            16.0
+        } else {
+            ui.max_rect().height() - 4.0
+        };
+        let desired_icon_height = desired_icon_height.at_most(28.0);
 
         let image = re_ui::icons::RERUN_MENU
             .as_image()
             .max_height(desired_icon_height)
-            .tint(ui.tokens().strong_fg_color);
+            .tint(ui.tokens().strong_fg_color)
+            .alt_text("Menu");
 
         MenuButton::from_button(Button::image(image))
             .config(MenuConfig::new().style(menu_style()))
             .ui(ui, |ui| {
-                self.rerun_menu_ui(ui, render_state, _store_context);
+                ui.set_max_height(ui.ctx().screen_rect().height());
+                ScrollArea::vertical()
+                    .max_height(ui.ctx().screen_rect().height() - 16.0)
+                    .show(ui, |ui| {
+                        self.rerun_menu_ui(ui, render_state, _store_context);
+                    });
             });
     }
 
@@ -56,6 +68,7 @@ impl App {
         ui.add_space(SPACING);
 
         UICommand::Open.menu_button_ui(ui, &self.command_sender);
+        UICommand::OpenUrl.menu_button_ui(ui, &self.command_sender);
         UICommand::Import.menu_button_ui(ui, &self.command_sender);
 
         self.save_buttons_ui(ui, _store_context);
@@ -396,6 +409,11 @@ fn debug_menu_options_ui(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
+        ui.horizontal(|ui| {
+            ui.label("Command line:");
+            ui.monospace(std::env::args().collect::<Vec<_>>().join(" "));
+        });
+
         if ui.button("Mobile size").clicked() {
             // let size = egui::vec2(375.0, 812.0); // iPhone 12 mini
             let size = egui::vec2(375.0, 667.0); //  iPhone SE 2nd gen

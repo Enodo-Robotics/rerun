@@ -133,59 +133,43 @@ impl SegmentationImage {
             component_type: Some("rerun.components.DrawOrder".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.SegmentationImageIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             SegmentationImage::descriptor_buffer(),
             SegmentationImage::descriptor_format(),
         ]
     });
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [SegmentationImage::descriptor_indicator()]);
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             SegmentationImage::descriptor_opacity(),
             SegmentationImage::descriptor_draw_order(),
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 4usize]> =
+    std::sync::LazyLock::new(|| {
         [
             SegmentationImage::descriptor_buffer(),
             SegmentationImage::descriptor_format(),
-            SegmentationImage::descriptor_indicator(),
             SegmentationImage::descriptor_opacity(),
             SegmentationImage::descriptor_draw_order(),
         ]
     });
 
 impl SegmentationImage {
-    /// The total number of components in the archetype: 2 required, 1 recommended, 2 optional
-    pub const NUM_COMPONENTS: usize = 5usize;
+    /// The total number of components in the archetype: 2 required, 0 recommended, 2 optional
+    pub const NUM_COMPONENTS: usize = 4usize;
 }
 
-/// Indicator component for the [`SegmentationImage`] [`::re_types_core::Archetype`]
-pub type SegmentationImageIndicator = ::re_types_core::GenericIndicatorComponent<SegmentationImage>;
-
 impl ::re_types_core::Archetype for SegmentationImage {
-    type Indicator = SegmentationImageIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.SegmentationImage".into()
@@ -194,14 +178,6 @@ impl ::re_types_core::Archetype for SegmentationImage {
     #[inline]
     fn display_name() -> &'static str {
         "Segmentation image"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        SegmentationImageIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -259,7 +235,6 @@ impl ::re_types_core::AsComponents for SegmentationImage {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.buffer.clone(),
             self.format.clone(),
             self.opacity.clone(),
@@ -350,12 +325,7 @@ impl SegmentationImage {
                 .map(|draw_order| draw_order.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -376,7 +346,7 @@ impl SegmentationImage {
             .or(len_opacity)
             .or(len_draw_order)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The raw image data.

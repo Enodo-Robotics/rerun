@@ -6,8 +6,9 @@ use re_log_types::EntityPath;
 use re_types_core::ViewClassIdentifier;
 use re_ui::{Help, UiExt as _};
 use re_viewer_context::{
-    Item, SystemExecutionOutput, ViewClass, ViewClassRegistryError, ViewId, ViewQuery,
-    ViewSpawnHeuristics, ViewState, ViewStateExt as _, ViewSystemExecutionError, ViewerContext,
+    Item, SystemCommand, SystemCommandSender as _, SystemExecutionOutput, ViewClass,
+    ViewClassRegistryError, ViewId, ViewQuery, ViewSpawnHeuristics, ViewState, ViewStateExt as _,
+    ViewSystemExecutionError, ViewerContext,
 };
 
 use crate::{
@@ -152,7 +153,6 @@ Configure in the selection panel:
             filtered_index_values: None,
             using_index_values: None,
             include_semantically_empty_columns: false,
-            include_indicator_columns: false,
             include_tombstone_columns: false,
             include_static_columns: re_chunk_store::StaticColumnSelection::Both,
         };
@@ -205,7 +205,8 @@ fn timeline_not_found_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, view_id: Vi
         )
         .clicked()
     {
-        ctx.selection_state.set_selection(Item::View(view_id));
+        ctx.command_sender()
+            .send_system(SystemCommand::SetSelection(Item::View(view_id).into()));
     }
 }
 
@@ -213,5 +214,5 @@ re_viewer_context::impl_component_fallback_provider!(DataframeView => []);
 
 #[test]
 fn test_help_view() {
-    re_viewer_context::test_context::TestContext::test_help_view(|ctx| DataframeView.help(ctx));
+    re_test_context::TestContext::test_help_view(|ctx| DataframeView.help(ctx));
 }

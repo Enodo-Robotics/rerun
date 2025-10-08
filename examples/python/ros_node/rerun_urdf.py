@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import io
 import os
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from urllib.parse import urlparse
 
 import numpy as np
 import rerun as rr  # pip install rerun-sdk
-import trimesh
 from ament_index_python.packages import get_package_share_directory
-from std_msgs.msg import String
 from yourdfpy import URDF
+
+if TYPE_CHECKING:
+    import trimesh
+    from std_msgs.msg import String
 
 
 def ament_locate_package(fname: str) -> str:
@@ -50,7 +52,7 @@ def log_scene(scene: trimesh.Scene, node: str, path: str | None = None, static: 
             )
 
         # Log this node's mesh, if it has one.
-        mesh = cast(trimesh.Trimesh, scene.geometry.get(node_data[1]))
+        mesh = cast("trimesh.Trimesh", scene.geometry.get(node_data[1]))
         if mesh:
             # If vertex colors are set, use the average color as the albedo factor
             # for the whole mesh.

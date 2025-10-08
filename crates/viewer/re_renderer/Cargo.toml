@@ -51,6 +51,7 @@ import-stl = ["dep:stl_io"]
 serde = ["dep:serde"]
 
 [dependencies]
+re_byte_size.workspace = true
 re_error.workspace = true
 re_log.workspace = true
 re_tracing.workspace = true
@@ -61,6 +62,7 @@ anyhow.workspace = true
 bitflags.workspace = true
 bytemuck.workspace = true
 clean-path.workspace = true
+crossbeam.workspace = true
 document-features.workspace = true
 ecolor = { workspace = true, features = ["bytemuck"] }
 enumset.workspace = true
@@ -90,13 +92,12 @@ tobj = { workspace = true, optional = true }
 
 # native
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-crossbeam.workspace = true
 notify.workspace = true
 
 # web
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = [
-  "js",
+  "wasm_js",
 ] } # getrandom needs the `js` feature to be enabled. It is dragged in indirectly.
 js-sys.workspace = true
 wasm-bindgen-futures.workspace = true

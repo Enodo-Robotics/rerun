@@ -240,32 +240,16 @@ impl Points2D {
             component_type: Some("rerun.components.KeypointId".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.Points2DIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [Points2D::descriptor_positions()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [Points2D::descriptor_positions()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            Points2D::descriptor_radii(),
-            Points2D::descriptor_colors(),
-            Points2D::descriptor_indicator(),
-        ]
-    });
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| [Points2D::descriptor_radii(), Points2D::descriptor_colors()]);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 5usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Points2D::descriptor_labels(),
             Points2D::descriptor_show_labels(),
@@ -275,13 +259,12 @@ static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]>
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 9usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 8usize]> =
+    std::sync::LazyLock::new(|| {
         [
             Points2D::descriptor_positions(),
             Points2D::descriptor_radii(),
             Points2D::descriptor_colors(),
-            Points2D::descriptor_indicator(),
             Points2D::descriptor_labels(),
             Points2D::descriptor_show_labels(),
             Points2D::descriptor_draw_order(),
@@ -291,16 +274,11 @@ static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 9usize]> =
     });
 
 impl Points2D {
-    /// The total number of components in the archetype: 1 required, 3 recommended, 5 optional
-    pub const NUM_COMPONENTS: usize = 9usize;
+    /// The total number of components in the archetype: 1 required, 2 recommended, 5 optional
+    pub const NUM_COMPONENTS: usize = 8usize;
 }
 
-/// Indicator component for the [`Points2D`] [`::re_types_core::Archetype`]
-pub type Points2DIndicator = ::re_types_core::GenericIndicatorComponent<Points2D>;
-
 impl ::re_types_core::Archetype for Points2D {
-    type Indicator = Points2DIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.Points2D".into()
@@ -309,14 +287,6 @@ impl ::re_types_core::Archetype for Points2D {
     #[inline]
     fn display_name() -> &'static str {
         "Points 2D"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        Points2DIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -398,7 +368,6 @@ impl ::re_types_core::AsComponents for Points2D {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.positions.clone(),
             self.radii.clone(),
             self.colors.clone(),
@@ -524,12 +493,7 @@ impl Points2D {
                 .map(|keypoint_ids| keypoint_ids.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -558,7 +522,7 @@ impl Points2D {
             .or(len_class_ids)
             .or(len_keypoint_ids)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// All the 2D positions at which the point cloud shows points.

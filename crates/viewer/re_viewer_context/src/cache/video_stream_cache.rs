@@ -9,23 +9,35 @@ use egui::NumExt as _;
 use parking_lot::RwLock;
 
 use re_arrow_util::ArrowArrayDowncastRef as _;
+use re_byte_size::SizeBytes as _;
 use re_chunk::{ChunkId, EntityPath, Span, TimelineName};
 use re_chunk_store::ChunkStoreEvent;
 use re_log_types::{EntityPathHash, TimeType};
 use re_types::{archetypes::VideoStream, components};
 use re_video::{DecodeSettings, StableIndexDeque};
 
-use crate::Cache;
+use crate::{Cache, CacheMemoryReport};
 
 /// A buffer of multiple video sample data from the datastore.
 ///
 /// It's essentially a pointer into a column of [`re_types::components::VideoSample`]s inside a Rerun chunk.
 struct SampleBuffer {
     buffer: ArrowBuffer,
-    source_chunk: ChunkId,
+    source_chunk_id: ChunkId,
 
     /// Indexes into [`re_video::VideoDataDescription::samples`] that this buffer contains.
     sample_index_range: std::ops::Range<re_video::SampleIndex>,
+}
+
+impl re_byte_size::SizeBytes for SampleBuffer {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            buffer: _, // ref-counted - already counted in the store
+            source_chunk_id: _,
+            sample_index_range: _,
+        } = self;
+        0
+    }
 }
 
 /// Video stream from the store, ready for playback.
@@ -39,6 +51,16 @@ pub struct PlayableVideoStream {
 
     /// All buffers (each mapping 1:1 to a rerun chunk) that have samples for this video stream.
     video_sample_buffers: StableIndexDeque<SampleBuffer>,
+}
+
+impl re_byte_size::SizeBytes for PlayableVideoStream {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            video_renderer,
+            video_sample_buffers,
+        } = self;
+        video_renderer.heap_size_bytes() + video_sample_buffers.heap_size_bytes()
+    }
 }
 
 impl PlayableVideoStream {
@@ -64,12 +86,33 @@ struct VideoStreamCacheEntry {
     video_stream: Arc<RwLock<PlayableVideoStream>>,
 }
 
+impl re_byte_size::SizeBytes for VideoStreamCacheEntry {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            used_this_frame: _,
+            video_stream,
+        } = self;
+
+        video_stream.read().heap_size_bytes()
+    }
+}
+
 /// Identifies a video stream.
 
 #[derive(Hash, Eq, PartialEq)]
 struct VideoStreamKey {
     entity_path: EntityPathHash,
     timeline: TimelineName,
+}
+
+impl re_byte_size::SizeBytes for VideoStreamKey {
+    fn heap_size_bytes(&self) -> u64 {
+        let Self {
+            entity_path,
+            timeline,
+        } = self;
+        entity_path.heap_size_bytes() + timeline.heap_size_bytes()
+    }
 }
 
 /// Caches metadata and active players for video streams.
@@ -80,28 +123,28 @@ pub struct VideoStreamCache(HashMap<VideoStreamKey, VideoStreamCacheEntry>);
 
 #[derive(thiserror::Error, Debug)]
 pub enum VideoStreamProcessingError {
-    #[error("No video frame chunks found.")]
+    #[error("No video samples.")]
     NoVideoSamplesFound,
 
-    #[error("Frame chunks present, but arrow type but unexpected arrow type: {0:?}")]
+    #[error("Unexpected arrow type for video sample {0:?}")]
     InvalidVideoSampleType(arrow::datatypes::DataType),
-
-    #[error("Expected only a single video sample per timestep")]
-    MultipleVideoSamplesPerTimestep,
 
     #[error("No codec specified.")]
     MissingCodec,
 
-    #[error("Failed reading codec: {0}")]
-    FailedReadingCodec(re_chunk::ChunkError),
+    #[error("Failed to read codec - {0}")]
+    FailedReadingCodec(Box<re_chunk::ChunkError>),
 }
+
+const _: () = assert!(
+    std::mem::size_of::<VideoStreamProcessingError>() <= 64,
+    "Error type is too large. Try to reduce its size by boxing some of its variants.",
+);
 
 pub type SharablePlayableVideoStream = Arc<RwLock<PlayableVideoStream>>;
 
 impl VideoStreamCache {
     /// Looks up a video stream + players.
-    ///
-    /// Returns `None` if there was no video data for this entity on the given timeline.
     ///
     /// The first time a video stream that is looked up that isn't in the cache,
     /// it creates all the necessary metadata.
@@ -172,7 +215,7 @@ fn load_video_data_from_chunks(
     // TODO(andreas): Can we be more clever about the chunk range here and build up only what we need?
     // Kinda tricky since we need to know how far back (and ahead for b-frames) we have to look.
     let entire_timeline_query =
-        re_chunk::RangeQuery::new(timeline, re_log_types::ResolvedTimeRange::EVERYTHING);
+        re_chunk::RangeQuery::new(timeline, re_log_types::AbsoluteTimeRange::EVERYTHING);
     let query_results = store.storage_engine().cache().range(
         &entire_timeline_query,
         entity_path,
@@ -191,10 +234,10 @@ fn load_video_data_from_chunks(
         .last()
         .and_then(|chunk| chunk.component_instance::<components::VideoCodec>(&codec_descr, 0, 0))
         .ok_or(VideoStreamProcessingError::MissingCodec)?
-        .map_err(VideoStreamProcessingError::FailedReadingCodec)?;
+        .map_err(|err| VideoStreamProcessingError::FailedReadingCodec(Box::new(err)))?;
     let codec = match last_codec {
         components::VideoCodec::H264 => re_video::VideoCodec::H264,
-        // components::VideoCodec::H265 => re_video::VideoCodec::H265,
+        components::VideoCodec::H265 => re_video::VideoCodec::H265,
         // components::VideoCodec::VP8 => re_video::VideoCodec::Vp8,
         // components::VideoCodec::VP9 => re_video::VideoCodec::Vp9,
         // components::VideoCodec::AV1 => re_video::VideoCodec::Av1,
@@ -206,7 +249,7 @@ fn load_video_data_from_chunks(
         codec,
         encoding_details: None, // Unknown so far, we'll find out later.
         timescale: timescale_for_timeline(store, timeline),
-        duration: None, // Streams have to be assumed to be open ended, so we don't have a duration.
+        delivery_method: re_video::VideoDeliveryMethod::new_stream(),
         gops: StableIndexDeque::new(),
         samples: StableIndexDeque::with_capacity(sample_chunks.len()), // Number of video chunks is minimum number of samples.
         samples_statistics: re_video::SamplesStatistics::NO_BFRAMES, // TODO(#10090): No b-frames for now.
@@ -442,17 +485,17 @@ fn read_samples_from_chunk(
 
     chunk_buffers.push_back(SampleBuffer {
         buffer: values.clone(),
-        source_chunk: chunk.id(),
+        source_chunk_id: chunk.id(),
         sample_index_range: sample_base_idx..samples.next_index(),
     });
 
-    if cfg!(debug_assertions) {
-        if let Err(err) = video_descr.sanity_check() {
-            panic!(
-                "VideoDataDescription sanity check failed for video stream at {:?}: {err}",
-                chunk.entity_path()
-            );
-        }
+    if cfg!(debug_assertions)
+        && let Err(err) = video_descr.sanity_check()
+    {
+        panic!(
+            "VideoDataDescription sanity check failed for video stream at {:?}: {err}",
+            chunk.entity_path()
+        );
     }
 
     Ok(())
@@ -470,6 +513,7 @@ impl Cache for VideoStreamCache {
             .retain(|_, entry| entry.used_this_frame.load(Ordering::Acquire));
 
         // Of the remaining video data, remove all unused decoders.
+        #[expect(clippy::iter_over_hash_type)]
         for entry in self.0.values_mut() {
             entry.used_this_frame.store(false, Ordering::Release);
             let video_stream = entry.video_stream.write();
@@ -487,8 +531,20 @@ impl Cache for VideoStreamCache {
         // but it's almost entirely due to the decoder trying to retrieve a frame.
     }
 
+    fn memory_report(&self) -> CacheMemoryReport {
+        CacheMemoryReport {
+            bytes_cpu: self.0.total_size_bytes(),
+            bytes_gpu: None,
+            per_cache_item_info: Vec::new(),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "Video Streams"
+    }
+
     /// Keep existing cache entries up to date with new and removed video data.
-    fn on_store_events(&mut self, events: &[ChunkStoreEvent]) {
+    fn on_store_events(&mut self, events: &[&ChunkStoreEvent]) {
         re_tracing::profile_function!();
 
         let sample_descr = VideoStream::descriptor_sample();
@@ -498,6 +554,7 @@ impl Cache for VideoStreamCache {
                 continue;
             }
 
+            #[expect(clippy::iter_over_hash_type)] //  TODO(#6198): verify that this is fine
             for timeline in event.chunk.timelines().keys() {
                 let key = VideoStreamKey {
                     entity_path: event.chunk.entity_path().hash(),
@@ -514,6 +571,7 @@ impl Cache for VideoStreamCache {
                     video_sample_buffers,
                 } = &mut *video_stream;
                 let video_data = video_renderer.data_descr_mut();
+                video_data.delivery_method = re_video::VideoDeliveryMethod::new_stream();
 
                 match event.kind {
                     re_chunk_store::ChunkStoreDiffKind::Addition => {
@@ -525,7 +583,7 @@ impl Cache for VideoStreamCache {
                         let chunk = if let Some(compaction) = &event.compacted {
                             for chunk_id in compaction.srcs.keys() {
                                 if let Some(first_invalid_buffer_idx) = video_sample_buffers
-                                    .position(|buffer| buffer.source_chunk == *chunk_id)
+                                    .position(|buffer| buffer.source_chunk_id == *chunk_id)
                                 {
                                     // Remove all samples that are in this and future buffers.
                                     video_data.samples.remove_all_with_index_larger_equal(
@@ -573,7 +631,7 @@ impl Cache for VideoStreamCache {
                         // we'd still want to delete all prior samples & buffers since we can't handle gaps
                         // in the video stream.
                         if let Some(last_invalid_buffer_idx) = video_sample_buffers
-                            .position(|buffer| buffer.source_chunk == event.chunk.id())
+                            .position(|buffer| buffer.source_chunk_id == event.chunk.id())
                         {
                             let last_invalid_buffer =
                                 &video_sample_buffers[last_invalid_buffer_idx];
@@ -596,13 +654,13 @@ impl Cache for VideoStreamCache {
                                     .sum::<usize>()
                             );
 
-                            if cfg!(debug_assertions) {
-                                if let Err(err) = video_data.sanity_check() {
-                                    panic!(
-                                        "VideoDataDescription sanity check stream at {:?} failed: {err}",
-                                        event.chunk.entity_path()
-                                    );
-                                }
+                            if cfg!(debug_assertions)
+                                && let Err(err) = video_data.sanity_check()
+                            {
+                                panic!(
+                                    "VideoDataDescription sanity check stream at {:?} failed: {err}",
+                                    event.chunk.entity_path()
+                                );
                             }
                         }
                     }
@@ -707,7 +765,7 @@ mod tests {
             codec,
             encoding_details,
             timescale,
-            duration,
+            delivery_method,
             gops,
             samples,
             samples_statistics,
@@ -716,7 +774,10 @@ mod tests {
 
         assert_eq!(codec, re_video::VideoCodec::H264);
         assert_eq!(timescale, None); // Sequence timeline doesn't have a timescale.
-        assert_eq!(duration, None); // Open ended video.
+        assert!(matches!(
+            delivery_method,
+            re_video::VideoDeliveryMethod::Stream { .. }
+        ));
         assert_eq!(samples_statistics, re_video::SamplesStatistics::NO_BFRAMES);
         assert!(mp4_tracks.is_empty());
 
@@ -783,8 +844,10 @@ mod tests {
     #[test]
     fn video_stream_cache_from_single_chunk() {
         let mut cache = VideoStreamCache::default();
-        let mut store =
-            re_entity_db::EntityDb::new(StoreId::random(re_log_types::StoreKind::Recording));
+        let mut store = re_entity_db::EntityDb::new(StoreId::random(
+            re_log_types::StoreKind::Recording,
+            "test_app",
+        ));
         let timeline = Timeline::new_sequence("frame");
 
         let mut chunk_builder = ChunkBuilder::new(ChunkId::new(), "vid".into());
@@ -819,7 +882,7 @@ mod tests {
     fn video_stream_cache_from_chunk_per_frame() {
         let mut cache = VideoStreamCache::default();
         let mut store = re_entity_db::EntityDb::with_store_config(
-            StoreId::random(re_log_types::StoreKind::Recording),
+            StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
             re_chunk_store::ChunkStoreConfig::COMPACTION_DISABLED,
         );
         let timeline = Timeline::new_sequence("frame");
@@ -860,7 +923,7 @@ mod tests {
 
             let mut cache = VideoStreamCache::default();
             let mut store = re_entity_db::EntityDb::with_store_config(
-                StoreId::random(re_log_types::StoreKind::Recording),
+                StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
                 if compaction_enabled {
                     re_chunk_store::ChunkStoreConfig::DEFAULT
                 } else {
@@ -900,7 +963,8 @@ mod tests {
                 let store_events = store
                     .add_chunk(&Arc::new(chunk_builder.build().unwrap()))
                     .unwrap();
-                cache.on_store_events(&store_events);
+                let store_events_refs = store_events.iter().collect::<Vec<_>>();
+                cache.on_store_events(&store_events_refs);
 
                 let video_stream = cache
                     .entry(
@@ -926,7 +990,7 @@ mod tests {
     fn video_stream_cache_from_chunk_per_frame_with_gc() {
         let mut cache = VideoStreamCache::default();
         let mut store = re_entity_db::EntityDb::with_store_config(
-            StoreId::random(re_log_types::StoreKind::Recording),
+            StoreId::random(re_log_types::StoreKind::Recording, "test_app"),
             re_chunk_store::ChunkStoreConfig::COMPACTION_DISABLED,
         );
         let timeline = Timeline::new_sequence("frame");
@@ -955,8 +1019,8 @@ mod tests {
         // Instead of relying on the "real" GC, we fake it by creating a GC event, pretending the first chunk got removed.
         let storage_engine = store.storage_engine();
         let chunk_store = storage_engine.store();
-        cache.on_store_events(&[ChunkStoreEvent {
-            store_id: store.store_id(),
+        cache.on_store_events(&[&ChunkStoreEvent {
+            store_id: store.store_id().clone(),
             store_generation: store.generation(),
             event_id: 0, // Wrong but don't care.
             diff: ChunkStoreDiff::deletion(chunk_store.iter_chunks().next().unwrap().clone()),

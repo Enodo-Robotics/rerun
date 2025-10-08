@@ -9,7 +9,10 @@ use re_types::{
     image::{ImageKind, ImageLoadError},
 };
 
-use crate::{Cache, ImageInfo, cache::filter_blob_removed_events, image_info::StoredBlobCacheKey};
+use crate::{
+    Cache, CacheMemoryReport, CacheMemoryReportItem, ImageInfo, cache::filter_blob_removed_events,
+    image_info::StoredBlobCacheKey,
+};
 
 struct DecodedImageResult {
     /// Cached `Result` from decoding the image
@@ -134,6 +137,28 @@ impl Cache for ImageDecodeCache {
         self.generation += 1;
     }
 
+    fn memory_report(&self) -> CacheMemoryReport {
+        let mut items: Vec<_> = self
+            .cache
+            .iter()
+            .map(|(k, images)| CacheMemoryReportItem {
+                item_name: format!("{:x}", k.0.hash64()),
+                bytes_cpu: images.values().map(|image| image.memory_used).sum(),
+                bytes_gpu: None,
+            })
+            .collect();
+        items.sort_by(|a, b| a.item_name.cmp(&b.item_name));
+        CacheMemoryReport {
+            bytes_cpu: self.memory_used,
+            bytes_gpu: None,
+            per_cache_item_info: items,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "Image Decodings"
+    }
+
     fn purge_memory(&mut self) {
         re_tracing::profile_function!();
 
@@ -160,7 +185,7 @@ impl Cache for ImageDecodeCache {
         );
     }
 
-    fn on_store_events(&mut self, events: &[ChunkStoreEvent]) {
+    fn on_store_events(&mut self, events: &[&ChunkStoreEvent]) {
         re_tracing::profile_function!();
 
         let cache_key_removed = filter_blob_removed_events(events);

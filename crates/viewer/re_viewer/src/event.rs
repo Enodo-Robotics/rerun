@@ -6,17 +6,14 @@
 // NOTE: Any changes to the type definitions in this file must be replicated in:
 // - rerun_js/web-viewer/index.ts (ViewerEvent)
 // - rerun_py/rerun_sdk/rerun/event.py (ViewerEvent)
+// Important: The event names defined here are transformed to `snake_case` on the JS side.
 
 use std::rc::Rc;
 
 use re_entity_db::EntityDb;
-use re_log_types::{ApplicationId, StoreId};
-use re_log_types::{TimeReal, Timeline, TimelineName};
+use re_log_types::{ApplicationId, RecordingId, TimeReal, Timeline, TimelineName};
 use re_smart_channel::SmartChannelSource;
-use re_viewer_context::Item;
-use re_viewer_context::ItemContext;
-use re_viewer_context::ViewId;
-use re_viewer_context::{ContainerId, ItemCollection};
+use re_viewer_context::{ContainerId, Item, ItemCollection, ItemContext, ViewId};
 use re_viewport_blueprint::ViewportBlueprint;
 
 /// An event produced in the Viewer.
@@ -27,7 +24,7 @@ pub struct ViewerEvent {
     pub application_id: ApplicationId,
 
     #[serde(with = "serde::recording_id")]
-    pub recording_id: StoreId,
+    pub recording_id: RecordingId,
 
     pub partition_id: Option<String>,
 
@@ -37,10 +34,10 @@ pub struct ViewerEvent {
 
 impl ViewerEvent {
     #[inline]
-    fn from_db_and_kind(db: &EntityDb, kind: ViewerEventKind) -> Option<Self> {
+    fn from_db_and_kind(db: &EntityDb, kind: ViewerEventKind) -> Self {
         let partition_id = db.data_source.as_ref().and_then(|ds| {
             if let SmartChannelSource::RedapGrpcStream {
-                uri: re_uri::DatasetDataUri { partition_id, .. },
+                uri: re_uri::DatasetPartitionUri { partition_id, .. },
                 ..
             } = ds
             {
@@ -50,12 +47,12 @@ impl ViewerEvent {
             }
         });
 
-        Some(Self {
-            application_id: db.app_id()?.clone(),
-            recording_id: db.store_id(),
+        Self {
+            application_id: db.application_id().clone(),
+            recording_id: db.recording_id().clone(),
             partition_id,
             kind,
-        })
+        }
     }
 }
 
@@ -92,6 +89,25 @@ pub enum ViewerEventKind {
     /// this includes for example clicking on different parts of the same
     /// entity in a 2D or 3D view.
     SelectionChange { items: Vec<SelectionChangeItem> },
+
+    /// Fired when a new recording is opened in the Viewer.
+    ///
+    /// For `rrd` file or stream, a recording is considered "open" after
+    /// enough information about the recording, such as its ID and source,
+    /// is received.
+    // NOTE: App ID and store ID are already in `ViewerEvent`.
+    RecordingOpen {
+        /// Where the recording came from.
+        ///
+        /// The value should be considered unstable, which is why we don't
+        /// list the possible values here.
+        source: String,
+
+        /// Version of the SDK used to create this recording.
+        ///
+        /// Uses semver format.
+        version: Option<String>,
+    },
 }
 
 /// A single item in a selection.
@@ -269,11 +285,40 @@ impl ViewerEventDispatcher {
         ));
     }
 
+    /// NOTE: The `db` should be the one for the new recording
     #[inline]
-    fn dispatch(&self, event: Option<ViewerEvent>) {
-        if let Some(event) = event {
-            (self.f)(event);
-        }
+    pub fn on_recording_open(&self, db: &EntityDb) {
+        let source = db
+            .store_info()
+            .map(|info| info.store_source.clone())
+            .unwrap_or(re_log_types::StoreSource::Unknown);
+        self.dispatch(ViewerEvent::from_db_and_kind(
+            db,
+            ViewerEventKind::RecordingOpen {
+                source: match &source {
+                    re_log_types::StoreSource::Unknown => "unknown",
+                    re_log_types::StoreSource::CSdk => "cpp",
+                    re_log_types::StoreSource::PythonSdk(_python_version) => "python",
+                    re_log_types::StoreSource::RustSdk {
+                        rustc_version: _,
+                        llvm_version: _,
+                    } => "rust",
+                    re_log_types::StoreSource::File { file_source: _ } => "file",
+                    re_log_types::StoreSource::Viewer => "viewer",
+                    re_log_types::StoreSource::Other(v) => v.as_str(),
+                }
+                .into(),
+                version: db
+                    .store_info()
+                    .and_then(|info| info.store_version)
+                    .map(|version| version.to_string()),
+            },
+        ));
+    }
+
+    #[inline]
+    fn dispatch(&self, event: ViewerEvent) {
+        (self.f)(event);
     }
 }
 
@@ -361,22 +406,19 @@ mod serde {
     pub mod recording_id {
         use super::{Deserialize, Deserializer, Serializer};
 
-        pub fn serialize<S>(v: &re_log_types::StoreId, serializer: S) -> Result<S::Ok, S::Error>
+        pub fn serialize<S>(v: &re_log_types::RecordingId, serializer: S) -> Result<S::Ok, S::Error>
         where
             S: Serializer,
         {
             serializer.serialize_str(v.as_str())
         }
 
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<re_log_types::StoreId, D::Error>
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<re_log_types::RecordingId, D::Error>
         where
             D: Deserializer<'de>,
         {
             let s: String = Deserialize::deserialize(deserializer)?;
-            Ok(re_log_types::StoreId::from_string(
-                re_log_types::StoreKind::Recording,
-                s,
-            ))
+            Ok(s.into())
         }
     }
 

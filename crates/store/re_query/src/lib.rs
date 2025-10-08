@@ -10,7 +10,7 @@ pub mod clamped_zip;
 pub mod range_zip;
 
 pub use self::cache::{QueryCache, QueryCacheHandle, QueryCacheKey};
-pub use self::cache_stats::{CacheStats, CachesStats};
+pub use self::cache_stats::{QueryCacheStats, QueryCachesStats};
 pub use self::clamped_zip::*;
 pub use self::latest_at::LatestAtResults;
 pub use self::range::RangeResults;
@@ -70,5 +70,10 @@ pub enum QueryError {
     #[error("{}", re_error::format(.0))]
     Other(#[from] anyhow::Error),
 }
+
+const _: () = assert!(
+    std::mem::size_of::<QueryError>() <= 80,
+    "Error type is too large. Try to reduce its size by boxing some of its variants.",
+);
 
 pub type Result<T> = std::result::Result<T, QueryError>;

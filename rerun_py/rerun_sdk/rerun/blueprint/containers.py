@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from ..datatypes import Float32ArrayLike, Utf8Like
 from .api import Container, View
 from .components.container_kind import ContainerKind
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from ..datatypes import Float32ArrayLike, Utf8Like
 
 
 class Horizontal(Container):
@@ -14,8 +17,8 @@ class Horizontal(Container):
     def __init__(
         self,
         *args: Container | View,
-        contents: Optional[Iterable[Container | View]] = None,
-        column_shares: Optional[Float32ArrayLike] = None,
+        contents: Iterable[Container | View] | None = None,
+        column_shares: Float32ArrayLike | None = None,
         name: Utf8Like | None = None,
     ) -> None:
         """
@@ -50,8 +53,8 @@ class Vertical(Container):
     def __init__(
         self,
         *args: Container | View,
-        contents: Optional[Iterable[Container | View]] = None,
-        row_shares: Optional[Float32ArrayLike] = None,
+        contents: Iterable[Container | View] | None = None,
+        row_shares: Float32ArrayLike | None = None,
         name: Utf8Like | None = None,
     ) -> None:
         """
@@ -80,10 +83,10 @@ class Grid(Container):
     def __init__(
         self,
         *args: Container | View,
-        contents: Optional[Iterable[Container | View]] = None,
-        column_shares: Optional[Float32ArrayLike] = None,
-        row_shares: Optional[Float32ArrayLike] = None,
-        grid_columns: Optional[int] = None,
+        contents: Iterable[Container | View] | None = None,
+        column_shares: Float32ArrayLike | None = None,
+        row_shares: Float32ArrayLike | None = None,
+        grid_columns: int | None = None,
         name: Utf8Like | None = None,
     ) -> None:
         """
@@ -125,8 +128,8 @@ class Tabs(Container):
     def __init__(
         self,
         *args: Container | View,
-        contents: Optional[Iterable[Container | View]] = None,
-        active_tab: Optional[int | str] = None,
+        contents: Iterable[Container | View] | None = None,
+        active_tab: int | str | None = None,
         name: Utf8Like | None = None,
     ) -> None:
         """

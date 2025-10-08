@@ -11,6 +11,26 @@ use super::{AUTHORIZATION_KEY, TOKEN_PREFIX};
 #[derive(Debug, Clone)]
 pub struct UserContext {
     pub user_id: String,
+
+    #[cfg(feature = "workos")]
+    pub permissions: Vec<crate::workos::Permission>,
+}
+
+#[cfg(feature = "workos")]
+impl UserContext {
+    pub fn has_read_permission(&self) -> bool {
+        use crate::workos::Permission as P;
+
+        self.permissions
+            .iter()
+            .any(|p| p == &P::Read || p == &P::ReadWrite)
+    }
+
+    pub fn has_write_permission(&self) -> bool {
+        use crate::workos::Permission as P;
+
+        self.permissions.iter().any(|p| p == &P::ReadWrite)
+    }
 }
 
 impl TryFrom<&MetadataValue<Ascii>> for Jwt {
@@ -28,13 +48,14 @@ impl TryFrom<&MetadataValue<Ascii>> for Jwt {
 /// A basic authenticator that checks for a valid auth token.
 #[derive(Clone)]
 pub struct Authenticator {
-    secret_key: RedapProvider,
+    provider: RedapProvider,
 }
 
 impl Authenticator {
-    /// Creates a new [`Authenticator`] with the given secret key and scope.
-    pub fn new(secret_key: RedapProvider) -> Self {
-        Self { secret_key }
+    /// Creates a new [`Authenticator`] with the given provider,
+    /// which holds the keys used for verification.
+    pub fn new(provider: RedapProvider) -> Self {
+        Self { provider }
     }
 }
 
@@ -43,16 +64,22 @@ impl Interceptor for Authenticator {
         let mut req = req;
 
         if let Some(token_metadata) = req.metadata().get(AUTHORIZATION_KEY) {
-            let token = Jwt::try_from(token_metadata)
-                .map_err(|_err| Status::unauthenticated("malformed auth token"))?;
+            let token = Jwt::try_from(token_metadata).map_err(|_err| {
+                Status::unauthenticated(crate::ERROR_MESSAGE_MALFORMED_CREDENTIALS)
+            })?;
 
             let claims = self
-                .secret_key
+                .provider
                 .verify(&token, VerificationOptions::default())
-                .map_err(|_err| Status::unauthenticated("invalid credentials"))?;
+                .map_err(|_err| {
+                    Status::unauthenticated(crate::ERROR_MESSAGE_INVALID_CREDENTIALS)
+                })?;
 
             req.extensions_mut().insert(UserContext {
-                user_id: claims.sub,
+                user_id: claims.sub().to_owned(),
+
+                #[cfg(feature = "workos")]
+                permissions: claims.permissions().to_vec(),
             });
         }
 

@@ -19,7 +19,7 @@ use ::re_types_core::{ComponentBatch as _, SerializedComponentBatch};
 use ::re_types_core::{ComponentDescriptor, ComponentType};
 use ::re_types_core::{DeserializationError, DeserializationResult};
 
-/// **Archetype**: Geospatial line strings with positions expressed in [EPSG:4326](https://epsg.io/4326) altitude and longitude (North/East-positive degrees), and optional colors and radii.
+/// **Archetype**: Geospatial line strings with positions expressed in [EPSG:4326](https://epsg.io/4326) latitude and longitude (North/East-positive degrees), and optional colors and radii.
 ///
 /// Also known as "line strips" or "polylines".
 ///
@@ -106,54 +106,37 @@ impl GeoLineStrings {
             component_type: Some("rerun.components.Color".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.GeoLineStringsIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [GeoLineStrings::descriptor_line_strings()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [GeoLineStrings::descriptor_line_strings()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 3usize]> =
-    once_cell::sync::Lazy::new(|| {
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             GeoLineStrings::descriptor_radii(),
             GeoLineStrings::descriptor_colors(),
-            GeoLineStrings::descriptor_indicator(),
         ]
     });
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 0usize]> =
-    once_cell::sync::Lazy::new(|| []);
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 0usize]> =
+    std::sync::LazyLock::new(|| []);
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 4usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 3usize]> =
+    std::sync::LazyLock::new(|| {
         [
             GeoLineStrings::descriptor_line_strings(),
             GeoLineStrings::descriptor_radii(),
             GeoLineStrings::descriptor_colors(),
-            GeoLineStrings::descriptor_indicator(),
         ]
     });
 
 impl GeoLineStrings {
-    /// The total number of components in the archetype: 1 required, 3 recommended, 0 optional
-    pub const NUM_COMPONENTS: usize = 4usize;
+    /// The total number of components in the archetype: 1 required, 2 recommended, 0 optional
+    pub const NUM_COMPONENTS: usize = 3usize;
 }
 
-/// Indicator component for the [`GeoLineStrings`] [`::re_types_core::Archetype`]
-pub type GeoLineStringsIndicator = ::re_types_core::GenericIndicatorComponent<GeoLineStrings>;
-
 impl ::re_types_core::Archetype for GeoLineStrings {
-    type Indicator = GeoLineStringsIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.GeoLineStrings".into()
@@ -162,14 +145,6 @@ impl ::re_types_core::Archetype for GeoLineStrings {
     #[inline]
     fn display_name() -> &'static str {
         "Geo line strings"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        GeoLineStringsIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -223,7 +198,6 @@ impl ::re_types_core::AsComponents for GeoLineStrings {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.line_strings.clone(),
             self.radii.clone(),
             self.colors.clone(),
@@ -304,12 +278,7 @@ impl GeoLineStrings {
                 .map(|colors| colors.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -328,7 +297,7 @@ impl GeoLineStrings {
             .or(len_radii)
             .or(len_colors)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The line strings, expressed in [EPSG:4326](https://epsg.io/4326) coordinates (North/East-positive degrees).

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 import pyarrow as pa
@@ -56,6 +55,8 @@ class TimeRangeBoundary(TimeRangeBoundaryExt):
 
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     TimeRangeBoundaryLike = Union[
         TimeRangeBoundary,
         None,
@@ -86,11 +87,9 @@ class TimeRangeBoundaryBatch(BaseBatch[TimeRangeBoundaryArrayLike]):
 
         from rerun.datatypes import TimeIntBatch
 
-        # TODO(#2623): There should be a separate overridable `coerce_to_array` method that can be overridden.
-        # If we can call iter, it may be that one of the variants implements __iter__.
         if not hasattr(data, "__iter__") or isinstance(data, (type(None), TimeRangeBoundary, datatypes.TimeInt)):  # type: ignore[arg-type]
             data = [data]  # type: ignore[list-item]
-        data = cast(Sequence[TimeRangeBoundaryLike], data)  # type: ignore[redundant-cast]
+        data = cast("Sequence[TimeRangeBoundaryLike]", data)  # type: ignore[redundant-cast]
 
         types: list[int] = []
         value_offsets: list[int] = []

@@ -228,7 +228,8 @@ impl ComponentUiRegistry {
                 // if we end up being called with a mismatching component, its likely a bug.
                 debug_assert_eq!(_component_descriptor.component_type, Some(C::name()));
 
-                try_deserialize(value).and_then(|mut deserialized_value| match edit_or_view {
+                let mut deserialized_value = try_deserialize(value)?;
+                match edit_or_view {
                     EditOrView::View => {
                         callback(ctx, ui, &mut MaybeMutRef::Ref(&deserialized_value));
                         None
@@ -244,7 +245,7 @@ impl ComponentUiRegistry {
                             None
                         }
                     }
-                })
+                }
             },
         );
 
@@ -342,6 +343,8 @@ impl ComponentUiRegistry {
         unit: &UnitChunkShared,
         instance: &Instance,
     ) {
+        ui.sanity_check();
+
         // Don't use component.raw_instance here since we want to handle the case where there's several
         // elements differently.
         // Also, it allows us to slice the array without cloning any elements.
@@ -352,7 +355,7 @@ impl ComponentUiRegistry {
         };
 
         // Component UI can only show a single instance.
-        if array.len() == 0 || (instance.is_all() && array.len() > 1) {
+        if array.is_empty() || (instance.is_all() && array.len() > 1) {
             fallback_ui(ui, ui_layout, array.as_ref());
             return;
         }
@@ -380,6 +383,8 @@ impl ComponentUiRegistry {
             unit.row_id(),
             component_raw.as_ref(),
         );
+
+        ui.sanity_check();
     }
 
     /// Show a UI for a single raw component.
@@ -736,5 +741,5 @@ fn try_deserialize<C: re_types::Component>(value: &dyn arrow::array::Array) -> O
 
 /// The ui we fall back to if everything else fails.
 fn fallback_ui(ui: &mut egui::Ui, ui_layout: UiLayout, component: &dyn arrow::array::Array) {
-    re_ui::arrow_ui(ui, ui_layout, component);
+    re_arrow_ui::arrow_ui(ui, ui_layout, component);
 }

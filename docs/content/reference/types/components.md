@@ -18,10 +18,13 @@ on [Entities and Components](../../concepts/entity-component.md).
 * [`AnnotationContext`](components/annotation_context.md): The annotation context provides additional information on how to display entities.
 * [`AxisLength`](components/axis_length.md): The length of an axis in local units of the space.
 * [`Blob`](components/blob.md): A binary blob of data.
+* [`ChannelId`](components/channel_id.md): A 16-bit ID representing an MCAP channel.
+* [`ChannelMessageCounts`](components/channel_message_counts.md): A mapping of channel IDs to their respective message counts.
 * [`ClassId`](components/class_id.md): A 16-bit ID representing a type of semantic class.
 * [`ClearIsRecursive`](components/clear_is_recursive.md): Configures how a clear operation should behave - recursive or not.
 * [`Color`](components/color.md): An RGBA color with unmultiplied/separate alpha, in sRGB gamma space with linear alpha.
 * [`Colormap`](components/colormap.md): Colormap for mapping scalar values within a given range to a color.
+* [`Count`](components/count.md): A generic count value.
 * [`DepthMeter`](components/depth_meter.md): The world->depth map scaling factor.
 * [`DrawOrder`](components/draw_order.md): Draw order of 2D elements. Higher values are drawn on top of lower values.
 * [`EntityPath`](components/entity_path.md): A path to an entity, usually to reference some data that is part of the target entity.
@@ -38,11 +41,13 @@ on [Entities and Components](../../concepts/entity-component.md).
 * [`ImageFormat`](components/image_format.md): The metadata describing the contents of a [`components.ImageBuffer`](https://rerun.io/docs/reference/types/components/image_buffer).
 * [`ImagePlaneDistance`](components/image_plane_distance.md): The distance from the camera origin to the image plane when the projection is shown in a 3D viewer.
 * [`Interactive`](components/interactive.md): Whether the entity can be interacted with.
+* [`KeyValuePairs`](components/key_value_pairs.md): A map of string keys to string values.
 * [`KeypointId`](components/keypoint_id.md): A 16-bit ID representing a type of semantic keypoint within a class.
 * [`LatLon`](components/lat_lon.md): A geospatial position expressed in [EPSG:4326](https://epsg.io/4326) latitude and longitude (North/East-positive degrees).
 * [`Length`](components/length.md): Length, or one-dimensional size.
 * [`LineStrip2D`](components/line_strip2d.md): A line strip in 2D space.
 * [`LineStrip3D`](components/line_strip3d.md): A line strip in 3D space.
+* [`LinearSpeed`](components/linear_speed.md): Linear speed, used for translation speed for example.
 * [`MagnificationFilter`](components/magnification_filter.md): Filter used when magnifying an image/texture such that a single pixel/texel is displayed as multiple pixels on screen.
 * [`MarkerShape`](components/marker_shape.md): The visual appearance of a point in e.g. a 2D plot.
 * [`MarkerSize`](components/marker_size.md): Radius of a marker of a point in e.g. a 2D plot, measured in UI points.
@@ -65,6 +70,7 @@ on [Entities and Components](../../concepts/entity-component.md).
 * [`RotationQuat`](components/rotation_quat.md): A 3D rotation expressed as a quaternion.
 * [`Scalar`](components/scalar.md): A scalar value, encoded as a 64-bit floating point.
 * [`Scale3D`](components/scale3d.md): A 3D scale factor.
+* [`SchemaId`](components/schema_id.md): A 16-bit unique identifier for a schema within the MCAP file.
 * [`SeriesVisible`](components/series_visible.md): Like [`components.Visible`](https://rerun.io/docs/reference/types/components/visible), but for time series.
 * [`ShowLabels`](components/show_labels.md): Whether the entity's [`components.Text`](https://rerun.io/docs/reference/types/components/text) label is shown.
 * [`StrokeWidth`](components/stroke_width.md): The width of a stroke specified in UI points.
@@ -83,7 +89,7 @@ on [Entities and Components](../../concepts/entity-component.md).
 * [`ValueRange`](components/value_range.md): Range of expected or valid values, specifying a lower and upper bound.
 * [`Vector2D`](components/vector2d.md): A vector in 2D space.
 * [`Vector3D`](components/vector3d.md): A vector in 3D space.
-* [`VideoCodec`](components/video_codec.md): The codec used to encode video stored in [`components.VideoSample`](https://rerun.io/docs/reference/types/components/video_sample?speculative-link).
+* [`VideoCodec`](components/video_codec.md): The codec used to encode video stored in [`components.VideoSample`](https://rerun.io/docs/reference/types/components/video_sample).
 * [`VideoSample`](components/video_sample.md): Video sample data (also known as "video chunk").
 * [`VideoTimestamp`](components/video_timestamp.md): Timestamp inside a [`archetypes.AssetVideo`](https://rerun.io/docs/reference/types/archetypes/asset_video).
 * [`ViewCoordinates`](components/view_coordinates.md): How we interpret the coordinate system of an entity/space.

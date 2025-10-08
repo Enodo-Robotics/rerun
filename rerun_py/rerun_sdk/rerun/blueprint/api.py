@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Union
 
 import rerun_bindings as bindings
 
 from .._baseclasses import AsComponents, ComponentBatchLike, DescribedComponentBatch
 from .._spawn import _spawn_viewer
 from ..datatypes import BoolLike, EntityPathLike, Float32ArrayLike, Utf8ArrayLike, Utf8Like
-from ..memory import MemoryRecording
 from ..recording_stream import RecordingStream
 from .archetypes import ContainerBlueprint, PanelBlueprint, ViewBlueprint, ViewContents, ViewportBlueprint
 from .components import PanelState, PanelStateLike
-from .components.container_kind import ContainerKindLike
+
+if TYPE_CHECKING:
+    from ..memory import MemoryRecording
+    from .components.container_kind import ContainerKindLike
 
 ViewContentsLike = Union[Utf8ArrayLike, ViewContents]
 
@@ -187,12 +189,12 @@ class Container:
     def __init__(
         self,
         *args: Container | View,
-        contents: Optional[Iterable[Container | View]] = None,
+        contents: Iterable[Container | View] | None = None,
         kind: ContainerKindLike,
-        column_shares: Optional[Float32ArrayLike] = None,
-        row_shares: Optional[Float32ArrayLike] = None,
-        grid_columns: Optional[int] = None,
-        active_tab: Optional[int | str] = None,
+        column_shares: Float32ArrayLike | None = None,
+        row_shares: Float32ArrayLike | None = None,
+        grid_columns: int | None = None,
+        active_tab: int | str | None = None,
         name: Utf8Like | None,
     ) -> None:
         """

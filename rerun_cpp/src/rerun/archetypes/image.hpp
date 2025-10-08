@@ -11,7 +11,6 @@
 #include "../components/image_format.hpp"
 #include "../components/opacity.hpp"
 #include "../image_utils.hpp"
-#include "../indicator_component.hpp"
 #include "../result.hpp"
 
 #include <cstdint>
@@ -148,7 +147,7 @@ namespace rerun::archetypes {
         /// The format of the image.
         std::optional<ComponentBatch> format;
 
-        /// Opacity of the image, useful for layering several images.
+        /// Opacity of the image, useful for layering several media.
         ///
         /// Defaults to 1.0 (fully opaque).
         std::optional<ComponentBatch> opacity;
@@ -160,10 +159,6 @@ namespace rerun::archetypes {
         std::optional<ComponentBatch> draw_order;
 
       public:
-        static constexpr const char IndicatorComponentType[] = "rerun.components.ImageIndicator";
-
-        /// Indicator component, used to identify the archetype when converting to a list of components.
-        using IndicatorComponent = rerun::components::IndicatorComponent<IndicatorComponentType>;
         /// The name of the archetype as used in `ComponentDescriptor`s.
         static constexpr const char ArchetypeName[] = "rerun.archetypes.Image";
 
@@ -378,7 +373,7 @@ namespace rerun::archetypes {
             return std::move(*this);
         }
 
-        /// Opacity of the image, useful for layering several images.
+        /// Opacity of the image, useful for layering several media.
         ///
         /// Defaults to 1.0 (fully opaque).
         Image with_opacity(const rerun::components::Opacity& _opacity) && {

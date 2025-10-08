@@ -126,13 +126,16 @@ export interface AppOptions extends WebViewerOptions {
 }
 
 // Types are based on `crates/viewer/re_viewer/src/event.rs`.
+// Important: The event names defined here are `snake_case` versions
+// of their `PascalCase` counterparts on the Rust side.
 /** An event produced in the Viewer. */
 export type ViewerEvent =
   | PlayEvent
   | PauseEvent
   | TimeUpdateEvent
   | TimelineChangeEvent
-  | SelectionChangeEvent;
+  | SelectionChangeEvent
+  | RecordingOpenEvent;
 
 /**
  * Properties available on all {@link ViewerEvent} types.
@@ -184,6 +187,34 @@ export type TimelineChangeEvent = ViewerEventBase & {
 export type SelectionChangeEvent = ViewerEventBase & {
   type: "selection_change";
   items: SelectionChangeItem[];
+}
+
+/**
+ * Fired when a new recording is opened in the Viewer.
+ *
+ * For `rrd` file or stream, a recording is considered "open" after
+ * enough information about the recording, such as its ID and source,
+ * is received.
+ *
+ * Contains some basic information about the origin of the recording.
+ */
+export type RecordingOpenEvent = ViewerEventBase & {
+  type: "recording_open";
+
+  /**
+   * Where the recording came from.
+   *
+   * The value should be considered unstable, which is why we don't
+   * list the possible values here.
+   */
+  source: string;
+
+  /**
+   * Version of the SDK used to create this recording.
+   *
+   * Uses semver format.
+   */
+  version?: string;
 }
 
 // A bit of TypeScript metaprogramming to automatically produce a
@@ -274,7 +305,7 @@ function delay(ms: number) {
  * ```
  *
  * Data may be provided to the Viewer as:
- * - An HTTP file URL, e.g. `viewer.start("https://app.rerun.io/version/0.24.0-alpha.1/examples/dna.rrd")`
+ * - An HTTP file URL, e.g. `viewer.start("https://app.rerun.io/version/0.25.1/examples/dna.rrd")`
  * - A Rerun gRPC URL, e.g. `viewer.start("rerun+http://127.0.0.1:9876/proxy")`
  * - A stream of log messages, via {@link WebViewer.open_channel}.
  *
@@ -351,7 +382,7 @@ export class WebViewer {
       // for notebooks/gradio, we can avoid a whole layer
       // of serde by sending over the raw json directly,
       // which will be deserialized in Python instead
-      this.#_dispatch_raw_event(event_json);
+      this.#dispatch_raw_event(event_json);
 
       // for JS users, we dispatch the parsed event
       let event: ViewerEvent = JSON.parse(event_json);
@@ -384,10 +415,9 @@ export class WebViewer {
     return;
   }
 
-  #_raw_events: Set<(event_json: string) => void> = new Set();
-
-  #_dispatch_raw_event(event_json: string) {
-    for (const callback of this.#_raw_events) {
+  #raw_events: Set<(event_json: string) => void> = new Set();
+  #dispatch_raw_event(event_json: string) {
+    for (const callback of this.#raw_events) {
       callback(event_json);
     }
   }
@@ -396,11 +426,11 @@ export class WebViewer {
   // NOTE: Callbacks passed to this function must NOT invoke any viewer methods!
   //       The `setTimeout` is omitted to avoid the 1-tick delay, as it is unnecessary,
   //       because this is only meant to be used for sending events to Jupyter/Gradio.
-  // 
+  //
   // Do not change this without searching for grepping for usage!
   private _on_raw_event(callback: (event: string) => void): () => void {
-    this.#_raw_events.add(callback);
-    return () => this.#_raw_events.delete(callback);
+    this.#raw_events.add(callback);
+    return () => this.#raw_events.delete(callback);
   }
 
   #event_map: Map<

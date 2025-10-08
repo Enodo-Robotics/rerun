@@ -56,7 +56,7 @@ pub struct EncodedImage {
     /// If it cannot guess, it won't be able to render the asset.
     pub media_type: Option<SerializedComponentBatch>,
 
-    /// Opacity of the image, useful for layering several images.
+    /// Opacity of the image, useful for layering several media.
     ///
     /// Defaults to 1.0 (fully opaque).
     pub opacity: Option<SerializedComponentBatch>,
@@ -115,59 +115,38 @@ impl EncodedImage {
             component_type: Some("rerun.components.DrawOrder".into()),
         }
     }
-
-    /// Returns the [`ComponentDescriptor`] for the associated indicator component.
-    #[inline]
-    pub fn descriptor_indicator() -> ComponentDescriptor {
-        ComponentDescriptor {
-            archetype: None,
-            component: "rerun.components.EncodedImageIndicator".into(),
-            component_type: None,
-        }
-    }
 }
 
-static REQUIRED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 1usize]> =
-    once_cell::sync::Lazy::new(|| [EncodedImage::descriptor_blob()]);
+static REQUIRED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [EncodedImage::descriptor_blob()]);
 
-static RECOMMENDED_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
-        [
-            EncodedImage::descriptor_media_type(),
-            EncodedImage::descriptor_indicator(),
-        ]
-    });
+static RECOMMENDED_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 1usize]> =
+    std::sync::LazyLock::new(|| [EncodedImage::descriptor_media_type()]);
 
-static OPTIONAL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 2usize]> =
-    once_cell::sync::Lazy::new(|| {
+static OPTIONAL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 2usize]> =
+    std::sync::LazyLock::new(|| {
         [
             EncodedImage::descriptor_opacity(),
             EncodedImage::descriptor_draw_order(),
         ]
     });
 
-static ALL_COMPONENTS: once_cell::sync::Lazy<[ComponentDescriptor; 5usize]> =
-    once_cell::sync::Lazy::new(|| {
+static ALL_COMPONENTS: std::sync::LazyLock<[ComponentDescriptor; 4usize]> =
+    std::sync::LazyLock::new(|| {
         [
             EncodedImage::descriptor_blob(),
             EncodedImage::descriptor_media_type(),
-            EncodedImage::descriptor_indicator(),
             EncodedImage::descriptor_opacity(),
             EncodedImage::descriptor_draw_order(),
         ]
     });
 
 impl EncodedImage {
-    /// The total number of components in the archetype: 1 required, 2 recommended, 2 optional
-    pub const NUM_COMPONENTS: usize = 5usize;
+    /// The total number of components in the archetype: 1 required, 1 recommended, 2 optional
+    pub const NUM_COMPONENTS: usize = 4usize;
 }
 
-/// Indicator component for the [`EncodedImage`] [`::re_types_core::Archetype`]
-pub type EncodedImageIndicator = ::re_types_core::GenericIndicatorComponent<EncodedImage>;
-
 impl ::re_types_core::Archetype for EncodedImage {
-    type Indicator = EncodedImageIndicator;
-
     #[inline]
     fn name() -> ::re_types_core::ArchetypeName {
         "rerun.archetypes.EncodedImage".into()
@@ -176,14 +155,6 @@ impl ::re_types_core::Archetype for EncodedImage {
     #[inline]
     fn display_name() -> &'static str {
         "Encoded image"
-    }
-
-    #[inline]
-    fn indicator() -> SerializedComponentBatch {
-        #[allow(clippy::unwrap_used)]
-        EncodedImageIndicator::DEFAULT
-            .serialized(Self::descriptor_indicator())
-            .unwrap()
     }
 
     #[inline]
@@ -243,7 +214,6 @@ impl ::re_types_core::AsComponents for EncodedImage {
     fn as_serialized_batches(&self) -> Vec<SerializedComponentBatch> {
         use ::re_types_core::Archetype as _;
         [
-            Some(Self::indicator()),
             self.blob.clone(),
             self.media_type.clone(),
             self.opacity.clone(),
@@ -331,12 +301,7 @@ impl EncodedImage {
                 .map(|draw_order| draw_order.partitioned(_lengths.clone()))
                 .transpose()?,
         ];
-        Ok(columns
-            .into_iter()
-            .flatten()
-            .chain([::re_types_core::indicator_column::<Self>(
-                _lengths.into_iter().count(),
-            )?]))
+        Ok(columns.into_iter().flatten())
     }
 
     /// Helper to partition the component data into unit-length sub-batches.
@@ -357,7 +322,7 @@ impl EncodedImage {
             .or(len_opacity)
             .or(len_draw_order)
             .unwrap_or(0);
-        self.columns(std::iter::repeat(1).take(len))
+        self.columns(std::iter::repeat_n(1, len))
     }
 
     /// The encoded content of some image file, e.g. a PNG or JPEG.
@@ -407,7 +372,7 @@ impl EncodedImage {
         self
     }
 
-    /// Opacity of the image, useful for layering several images.
+    /// Opacity of the image, useful for layering several media.
     ///
     /// Defaults to 1.0 (fully opaque).
     #[inline]

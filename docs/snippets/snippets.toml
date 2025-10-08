@@ -43,6 +43,12 @@ features = [
     ],
   ],
   [
+    "Micro batching",
+    [
+      "howto/micro_batching",
+    ],
+  ],
+  [
     "Partial updates",
     [
       "archetypes/points3d_partial_updates",
@@ -54,6 +60,7 @@ features = [
     "Send custom data",
     [
       "tutorials/any_values",
+      "tutorials/dynamic_archetype",
       "tutorials/extra_values",
       "tutorials/custom_data",
     ],
@@ -78,6 +85,14 @@ features = [
       "howto/serve_web_viewer",
     ],
   ],
+]
+
+# --------------------------------------------------------------------------------------------------
+
+[opt_out]
+backwards_check = [
+  "archetypes/video_stream_synthetic", # Video encodes differently on CI :(
+  "concepts/explicit_recording",       # The file path differs locally and on CI
 ]
 
 
@@ -152,6 +167,9 @@ features = [
   "cpp",  # TODO(#2353): Doesn't exist
   "rust", # Runs indefinitely.
 ]
+"howto/micro_batching" = [
+  "cpp", # TODO(#10661): Doesn't exist
+]
 "howto/send_table" = [
   "py",   # Requires a server to connect to
   "cpp",  # Doesn't exist
@@ -180,6 +198,11 @@ features = [
   "rust", # Blueprint API doesn't exist for C++/Rust
 ]
 "archetypes/video_stream_synthetic" = [
+  "cpp",  # Not implemented
+  "rust", # Not implemented
+]
+"archetypes/video_stream_query_and_mux" = [
+  "py",   # Doesn't produce an rrd file.
   "cpp",  # Not implemented
   "rust", # Not implemented
 ]
@@ -346,3 +369,4 @@ quick_start = [ # These examples don't have exactly the same implementation.
 "archetypes/video_manual_frames" = [
   "$config_dir/../../tests/assets/video/Sintel_1080_10s_av1.mp4",
 ]
+"howto/load_mcap" = ["$config_dir/../../tests/assets/mcap/r2b_galileo.mcap"]

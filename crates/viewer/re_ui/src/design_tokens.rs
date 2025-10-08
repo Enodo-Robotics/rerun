@@ -33,6 +33,17 @@ impl AlertVisuals {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum TableStyle {
+    /// Used for presenting a lot of information to the user
+    /// without wasting vertical space, like when showing log output.
+    #[default]
+    Dense,
+
+    /// Used when we want to fit big, clickable buttons in the table cells.
+    Spacious,
+}
+
 /// The look and feel of the UI.
 ///
 /// Not everything is covered by this.
@@ -47,6 +58,8 @@ pub struct DesignTokens {
     pub large_button_icon_size: Vec2,
     pub large_button_corner_radius: f32,
     pub small_icon_size: Vec2,
+    pub modal_button_width: f32,
+    pub default_modal_width: f32,
 
     // All these colors can be found in dark_theme.ron and light_theme.ron:
     pub top_bar_color: Color32,
@@ -73,7 +86,7 @@ pub struct DesignTokens {
     pub label_button_icon_color: Color32,
 
     /// The color for the background of [`crate::SectionCollapsingHeader`].
-    pub section_collapsing_header_color: Color32,
+    pub section_header_color: Color32,
 
     /// The color we use to mean "loop this selection"
     pub loop_selection_color: Color32,
@@ -197,6 +210,19 @@ pub struct DesignTokens {
     pub list_item_hovered_bg: Color32,
     pub list_item_active_bg: Color32,
     pub list_item_collapse_default: Color32,
+
+    pub code_index_color: Color32,
+    pub code_string_color: Color32,
+    pub code_primitive_color: Color32,
+    pub code_keyword_color: Color32,
+
+    // Table filter UI
+    pub table_filter_frame_stroke: Stroke,
+
+    pub bg_fill_inverse: Color32,
+    pub bg_fill_inverse_hover: Color32,
+    pub text_inverse: Color32,
+    pub icon_inverse: Color32,
 }
 
 impl DesignTokens {
@@ -223,6 +249,8 @@ impl DesignTokens {
             large_button_icon_size: Vec2::splat(get_scalar("large_button_icon_size")?),
             large_button_corner_radius: get_scalar("large_button_corner_radius")?,
             small_icon_size: Vec2::splat(get_scalar("small_icon_size")?),
+            modal_button_width: get_scalar("modal_button_width")?,
+            default_modal_width: get_scalar("default_modal_width")?,
 
             top_bar_color: get_color("top_bar_color"),
             bottom_bar_color: get_color("bottom_bar_color"),
@@ -242,7 +270,7 @@ impl DesignTokens {
             highlight_color: get_color("highlight_color"),
 
             label_button_icon_color: get_color("label_button_icon_color"),
-            section_collapsing_header_color: get_color("section_collapsing_header_color"),
+            section_header_color: get_color("section_header_color"),
 
             loop_selection_color: get_color("loop_selection_color"),
             loop_everything_color: get_color("loop_everything_color"),
@@ -330,6 +358,18 @@ impl DesignTokens {
             list_item_hovered_bg: get_color("list_item_hovered_bg"),
             list_item_active_bg: get_color("list_item_active_bg"),
             list_item_collapse_default: get_color("list_item_collapse_default"),
+
+            code_index_color: get_color("code_index_color"),
+            code_string_color: get_color("code_string_color"),
+            code_primitive_color: get_color("code_primitive_color"),
+
+            code_keyword_color: get_color("code_keyword_color"),
+            table_filter_frame_stroke: get_stroke("table_filter_frame_stroke"),
+
+            bg_fill_inverse: get_color("bg_fill_inverse"),
+            bg_fill_inverse_hover: get_color("bg_fill_inverse-hover"),
+            text_inverse: get_color("text_inverse"),
+            icon_inverse: get_color("icon_inverse"),
         })
     }
 
@@ -453,7 +493,7 @@ impl DesignTokens {
         egui_style.spacing.scroll.bar_width = 6.0;
         egui_style.spacing.scroll.bar_outer_margin = 2.0;
 
-        egui_style.spacing.tooltip_width = 720.0;
+        egui_style.spacing.tooltip_width = 600.0;
 
         egui_style.visuals.image_loading_spinners = false;
     }
@@ -576,24 +616,31 @@ impl DesignTokens {
         4.0
     }
 
-    pub fn table_cell_margin(&self) -> Margin {
+    pub fn table_cell_margin(&self, table_style: TableStyle) -> Margin {
+        match table_style {
+            TableStyle::Dense => Margin::symmetric(8, 2),
+            TableStyle::Spacious => Margin::symmetric(8, 6),
+        }
+    }
+
+    /// The total row height, including margin/spacing.
+    pub fn table_row_height(&self, table_style: TableStyle) -> f32 {
+        match table_style {
+            TableStyle::Dense => 20.0,
+
+            // Should be big enough to contain buttons, i.e. egui_style.spacing.interact_size.y
+            // and the cell margin.
+            TableStyle::Spacious => 32.0,
+        }
+    }
+
+    /// The max height of the content.
+    pub fn table_content_height(&self, table_style: TableStyle) -> f32 {
+        self.table_row_height(table_style) - self.table_cell_margin(table_style).sum().y
+    }
+
+    pub fn header_cell_margin(&self, _table_style: TableStyle) -> Margin {
         Margin::symmetric(8, 6)
-    }
-
-    pub fn table_line_height(&self) -> f32 {
-        // should be big enough to contain buttons, i.e. egui_style.spacing.interact_size.y
-        // and the cell margin
-        32.0
-    }
-
-    /// Line height - margin
-    pub fn table_content_height(&self) -> f32 {
-        self.table_line_height() - self.table_cell_margin().sum().y
-    }
-
-    // TODO(lucasmerlin): Update all tables to the new design
-    pub fn deprecated_table_line_height(&self) -> f32 {
-        20.0
     }
 
     pub fn table_header_height(&self) -> f32 {
@@ -653,6 +700,14 @@ impl DesignTokens {
         frame
     }
 
+    /// Something that provides contrast vs the background
+    pub fn popup_frame(&self, style: &egui::Style) -> egui::Frame {
+        egui::Frame::window(style)
+            .fill(self.notification_panel_background_color)
+            .corner_radius(8)
+            .inner_margin(8.0)
+    }
+
     pub fn bottom_panel_margin(&self) -> egui::Margin {
         self.top_bar_margin()
     }
@@ -688,9 +743,12 @@ impl DesignTokens {
 
     pub fn setup_table_header(_header: &mut egui_extras::TableRow<'_, '_>) {}
 
-    pub fn setup_table_body(&self, body: &mut egui_extras::TableBody<'_>) {
+    pub fn setup_table_body(&self, body: &mut egui_extras::TableBody<'_>, table_style: TableStyle) {
         // Make sure buttons don't visually overflow:
-        body.ui_mut().spacing_mut().interact_size.y = self.table_line_height();
+        body.ui_mut().spacing_mut().interact_size.y = self.table_content_height(table_style);
+
+        // No extra spacing between items in the table body - we bake that into the row height.
+        body.ui_mut().spacing_mut().item_spacing.y = 0.0;
     }
 
     /// Layout area to allocate for the collapsing triangle.
@@ -819,11 +877,9 @@ fn color_from_json(color_table: &ColorTable, color_alias: &ron::Value) -> anyhow
 }
 
 fn try_get_scalar(json: &ron::Value, path: &str) -> anyhow::Result<f32> {
-    json.get(path).and_then(|value| {
-        value
-            .as_f32()
-            .ok_or_else(|| anyhow::anyhow!("'{path}' not a number"))
-    })
+    json.get(path)?
+        .as_f32()
+        .ok_or_else(|| anyhow::anyhow!("'{path}' not a number"))
 }
 
 fn get_aliased_color(color_table: &ColorTable, json: &ron::Value, alias_path: &str) -> Color32 {

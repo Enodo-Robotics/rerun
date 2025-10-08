@@ -67,6 +67,22 @@ function(download_and_build_arrow)
         set(ARROW_CMAKE_PRESET ninja-release-minimal)
     endif()
 
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+        # TODO(apache/arrow#45985): Arrow can't support CMake 4.0 yet
+        # See arrow issue linked from our internal issue above for more details.
+        # See here for what this does https://cmake.org/cmake/help/latest/variable/CMAKE_POLICY_VERSION_MINIMUM.html
+        set(VERSION_PATCH -DCMAKE_POLICY_VERSION_MINIMUM=3.5)
+    else()
+        set(VERSION_PATCH "")
+    endif()
+
+    # Allow for CMAKE_POLICY Override
+    if(CMAKE_POLICY_VERSION_MINIMUM)
+        set(VERSION_PATCH "-DCMAKE_POLICY_VERSION_MINIMUM=${CMAKE_POLICY_VERSION_MINIMUM}")
+    endif()
+
+    set(MIMALLOC_PATCH ${CMAKE_CURRENT_LIST_DIR}/patches/mimalloc_cmake4.patch)
+
     ExternalProject_Add(
         arrow_cpp
         PREFIX ${ARROW_DOWNLOAD_PATH}
@@ -74,6 +90,11 @@ function(download_and_build_arrow)
         GIT_TAG apache-arrow-18.0.0
         GIT_SHALLOW ON
         GIT_PROGRESS OFF # Git progress sounds like a nice idea but is in practice very spammy.
+        UPDATE_COMMAND "" # Prevent unnecessary rebuilds on every cmake --build
+
+        # Apply patch after checkout but before configure
+        # TODO(apache/arrow#45985): Arrow can't support CMake 4.0 yet
+        PATCH_COMMAND git apply --check ${MIMALLOC_PATCH} && git apply ${MIMALLOC_PATCH} || true
 
         # LOG_X ON means that the output of the command will
         # be logged to a file _instead_ of printed to the console.
@@ -101,6 +122,7 @@ function(download_and_build_arrow)
         -DBOOST_SOURCE=BUNDLED
         -DARROW_BOOST_USE_SHARED=OFF
         -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE} # Specify the toolchain file for cross-compilation (see https://github.com/rerun-io/rerun/issues/7445)
+        ${VERSION_PATCH}
         SOURCE_SUBDIR cpp
         BUILD_BYPRODUCTS ${ARROW_LIBRARY_FILE} ${ARROW_BUNDLED_DEPENDENCIES_FILE}
     )

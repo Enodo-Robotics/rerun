@@ -46,31 +46,19 @@ impl AssetVideo {
     /// Panics if the serialized blob data doesn't have the right datatype.
     #[cfg(feature = "video")]
     pub fn read_frame_timestamps_nanos(&self) -> Result<Vec<i64>, re_video::VideoLoadError> {
+        use crate::datatypes::Blob;
         use re_types_core::Loggable as _;
 
         re_tracing::profile_function!();
 
-        let Some(blob) = self.blob.as_ref() else {
-            return Ok(Vec::new());
+        let Some(blob_bytes) = self.blob.as_ref().and_then(Blob::serialized_blob_as_slice) else {
+            return Err(re_video::VideoLoadError::NoVideoTrack); // Error type is close enough
         };
-
-        // Grab blob data without a copy.
-        let blob_list_array = blob
-            .array
-            .as_any()
-            .downcast_ref::<arrow::array::ListArray>()
-            .expect("Video blob data is not a ListArray");
-        let blob_data = blob_list_array.values().to_data();
-        let blob_bytes = blob_data.buffer(0);
 
         let Some(media_type) = self
             .media_type
             .as_ref()
-            .and_then(|mt| {
-                MediaType::from_arrow(&mt.array)
-                    .ok()
-                    .and_then(|mt| mt.first().cloned())
-            })
+            .and_then(|mt| MediaType::from_arrow(&mt.array).ok()?.first().cloned())
             .or_else(|| MediaType::guess_from_data(blob_bytes))
         else {
             return Err(re_video::VideoLoadError::UnrecognizedMimeType);
