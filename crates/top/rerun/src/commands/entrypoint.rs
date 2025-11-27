@@ -70,7 +70,7 @@ Examples:
         rerun --serve-grpc
 
     Host a Rerun gRPC server with continuous file saving:
-        rerun --serve-grpc --save recording.rrd --save-interval 30
+        rerun --serve-grpc --save my_app --save-dir /data --save-interval 30
 
     Spawn a Viewer without also hosting a gRPC server:
         rerun --connect
@@ -79,16 +79,12 @@ Examples:
         rerun rerun+http://localhost:9877/proxy
 
     Listen for incoming gRPC connections from the logging SDK and stream the results to disk:
-        rerun --save new_recording.rrd
+        rerun --save my_app --save-dir /data
 
-    Continuously save data to a file every 30 seconds (runs in headless mode):
-        rerun --save recording.rrd --save-interval 30
+    Continuously save data every 30 seconds with rotating files (runs in headless mode):
+        rerun --save my_app --save-dir ./recordings --save-interval 30
 
-    Continuously save with timestamped file rotation every 60 seconds:
-        rerun --save recording.rrd --save-interval 60 --rotate-files
-
-    Save data with default 30-second interval (headless mode):
-        rerun --save recording.rrd
+    This will create files: ./recordings/my_app_1.rrd, ./recordings/my_app_2.rrd, etc.
 "#;
 
 #[derive(Debug, clap::Parser)]
@@ -158,9 +154,15 @@ When persisted, the state will be stored at the following locations:
     #[clap(long)]
     profile: bool,
 
-    /// Stream incoming log events to an .rrd file at the given path.
+    /// Stream incoming log events to .rrd files using the given application ID.
+    /// Files will be saved as <application_id>_1.rrd, <application_id>_2.rrd, etc.
     #[clap(long)]
     save: Option<String>,
+
+    /// Directory where .rrd files should be saved.
+    /// If not specified, files are saved to the current working directory.
+    #[clap(long)]
+    save_dir: Option<String>,
 
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
@@ -319,15 +321,9 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     ///
     /// The interval is specified in seconds. Defaults to 30 seconds if not specified.
     /// Requires --save to be set. When used, runs in headless mode.
+    /// Files will be saved as <application_id>_1.rrd, <application_id>_2.rrd, etc.
     #[clap(long)]
     save_interval: Option<u64>,
-
-    /// Create a new file for each save interval instead of appending to the same file.
-    ///
-    /// Files will be named with Unix timestamps: <basename>_ts<timestamp>.rrd
-    /// Requires --save with save interval to be set.
-    #[clap(long)]
-    rotate_files: bool,
 }
 
 impl Args {
@@ -622,7 +618,7 @@ where
     if args.version {
         println!("{build_info}");
         println!("Video features: {}", re_video::build_info().features);
-        println!("Release: v0.0.8 - Recording Splicing: Added splice and split commands for time-based data manipulation");
+        println!("Release: v0.1.1 - Application ID-based saving: --save <app_id> --save-dir <dir> with automatic file rotation");
         return Ok(0);
     }
 
@@ -868,7 +864,7 @@ fn run_impl(
     // Determine save interval and headless mode
     let save_interval = if args.save_interval.is_some() {
         if args.save.is_none() {
-            anyhow::bail!("--save-interval requires --save <path>");
+            anyhow::bail!("--save-interval requires --save <application_id>");
         }
         // If --save-interval is explicitly specified, use that value
         Some(args.save_interval.unwrap())
@@ -876,11 +872,6 @@ fn run_impl(
         // No save interval specified - regular save mode
         None
     };
-    
-    // Validate rotate files argument
-    if args.rotate_files && save_interval.is_none() {
-        anyhow::bail!("--rotate-files requires --save with save interval");
-    }
     
     // Determine if we should run in headless mode
     let is_headless = args.serve_grpc || save_interval.is_some();
@@ -908,7 +899,7 @@ fn run_impl(
         #[cfg(feature = "server")]
         {
             let interval = save_interval.unwrap();
-            let rrd_path = args.save.unwrap(); // Already validated above
+            let application_id = args.save.unwrap(); // Already validated above
             
             // Spawn gRPC server and get its receiver
             let (signal, shutdown) = re_grpc_server::shutdown::shutdown();
@@ -933,12 +924,11 @@ fn run_impl(
                 }
             }
 
-            re_log::info!("gRPC server running on {server_addr} with continuous file saving to {rrd_path}");
+            re_log::info!("gRPC server running on {server_addr} with continuous file saving for application '{application_id}'");
 
             // Handle continuous file saving in the main thread
-            let rrd_path_clone = rrd_path.clone();
-            let rotate_files = args.rotate_files;
-            
+            let application_id_clone = application_id.clone();
+
             // Set up for graceful shutdown
             let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
             let tokio_handle = tokio_runtime_handle.clone();
@@ -950,7 +940,8 @@ fn run_impl(
             });
 
             // Run continuous file saving with shutdown handling
-            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path_clone.into(), interval, rotate_files, shutdown_rx) {
+            let save_dir_ref = args.save_dir.as_deref();
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &application_id_clone, save_dir_ref, interval, shutdown_rx) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
         }
@@ -969,8 +960,8 @@ fn run_impl(
 
         #[cfg(feature = "server")]
         {
-            let rrd_path = args.save.unwrap(); // Already validated above
-            
+            let application_id = args.save.unwrap(); // Already validated above
+
             // Spawn gRPC server and get its receiver
             let (signal, shutdown) = re_grpc_server::shutdown::shutdown();
             let (server_rx, _server_table_rx) = re_grpc_server::spawn_with_recv(
@@ -990,11 +981,11 @@ fn run_impl(
                     }
                 }
             }
-            
+
             // Only use the server receiver for continuous saving
             let rx_set = ReceiveSet::new(vec![server_rx]);
-            
-            re_log::info!("Running in headless mode with gRPC server on {server_addr} and continuous file saving to {rrd_path}");
+
+            re_log::info!("Running in headless mode with gRPC server on {server_addr} and continuous file saving for application '{application_id}'");
 
             // Set up for graceful shutdown
             let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
@@ -1007,7 +998,8 @@ fn run_impl(
             });
 
             // Run continuous file saving with shutdown handling
-            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &rrd_path.into(), interval, args.rotate_files, shutdown_rx) {
+            let save_dir_ref = args.save_dir.as_deref();
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &application_id, save_dir_ref, interval, shutdown_rx) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
         }
@@ -1026,8 +1018,15 @@ fn run_impl(
 
         #[cfg(feature = "server")]
         {
-            let rrd_path = args.save.unwrap();
-            
+            let application_id = args.save.unwrap();
+
+            // Create save directory if specified
+            if let Some(ref dir) = args.save_dir {
+                std::fs::create_dir_all(dir)?;
+            }
+
+            let file_path = generate_sequential_path(&application_id, 1, args.save_dir.as_deref());
+
             // Spawn gRPC server and get its receiver
             let (signal, shutdown) = re_grpc_server::shutdown::shutdown();
             let (server_rx, _server_table_rx) = re_grpc_server::spawn_with_recv(
@@ -1038,8 +1037,8 @@ fn run_impl(
 
             // Only use the server receiver for saving
             let rx_set = ReceiveSet::new(vec![server_rx]);
-            
-            re_log::info!("gRPC server running on {server_addr} with file saving to {rrd_path}");
+
+            re_log::info!("gRPC server running on {server_addr} with file saving to {}", file_path.display());
 
             // Set up for graceful shutdown
             let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
@@ -1052,22 +1051,29 @@ fn run_impl(
             });
 
             // Use regular streaming save (not continuous)
-            let result = stream_to_rrd_on_disk(&rx_set, &rrd_path.into());
-            
+            let result = stream_to_rrd_on_disk(&rx_set, &file_path);
+
             // Wait for shutdown signal
             let _ = shutdown_rx.recv();
-            
+
             result?
         }
 
         Ok(())
-    } else if let Some(rrd_path) = args.save {
+    } else if let Some(application_id) = args.save {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--save` does not support catalogs");
         }
 
+        // Create save directory if specified
+        if let Some(ref dir) = args.save_dir {
+            std::fs::create_dir_all(dir)?;
+        }
+
+        // For regular save mode (no interval), save to <application_id>_1.rrd
+        let file_path = generate_sequential_path(&application_id, 1, args.save_dir.as_deref());
         let rx = ReceiveSet::new(rxs_log);
-        Ok(stream_to_rrd_on_disk(&rx, &rrd_path.into())?)
+        Ok(stream_to_rrd_on_disk(&rx, &file_path)?)
     } else if args.serve_grpc {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--serve` does not support catalogs");
@@ -1467,25 +1473,28 @@ fn safe_save_with_retry(
 
 fn stream_to_rrd_continuous_with_shutdown(
     rx: &re_smart_channel::ReceiveSet<LogMsg>,
-    path: &std::path::PathBuf,
+    application_id: &str,
+    save_dir: Option<&str>,
     interval_seconds: u64,
-    rotate_files: bool,
     shutdown_rx: std::sync::mpsc::Receiver<()>,
 ) -> Result<(), re_log_encoding::FileSinkError> {
 
-    if rotate_files {
-        re_log::info!("Starting continuous download with file rotation based on {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
-    } else {
-        re_log::info!("Starting continuous download to {path:?} every {interval_seconds} seconds. Abort with Ctrl-C.");
+    let save_location = save_dir.unwrap_or(".");
+    re_log::info!("Starting continuous download with file rotation for '{application_id}' every {interval_seconds} seconds. Files will be saved to '{save_location}' as {application_id}_1.rrd, {application_id}_2.rrd, etc. Abort with Ctrl-C.");
+
+    // Create save directory if it doesn't exist
+    if let Some(dir) = save_dir {
+        std::fs::create_dir_all(dir).map_err(|err| {
+            re_log_encoding::FileSinkError::CreateFile(std::path::PathBuf::from(dir), err)
+        })?;
     }
 
     let mut static_messages = Vec::new();
     let mut temporal_messages = Vec::new();
     let mut last_save = std::time::Instant::now();
     let save_interval = std::time::Duration::from_secs(interval_seconds);
-    
-    // Add file locking mechanism to prevent concurrent operations
-    let file_mutex = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let mut file_counter = 1u64; // Start with file number 1
+
     let mut shutdown_requested = false;
 
     loop {
@@ -1540,17 +1549,12 @@ fn stream_to_rrd_continuous_with_shutdown(
             None => {
                 // No message received within timeout, check if we should save
                 if last_save.elapsed() >= save_interval && !temporal_messages.is_empty() {
-                    let target_path = if rotate_files {
-                        generate_timestamped_path(path)
-                    } else {
-                        path.clone()
-                    };
+                    let target_path = generate_sequential_path(application_id, file_counter, save_dir);
                     safe_save_with_retry(&static_messages, &temporal_messages, &target_path, 3)?;
                     temporal_messages.clear();
-                    // After first save, clear static messages so they're not duplicated  
-                    if !static_messages.is_empty() && target_path.exists() {
-                        static_messages.clear();
-                    }
+                    // After first save, clear static messages so they're not duplicated
+                    static_messages.clear();
+                    file_counter += 1;
                     last_save = std::time::Instant::now();
                 }
             }
@@ -1592,14 +1596,10 @@ fn stream_to_rrd_continuous_with_shutdown(
 
     // Final save of any remaining messages
     if !temporal_messages.is_empty() {
-        let target_path = if rotate_files {
-            generate_timestamped_path(path)
-        } else {
-            path.clone()
-        };
+        let target_path = generate_sequential_path(application_id, file_counter, save_dir);
         re_log::info!("Performing final save of {} remaining messages", temporal_messages.len());
-        // For final save, only pass static messages if this is the very first save (file doesn't exist)
-        let static_for_final: &[LogMsg] = if target_path.exists() { &[] } else { &static_messages };
+        // For final save, include static messages if we haven't saved any files yet (counter is still 1)
+        let static_for_final: &[LogMsg] = if file_counter == 1 { &static_messages } else { &[] };
         safe_save_with_retry(static_for_final, &temporal_messages, &target_path, 5)?;
     }
 
@@ -1614,29 +1614,12 @@ fn save_messages_to_file_with_static(
     temporal_messages: &[LogMsg],
     path: &std::path::PathBuf,
 ) -> Result<(), re_log_encoding::FileSinkError> {
-    use re_log_encoding::FileSinkError;
-
     let total_messages = static_messages.len() + temporal_messages.len();
-    
-    // For timestamped files (rotate_files), always create new files
-    // For non-rotating files, check if file exists to determine append vs create
-    let should_append = path.exists() && 
-                       path.metadata().map(|m| m.len() > 0).unwrap_or(false) &&
-                       !path.file_name()
-                           .and_then(|name| name.to_str())
-                           .map(|name| name.contains("_ts"))
-                           .unwrap_or(false);
-    
-    if should_append {
-        // Append mode: only write temporal messages
-        re_log::info!("Appending {} temporal messages to existing file {path:?}", temporal_messages.len());
-        append_messages_to_file(temporal_messages, path)?;
-    } else {
-        // New file: write static + temporal messages
-        re_log::info!("Creating new file with {} messages ({} static, {} temporal) at {path:?}", 
-                      total_messages, static_messages.len(), temporal_messages.len());
-        create_file_with_messages(static_messages, temporal_messages, path)?;
-    }
+
+    // Always create new files with sequential numbering
+    re_log::info!("Creating new file with {} messages ({} static, {} temporal) at {path:?}",
+                  total_messages, static_messages.len(), temporal_messages.len());
+    create_file_with_messages(static_messages, temporal_messages, path)?;
 
     Ok(())
 }
@@ -1860,16 +1843,11 @@ fn remove_end_marker(path: &std::path::PathBuf) -> Result<(), re_log_encoding::F
     Ok(())
 }
 
-fn generate_timestamped_path(base_path: &std::path::PathBuf) -> std::path::PathBuf {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    let parent = base_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let stem = base_path.file_stem().and_then(|s| s.to_str()).unwrap_or("recording");
-    let extension = base_path.extension().and_then(|s| s.to_str()).unwrap_or("rrd");
-    
-    let new_filename = format!("{}_ts{}.{}", stem, now, extension);
-    parent.join(new_filename)
+fn generate_sequential_path(application_id: &str, counter: u64, save_dir: Option<&str>) -> std::path::PathBuf {
+    let filename = format!("{}_{}.rrd", application_id, counter);
+    if let Some(dir) = save_dir {
+        std::path::PathBuf::from(dir).join(filename)
+    } else {
+        std::path::PathBuf::from(filename)
+    }
 }
