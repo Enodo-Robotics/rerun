@@ -324,6 +324,15 @@ If no arguments are given, a server will be hosted which a Rerun SDK can connect
     /// Files will be saved as <application_id>_1.rrd, <application_id>_2.rrd, etc.
     #[clap(long)]
     save_interval: Option<u64>,
+
+    /// Only include static data in the first saved file.
+    ///
+    /// By default, static data (e.g., mesh definitions, coordinate systems) is included
+    /// in every saved file so each file can be loaded independently. Use this flag to
+    /// only include static data in the first file, reducing file sizes for subsequent files.
+    /// Note: StoreInfo (application ID, etc.) is always included in every file.
+    #[clap(long)]
+    save_only_first_static: bool,
 }
 
 impl Args {
@@ -941,7 +950,7 @@ fn run_impl(
 
             // Run continuous file saving with shutdown handling
             let save_dir_ref = args.save_dir.as_deref();
-            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &application_id_clone, save_dir_ref, interval, shutdown_rx) {
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &application_id_clone, save_dir_ref, interval, shutdown_rx, args.save_only_first_static) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
         }
@@ -999,7 +1008,7 @@ fn run_impl(
 
             // Run continuous file saving with shutdown handling
             let save_dir_ref = args.save_dir.as_deref();
-            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &application_id, save_dir_ref, interval, shutdown_rx) {
+            if let Err(e) = stream_to_rrd_continuous_with_shutdown(&rx_set, &application_id, save_dir_ref, interval, shutdown_rx, args.save_only_first_static) {
                 re_log::error!("Continuous file saving failed: {e}");
             }
         }
@@ -1480,6 +1489,7 @@ fn stream_to_rrd_continuous_with_shutdown(
     save_dir: Option<&str>,
     interval_seconds: u64,
     shutdown_rx: std::sync::mpsc::Receiver<()>,
+    only_first_static: bool,
 ) -> Result<(), re_log_encoding::FileSinkError> {
 
     let save_location = save_dir.unwrap_or(".");
@@ -1492,6 +1502,8 @@ fn stream_to_rrd_continuous_with_shutdown(
         })?;
     }
 
+    // Store info message - kept separately so it can be included in every file
+    let mut store_info_msg: Option<LogMsg> = None;
     let mut static_messages = Vec::new();
     let mut temporal_messages = Vec::new();
     let mut last_save = std::time::Instant::now();
@@ -1517,7 +1529,12 @@ fn stream_to_rrd_continuous_with_shutdown(
                         // Rewrite the application ID to use the user-specified value
                         rewrite_application_id(&mut payload, application_id);
 
-                        if is_static_message(&payload) {
+                        // Keep SetStoreInfo separate so we can include it in every file
+                        if matches!(payload, LogMsg::SetStoreInfo(_)) {
+                            if store_info_msg.is_none() {
+                                store_info_msg = Some(payload);
+                            }
+                        } else if is_static_message(&payload) {
                             // Only add to static_messages if not already present
                             if !static_messages.iter().any(|existing| {
                                 match (existing, &payload) {
@@ -1556,10 +1573,18 @@ fn stream_to_rrd_continuous_with_shutdown(
                 // No message received within timeout, check if we should save
                 if last_save.elapsed() >= save_interval && !temporal_messages.is_empty() {
                     let target_path = generate_sequential_path(application_id, file_counter, save_dir);
-                    safe_save_with_retry(&static_messages, &temporal_messages, &target_path, 3)?;
+                    // Include store_info in static messages for this save
+                    // If only_first_static is true, only include static data in the first file
+                    let include_static = !only_first_static || file_counter == 1;
+                    let static_with_store_info: Vec<LogMsg> = store_info_msg.iter()
+                        .cloned()
+                        .chain(if include_static { static_messages.iter().cloned().collect::<Vec<_>>() } else { vec![] })
+                        .collect();
+                    safe_save_with_retry(&static_with_store_info, &temporal_messages, &target_path, 3)?;
                     temporal_messages.clear();
-                    // After first save, clear static messages so they're not duplicated
-                    static_messages.clear();
+                    // Note: We never clear static_messages - they're kept around to be included
+                    // in future files (unless only_first_static is set, in which case they're
+                    // simply not included after the first file via the include_static flag)
                     file_counter += 1;
                     last_save = std::time::Instant::now();
                 }
@@ -1607,9 +1632,13 @@ fn stream_to_rrd_continuous_with_shutdown(
     if !temporal_messages.is_empty() {
         let target_path = generate_sequential_path(application_id, file_counter, save_dir);
         re_log::info!("Performing final save of {} remaining messages", temporal_messages.len());
-        // For final save, include static messages if we haven't saved any files yet (counter is still 1)
-        let static_for_final: &[LogMsg] = if file_counter == 1 { &static_messages } else { &[] };
-        safe_save_with_retry(static_for_final, &temporal_messages, &target_path, 5)?;
+        // Always include store_info_msg, plus static messages based on only_first_static flag
+        let include_static = !only_first_static || file_counter == 1;
+        let static_with_store_info: Vec<LogMsg> = store_info_msg.iter()
+            .cloned()
+            .chain(if include_static { static_messages.iter().cloned().collect::<Vec<_>>() } else { vec![] })
+            .collect();
+        safe_save_with_retry(&static_with_store_info, &temporal_messages, &target_path, 5)?;
     }
 
     re_log::info!("Continuous download completed.");
