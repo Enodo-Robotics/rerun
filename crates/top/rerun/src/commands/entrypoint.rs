@@ -1051,7 +1051,7 @@ fn run_impl(
             });
 
             // Use regular streaming save (not continuous)
-            let result = stream_to_rrd_on_disk(&rx_set, &file_path);
+            let result = stream_to_rrd_on_disk(&rx_set, &file_path, &application_id);
 
             // Wait for shutdown signal
             let _ = shutdown_rx.recv();
@@ -1073,7 +1073,7 @@ fn run_impl(
         // For regular save mode (no interval), save to <application_id>_1.rrd
         let file_path = generate_sequential_path(&application_id, 1, args.save_dir.as_deref());
         let rx = ReceiveSet::new(rxs_log);
-        Ok(stream_to_rrd_on_disk(&rx, &file_path)?)
+        Ok(stream_to_rrd_on_disk(&rx, &file_path, &application_id)?)
     } else if args.serve_grpc {
         if !redap_uris.is_empty() {
             anyhow::bail!("`--serve` does not support catalogs");
@@ -1406,6 +1406,7 @@ fn is_static_message(log_msg: &LogMsg) -> bool {
 fn stream_to_rrd_on_disk(
     rx: &re_smart_channel::ReceiveSet<LogMsg>,
     path: &std::path::PathBuf,
+    application_id: &str,
 ) -> Result<(), re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
@@ -1413,7 +1414,7 @@ fn stream_to_rrd_on_disk(
         re_log::warn!("Overwriting existing file at {path:?}");
     }
 
-    re_log::info!("Saving incoming log stream to {path:?}. Abort with Ctrl-C.");
+    re_log::info!("Saving incoming log stream to {path:?} for application '{application_id}'. Abort with Ctrl-C.");
 
     let encoding_options = re_log_encoding::EncodingOptions::PROTOBUF_COMPRESSED;
     let file =
@@ -1426,7 +1427,9 @@ fn stream_to_rrd_on_disk(
 
     loop {
         if let Ok(msg) = rx.recv() {
-            if let Some(payload) = msg.into_data() {
+            if let Some(mut payload) = msg.into_data() {
+                // Rewrite the application ID to use the user-specified value
+                rewrite_application_id(&mut payload, application_id);
                 encoder.append(&payload)?;
             }
         } else {
@@ -1510,7 +1513,10 @@ fn stream_to_rrd_continuous_with_shutdown(
         match rx.recv_timeout(timeout) {
             Some((_, msg)) => {
                 match msg.payload {
-                    re_smart_channel::SmartMessagePayload::Msg(payload) => {
+                    re_smart_channel::SmartMessagePayload::Msg(mut payload) => {
+                        // Rewrite the application ID to use the user-specified value
+                        rewrite_application_id(&mut payload, application_id);
+
                         if is_static_message(&payload) {
                             // Only add to static_messages if not already present
                             if !static_messages.iter().any(|existing| {
@@ -1568,7 +1574,10 @@ fn stream_to_rrd_continuous_with_shutdown(
                 Some((_, msg)) => {
                     // Process this final message
                     match msg.payload {
-                        re_smart_channel::SmartMessagePayload::Msg(payload) => {
+                        re_smart_channel::SmartMessagePayload::Msg(mut payload) => {
+                            // Rewrite the application ID to use the user-specified value
+                            rewrite_application_id(&mut payload, application_id);
+
                             if !is_static_message(&payload) {
                                 // Only add if not already present
                                 if !temporal_messages.iter().any(|existing| {
@@ -1849,5 +1858,18 @@ fn generate_sequential_path(application_id: &str, counter: u64, save_dir: Option
         std::path::PathBuf::from(dir).join(filename)
     } else {
         std::path::PathBuf::from(filename)
+    }
+}
+
+/// Rewrite the application ID in a LogMsg.
+///
+/// For `SetStoreInfo` messages, this updates the application_id in the StoreInfo.
+/// For `ArrowMsg` messages, there's no application_id to change (only store_id).
+///
+/// This ensures that all saved data uses the user-specified application ID
+/// rather than whatever was sent by the client.
+fn rewrite_application_id(msg: &mut LogMsg, new_app_id: &str) {
+    if let LogMsg::SetStoreInfo(set_store_info) = msg {
+        set_store_info.info.application_id = re_log_types::ApplicationId(new_app_id.to_owned());
     }
 }
