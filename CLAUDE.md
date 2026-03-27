@@ -1,10 +1,23 @@
-# Claude Instructions for Rerun Headless Mode
+# Claude Instructions for Enodo Rerun Fork (RRL)
 
-This document contains instructions for Claude on how to build and release custom Rerun wheels with headless mode features.
+This document contains instructions for Claude on how to build, release, and develop the custom Rerun fork maintained by Enodo Robotics.
+
+## Releasing Wheels (CI)
+
+Wheels are built automatically by a self-hosted GitHub Actions runner when a tag is pushed:
+
+```bash
+git tag RRL-v0.2.0
+git push origin RRL-v0.2.0
+```
+
+The workflow `.github/workflows/build_wheels_on_tag.yml` handles the full build, verification, and upload to the GitHub release. Tags follow the convention `RRL-v{major}.{minor}.{patch}`.
+
+The self-hosted runner must be registered in the repo under Settings > Actions > Runners. The workflow can also be triggered manually via workflow_dispatch.
 
 ## Custom Features Added
 
-This fork includes the following custom features for headless mode and file management:
+### Headless Recording & File Management
 
 1. **`--save <application_id>`**: Save recordings with an application ID
    - Files are named as `<application_id>_1.rrd`, `<application_id>_2.rrd`, etc.
@@ -20,6 +33,32 @@ This fork includes the following custom features for headless mode and file mana
    - Requires `--save` to be set
 
 These features are implemented in `/home/oscar/Documents/rerun/crates/top/rerun/src/commands/entrypoint.rs`.
+
+### Annotation System
+
+4. **Annotation Panel** (`Ctrl+Shift+A` or "Ann." button in top bar):
+   - Quick-tag buttons (Anomaly, Interesting, Bug, Note) for one-click annotation at current time
+   - Custom user-defined tags (persisted across sessions, shareable via recording export)
+   - Free-text annotations with Ctrl+Enter submit
+   - Entity-aware: select an entity in the viewport, annotations log under `{entity}/_annotation`
+   - Locked target: selection persists across panel interactions
+   - Session annotation list with navigation (click time to jump) and removal
+
+5. **Text Log View Enhancement**: Clicking a time value in the Text Log view selects the corresponding entity. For `_annotation` entities, the parent entity is selected instead.
+
+6. **Export Annotations**: "Export annotations to .rrd" button saves only annotation entities to a separate file. Supports round-trip: export → close → re-import → continue annotating.
+
+Key annotation files:
+- Panel UI: `crates/viewer/re_viewer/src/ui/annotation_panel.rs`
+- SystemCommands: `crates/viewer/re_viewer_context/src/global_context/command_sender.rs` (AddAnnotation, ClearAnnotation, UpdateRecording, ExportAnnotations)
+- UICommand: `crates/viewer/re_ui/src/command.rs` (ToggleAnnotationPanel)
+- Text Log view: `crates/viewer/re_view_text_log/src/view_class.rs` (entity selection on time click)
+- App wiring: `crates/viewer/re_viewer/src/app.rs` and `app_state.rs`
+
+### Other Changes
+
+7. **Fallback file reader**: `.rrd` files load gracefully when inotify watches are exhausted (common on Linux with many file watchers). Falls back to non-streaming reader silently.
+   - File: `crates/store/re_data_loader/src/loader_rrd.rs`
 
 ## Building and Releasing Wheels
 

@@ -1,0 +1,87 @@
+name: Build Wheels on Tag
+
+on:
+  push:
+    tags:
+      - "RRL-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-wheel:
+    name: "Build Wheel (self-hosted)"
+    runs-on: self-hosted
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.84.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Extract tag name
+        id: version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building for tag: $TAG"
+
+      - name: Build CLI binary
+        run: cargo build --release --bin rerun
+
+      - name: Copy CLI binary into Python package
+        run: cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
+
+      - name: Build Python wheel
+        run: |
+          mkdir -p wheels
+          RERUN_BUILDING_WHEEL=1 maturin build \
+            --release \
+            --manifest-path rerun_py/Cargo.toml \
+            --features web_viewer,nasm \
+            --out ./wheels/
+
+      - name: Verify wheel contains custom features
+        run: |
+          python -m zipfile -e ./wheels/rerun_sdk-*.whl extracted_wheel
+          chmod +x extracted_wheel/rerun_sdk/rerun_cli/rerun
+          extracted_wheel/rerun_sdk/rerun_cli/rerun --help | grep -q "save-dir" \
+            && echo "Custom features verified" \
+            || (echo "ERROR: Custom features missing from wheel!" && exit 1)
+          rm -rf extracted_wheel
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ steps.version.outputs.tag }}
+          path: ./wheels/*.whl
+
+      - name: Create release and upload wheel
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Create release if it doesn't exist
+          gh release view "$TAG" || gh release create "$TAG" --title "$TAG" --generate-notes
+          # Upload wheel (overwrite if exists)
+          gh release upload "$TAG" ./wheels/*.whl --clobber

@@ -12,6 +12,39 @@
   <a href="https://discord.gg/Gcm8BbTaAj">                              <img alt="Rerun Discord"  src="https://img.shields.io/discord/1062300748202921994?label=Rerun%20Discord"> </a>
 </h1>
 
+# Enodo Robotics Custom Fork (RRL)
+
+This is a custom fork of Rerun maintained by Enodo Robotics. It adds headless recording, annotation, and file management features on top of upstream Rerun.
+
+## Custom Features
+
+- **`--save <app_id>`** / **`--save-dir`** / **`--save-interval`**: Headless recording with rotating files
+- **Annotation Panel** (`Ctrl+Shift+A`): Annotate recordings with quick tags, custom tags, and free text. Annotations are entity-aware — select an entity in the viewport and annotations are logged under `{entity}/_annotation`. Clicking a text log entry's time navigates to that time and re-selects the source entity.
+- **Export Annotations**: Save annotations to a separate `.rrd` file for sharing between annotators.
+- **Fallback file reader**: Gracefully handles exhausted inotify watches instead of failing.
+
+## Releasing Wheels
+
+Wheels are built automatically by a **self-hosted GitHub Actions runner** when a tag is pushed:
+
+```bash
+git tag RRL-v0.2.0
+git push origin RRL-v0.2.0
+```
+
+This triggers `.github/workflows/build_wheels_on_tag.yml` which:
+1. Builds the CLI binary (`cargo build --release --bin rerun`)
+2. Copies it into the Python package
+3. Builds the wheel with maturin
+4. Verifies custom features are present
+5. Uploads the `.whl` to the GitHub release
+
+The self-hosted runner must be registered under Settings > Actions > Runners. The workflow can also be triggered manually via `workflow_dispatch`.
+
+Previous releases follow the tag convention `RRL-v{major}.{minor}.{patch}` (e.g. `RRL-v0.1.1`).
+
+---
+
 # Time-aware multimodal data stack and visualizations
 Rerun is building the multimodal data stack to model, ingest, store, query and view robotics-style data.
 It's used in areas like robotics, spatial and embodied AI, generative media, industrial processing, simulation, security, and health.
