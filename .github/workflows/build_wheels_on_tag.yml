@@ -15,7 +15,7 @@ defaults:
 
 jobs:
   build-wheel:
-    name: "Build Wheel (self-hosted)"
+    name: "Build Wheel (self-hosted, Docker)"
     runs-on: self-hosted
     timeout-minutes: 120
 
@@ -25,19 +25,6 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.84.0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install maturin
-        run: pip install maturin
-
       - name: Extract tag name
         id: version
         run: |
@@ -45,29 +32,39 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Building for tag: $TAG"
 
-      - name: Build CLI binary
-        run: cargo build --release --bin rerun
+      - name: Build Docker image
+        run: docker build -t rerun-builder -f .github/Dockerfile.build .
 
-      - name: Copy CLI binary into Python package
-        run: cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
-
-      - name: Build Python wheel
+      - name: Build wheel inside Docker
         run: |
           mkdir -p wheels
-          RERUN_BUILDING_WHEEL=1 maturin build \
-            --release \
-            --manifest-path rerun_py/Cargo.toml \
-            --features web_viewer,nasm \
-            --out ./wheels/
+          docker run --rm \
+            -v "${{ github.workspace }}:/build" \
+            -w /build \
+            rerun-builder \
+            bash -c '
+              set -euo pipefail
 
-      - name: Verify wheel contains custom features
-        run: |
-          python -m zipfile -e ./wheels/rerun_sdk-*.whl extracted_wheel
-          chmod +x extracted_wheel/rerun_sdk/rerun_cli/rerun
-          extracted_wheel/rerun_sdk/rerun_cli/rerun --help | grep -q "save-dir" \
-            && echo "Custom features verified" \
-            || (echo "ERROR: Custom features missing from wheel!" && exit 1)
-          rm -rf extracted_wheel
+              echo "==> Building CLI binary..."
+              cargo build --release --bin rerun
+
+              echo "==> Copying CLI into Python package..."
+              cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
+
+              echo "==> Building Python wheel..."
+              RERUN_BUILDING_WHEEL=1 maturin build \
+                --release \
+                --manifest-path rerun_py/Cargo.toml \
+                --features nasm \
+                --out ./wheels/
+
+              echo "==> Verifying custom features..."
+              python3 -m zipfile -e ./wheels/rerun_sdk-*.whl /tmp/extracted_wheel
+              chmod +x /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun
+              /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun --help | grep -q "save-dir" \
+                && echo "Custom features verified!" \
+                || (echo "ERROR: Custom features missing!" && exit 1)
+            '
 
       - name: Upload wheel as artifact
         uses: actions/upload-artifact@v4
