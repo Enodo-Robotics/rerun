@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Fix permissions from previous Docker run
+        run: docker run --rm -v "${{ github.workspace }}:/build" ubuntu:22.04 chown -R $(id -u):$(id -g) /build 2>/dev/null || true
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -38,36 +41,41 @@ jobs:
       - name: Build wheel inside Docker
         run: |
           mkdir -p wheels
+          HOST_UID=$(id -u)
+          HOST_GID=$(id -g)
           docker run --rm \
             -v "${{ github.workspace }}:/build" \
             -w /build \
             rerun-builder \
-            bash -c '
+            bash -c "
               set -euo pipefail
 
-              echo "==> Building web viewer WASM..."
+              echo '==> Building web viewer WASM...'
               cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g
 
-              echo "==> Building CLI binary..."
+              echo '==> Building CLI binary...'
               cargo build --release --bin rerun
 
-              echo "==> Copying CLI into Python package..."
+              echo '==> Copying CLI into Python package...'
               cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
 
-              echo "==> Building Python wheel..."
+              echo '==> Building Python wheel...'
               RERUN_BUILDING_WHEEL=1 maturin build \
                 --release \
                 --manifest-path rerun_py/Cargo.toml \
                 --features web_viewer,nasm \
                 --out ./wheels/
 
-              echo "==> Verifying custom features..."
+              echo '==> Verifying custom features...'
               python3 -m zipfile -e ./wheels/rerun_sdk-*.whl /tmp/extracted_wheel
               chmod +x /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun
-              /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun --help | grep -q "save-dir" \
-                && echo "Custom features verified!" \
-                || (echo "ERROR: Custom features missing!" && exit 1)
-            '
+              /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun --help | grep -q save-dir \
+                && echo 'Custom features verified!' \
+                || (echo 'ERROR: Custom features missing!' && exit 1)
+
+              echo '==> Fixing file ownership...'
+              chown -R ${HOST_UID}:${HOST_GID} /build/target /build/wheels /build/web_viewer
+            "
 
       - name: Upload wheel as artifact
         uses: actions/upload-artifact@v4
