@@ -6,9 +6,9 @@ use re_types::View as _;
 use re_types::{components::TextLogLevel, ViewClassIdentifier};
 use re_ui::{Help, UiExt as _};
 use re_viewer_context::{
-    level_to_rich_text, IdentifiedViewSystem as _, ViewClass, ViewClassRegistryError, ViewId,
-    ViewQuery, ViewSpawnHeuristics, ViewState, ViewStateExt as _, ViewSystemExecutionError,
-    ViewerContext,
+    level_to_rich_text, IdentifiedViewSystem as _, SystemCommandSender as _, ViewClass,
+    ViewClassRegistryError, ViewId, ViewQuery, ViewSpawnHeuristics, ViewState, ViewStateExt as _,
+    ViewSystemExecutionError, ViewerContext,
 };
 
 use super::visualizer_system::{Entry, TextLogSystem};
@@ -369,7 +369,29 @@ fn table_ui(
                             .get(timeline)
                             .map(re_log_types::TimeInt::from)
                             .unwrap_or(re_log_types::TimeInt::STATIC);
-                        item_ui::time_button(ctx, ui, timeline, row_time);
+                        let time_response = item_ui::time_button(ctx, ui, timeline, row_time);
+
+                        // Clicking a time button also selects the row's entity.
+                        // For _annotation entities, select the parent instead.
+                        if time_response.clicked() {
+                            let path_str = entry.entity_path.to_string();
+                            let select_path = if path_str.ends_with("/_annotation") {
+                                let parent = path_str.trim_end_matches("/_annotation");
+                                if parent.is_empty() { None } else { Some(EntityPath::from(parent)) }
+                            } else {
+                                Some(entry.entity_path.clone())
+                            };
+
+                            if let Some(path) = select_path {
+                                ctx.command_sender().send_system(
+                                    re_viewer_context::SystemCommand::SetSelection(
+                                        re_viewer_context::Item::InstancePath(
+                                            re_entity_db::InstancePath::entity_all(path),
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
 
                         if let Some(global_time) = global_time {
                             if timeline == global_timeline.name() {

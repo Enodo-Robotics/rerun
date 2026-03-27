@@ -75,25 +75,53 @@ impl crate::DataLoader for RrdLoader {
             "rrd" => {
                 // For .rrd files we retry reading despite reaching EOF to support live (writer) streaming.
                 // Decoder will give up when it sees end of file marker (i.e. end-of-stream message header)
-                let retryable_reader = RetryableFileReader::new(&filepath).with_context(|| {
-                    format!("failed to create retryable file reader for {filepath:?}")
-                })?;
-                let decoder = Decoder::new(retryable_reader)?;
+                match RetryableFileReader::new(&filepath) {
+                    Ok(retryable_reader) => {
+                        let decoder = Decoder::new(retryable_reader)?;
 
-                // NOTE: This is IO bound, it must run on a dedicated thread, not the shared rayon thread pool.
-                std::thread::Builder::new()
-                    .name(format!("decode_and_stream({filepath:?})"))
-                    .spawn({
-                        let filepath = filepath.clone();
-                        move || {
-                            decode_and_stream(
-                                &filepath, &tx, decoder,
-                                // Never use import semantics for .rrd files
-                                None, None,
-                            );
-                        }
-                    })
-                    .with_context(|| format!("Failed to spawn IO thread for {filepath:?}"))?;
+                        // NOTE: This is IO bound, it must run on a dedicated thread, not the shared rayon thread pool.
+                        std::thread::Builder::new()
+                            .name(format!("decode_and_stream({filepath:?})"))
+                            .spawn({
+                                let filepath = filepath.clone();
+                                move || {
+                                    decode_and_stream(
+                                        &filepath, &tx, decoder,
+                                        // Never use import semantics for .rrd files
+                                        None, None,
+                                    );
+                                }
+                            })
+                            .with_context(|| format!("Failed to spawn IO thread for {filepath:?}"))?;
+                    }
+                    Err(err) => {
+                        // Fall back to non-retrying reader (same as .rbl) when file watcher
+                        // cannot be created (e.g. inotify limit exhausted). This means we won't
+                        // pick up live appends, but the file will still load.
+                        re_log::debug!(
+                            "Failed to create retryable file reader for {filepath:?}: {err}. \
+                             Falling back to non-streaming reader."
+                        );
+
+                        let file = std::fs::File::open(&filepath)
+                            .with_context(|| format!("Failed to open file {filepath:?}"))?;
+                        let file = std::io::BufReader::new(file);
+                        let decoder = Decoder::new(file)?;
+
+                        std::thread::Builder::new()
+                            .name(format!("decode_and_stream({filepath:?})"))
+                            .spawn({
+                                let filepath = filepath.clone();
+                                move || {
+                                    decode_and_stream(
+                                        &filepath, &tx, decoder,
+                                        None, None,
+                                    );
+                                }
+                            })
+                            .with_context(|| format!("Failed to spawn IO thread for {filepath:?}"))?;
+                    }
+                }
             }
             _ => unreachable!(),
         }

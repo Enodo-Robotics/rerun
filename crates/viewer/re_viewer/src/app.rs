@@ -662,6 +662,106 @@ impl App {
                 self.state.focused_item = Some(item);
             }
 
+            SystemCommand::UpdateRecording(recording_id, chunks) => {
+                let mut all_events = Vec::new();
+                {
+                    let entity_db = store_hub.entity_db_mut(&recording_id);
+                    for chunk in chunks {
+                        match entity_db.add_chunk(&Arc::new(chunk)) {
+                            Ok(store_events) => {
+                                all_events.extend(store_events);
+                            }
+                            Err(err) => {
+                                re_log::warn_once!("Failed to update recording: {err}");
+                            }
+                        }
+                    }
+                }
+                if !all_events.is_empty() {
+                    if let Some(caches) = store_hub.active_caches() {
+                        caches.on_store_events(&all_events);
+                    }
+                }
+            }
+
+            SystemCommand::AddAnnotation {
+                store_id,
+                entity_path,
+                timeline,
+                time,
+                text,
+                level,
+            } => {
+                match crate::ui::annotation_panel::build_annotation_chunk(
+                    &entity_path, &timeline, time, &text, &level,
+                ) {
+                    Ok(chunk) => {
+                        let entity_db = store_hub.entity_db_mut(&store_id);
+                        match entity_db.add_chunk(&Arc::new(chunk)) {
+                            Ok(store_events) => {
+                                if let Some(caches) = store_hub.active_caches() {
+                                    caches.on_store_events(&store_events);
+                                }
+                                re_log::info!("Added annotation: {text}");
+                            }
+                            Err(err) => {
+                                re_log::error!("Failed to add annotation chunk: {err}");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        re_log::error!("Failed to build annotation chunk: {err}");
+                    }
+                }
+            }
+
+            SystemCommand::ClearAnnotation {
+                store_id,
+                entity_path,
+                timeline,
+                time,
+            } => {
+                match crate::ui::annotation_panel::build_clear_chunk(
+                    &entity_path, &timeline, time,
+                ) {
+                    Ok(chunk) => {
+                        let entity_db = store_hub.entity_db_mut(&store_id);
+                        match entity_db.add_chunk(&Arc::new(chunk)) {
+                            Ok(store_events) => {
+                                if let Some(caches) = store_hub.active_caches() {
+                                    caches.on_store_events(&store_events);
+                                }
+                                re_log::info!("Cleared annotation at {entity_path}");
+                            }
+                            Err(err) => {
+                                re_log::error!("Failed to clear annotation: {err}");
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        re_log::error!("Failed to build clear chunk: {err}");
+                    }
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            SystemCommand::ExportAnnotations { store_id } => {
+                let entity_db = store_hub.entity_db_mut(&store_id);
+                match crate::ui::annotation_panel::prepare_annotation_export(entity_db) {
+                    Ok(Some(file_saver)) => {
+                        if let Err(err) = self.background_tasks.spawn_file_saver(file_saver) {
+                            re_log::error!("Failed to export annotations: {err}");
+                        }
+                    }
+                    Ok(None) => {
+                        // User cancelled the file dialog
+                    }
+                    Err(err) => {
+                        re_log::error!("Failed to prepare annotation export: {err}");
+                    }
+                }
+            }
+
             #[cfg(not(target_arch = "wasm32"))]
             SystemCommand::FileSaver(file_saver) => {
                 if let Err(err) = self.background_tasks.spawn_file_saver(file_saver) {
@@ -1040,6 +1140,10 @@ impl App {
                 if crate::web_tools::set_url_parameter_and_refresh("renderer", "webgpu").is_err() {
                     re_log::error!("Failed to set URL parameter `renderer=webgpu` & refresh page.");
                 }
+            }
+
+            UICommand::ToggleAnnotationPanel => {
+                self.state.annotation_panel.toggle();
             }
 
             UICommand::AddRedapServer => {

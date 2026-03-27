@@ -1,3 +1,4 @@
+pub(crate) mod annotation_panel;
 mod mobile_warning_ui;
 mod recordings_panel;
 mod rerun_menu;

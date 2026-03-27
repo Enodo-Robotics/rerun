@@ -263,6 +263,21 @@ fn panel_buttons_r2l(app: &mut App, app_blueprint: &AppBlueprint<'_>, ui: &mut e
         }
     }
 
+    // annotation panel
+    {
+        let annotation_visible = app.state.annotation_panel.visible;
+        if ui
+            .selectable_label(annotation_visible, "Ann.")
+            .on_hover_text(format!(
+                "Toggle annotation panel{}",
+                UICommand::ToggleAnnotationPanel.format_shortcut_tooltip_suffix(ui.ctx())
+            ))
+            .clicked()
+        {
+            app.state.annotation_panel.toggle();
+        }
+    }
+
     // selection panel
     if !app_blueprint.selection_panel_overridden()
         && ui

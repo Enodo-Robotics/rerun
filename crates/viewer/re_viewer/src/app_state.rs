@@ -45,6 +45,8 @@ pub struct AppState {
     selection_panel: re_selection_panel::SelectionPanel,
     time_panel: re_time_panel::TimePanel,
     blueprint_time_panel: re_time_panel::TimePanel,
+
+    pub(crate) annotation_panel: crate::ui::annotation_panel::AnnotationPanel,
     #[serde(skip)]
     blueprint_tree: re_blueprint_tree::BlueprintTree,
 
@@ -96,6 +98,7 @@ impl Default for AppState {
             selection_panel: Default::default(),
             time_panel: Default::default(),
             blueprint_time_panel: re_time_panel::TimePanel::new_blueprint_panel(),
+            annotation_panel: Default::default(),
             blueprint_tree: Default::default(),
             welcome_screen: Default::default(),
             datastore_ui: Default::default(),
@@ -188,6 +191,7 @@ impl AppState {
             selection_panel,
             time_panel,
             blueprint_time_panel,
+            annotation_panel,
             blueprint_tree,
             welcome_screen,
             datastore_ui,
@@ -487,6 +491,14 @@ impl AppState {
                     ui,
                     app_blueprint.selection_panel_state().is_expanded(),
                 );
+            }
+
+            //
+            // Annotation Panel
+            //
+
+            if *display_mode == DisplayMode::LocalRecordings {
+                annotation_panel.show_panel(&ctx, ui);
             }
 
             //

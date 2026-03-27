@@ -1,7 +1,7 @@
 use re_chunk::{EntityPath, Timeline};
 use re_chunk_store::external::re_chunk::Chunk;
 use re_data_source::DataSource;
-use re_log_types::{ResolvedTimeRangeF, StoreId};
+use re_log_types::{ResolvedTimeRangeF, StoreId, TimeInt};
 use re_ui::{UICommand, UICommandSender};
 
 use crate::StoreHubEntry;
@@ -124,6 +124,33 @@ pub enum SystemCommand {
     ///
     /// Just like selection highlighting, the exact behavior of focusing is up to the receiving views.
     SetFocus(crate::Item),
+
+    /// Add a text annotation to the active recording at the given time.
+    AddAnnotation {
+        store_id: StoreId,
+        entity_path: EntityPath,
+        timeline: Timeline,
+        time: TimeInt,
+        text: String,
+        level: String,
+    },
+
+    /// Clear (remove) an annotation at the given entity path and time.
+    ClearAnnotation {
+        store_id: StoreId,
+        entity_path: EntityPath,
+        timeline: Timeline,
+        time: TimeInt,
+    },
+
+    /// Update the recording with additional data chunks (e.g., annotation config).
+    UpdateRecording(StoreId, Vec<Chunk>),
+
+    /// Export only annotation entities from the recording to a separate .rrd file.
+    #[cfg(not(target_arch = "wasm32"))]
+    ExportAnnotations {
+        store_id: StoreId,
+    },
 
     /// Add a task, run on a background thread, that saves something to disk.
     #[cfg(not(target_arch = "wasm32"))]

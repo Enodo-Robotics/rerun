@@ -95,6 +95,9 @@ pub enum UICommand {
     #[cfg(target_arch = "wasm32")]
     RestartWithWebGpu,
 
+    // Annotations
+    ToggleAnnotationPanel,
+
     // Redap commands
     AddRedapServer,
 }
@@ -300,6 +303,11 @@ impl UICommand {
                 "Reloads the webpage and force WebGPU for rendering. All data will be lost.",
             ),
 
+            Self::ToggleAnnotationPanel => (
+                "Toggle annotation panel",
+                "Toggle the annotation panel for adding notes to recordings",
+            ),
+
             Self::AddRedapServer => (
                 "Add Redap server",
                 "Connect to a Redap server (experimental)"
@@ -423,6 +431,8 @@ impl UICommand {
             Self::RestartWithWebGl => smallvec![],
             #[cfg(target_arch = "wasm32")]
             Self::RestartWithWebGpu => smallvec![],
+
+            Self::ToggleAnnotationPanel => smallvec![ctrl_shift(Key::A)],
 
             Self::AddRedapServer => smallvec![],
         }
