@@ -45,6 +45,9 @@ jobs:
             bash -c '
               set -euo pipefail
 
+              echo "==> Building web viewer WASM..."
+              cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g
+
               echo "==> Building CLI binary..."
               cargo build --release --bin rerun
 
@@ -55,7 +58,7 @@ jobs:
               RERUN_BUILDING_WHEEL=1 maturin build \
                 --release \
                 --manifest-path rerun_py/Cargo.toml \
-                --features nasm \
+                --features web_viewer,nasm \
                 --out ./wheels/
 
               echo "==> Verifying custom features..."
