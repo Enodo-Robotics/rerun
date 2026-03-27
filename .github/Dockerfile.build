@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y \
     libxcb-shape0-dev \
     libxcb-xfixes0-dev \
     libxkbcommon-dev \
+    binaryen \
     nasm \
     pkg-config \
     python3 \
