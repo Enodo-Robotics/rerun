@@ -1143,7 +1143,7 @@ impl App {
             }
 
             UICommand::ToggleAnnotationPanel => {
-                self.state.annotation_panel.toggle();
+                self.state.annotation_panel.toggle_editor();
             }
 
             UICommand::AddRedapServer => {

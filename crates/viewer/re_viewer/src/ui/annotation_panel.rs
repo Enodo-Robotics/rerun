@@ -8,12 +8,12 @@ use re_viewer_context::{SystemCommand, SystemCommandSender as _, ViewerContext};
 
 // ---------------------------------------------------------------------------
 
-/// Predefined quick-tag labels for fast annotation.
-const QUICK_TAGS: &[(&str, &str, egui::Color32)] = &[
-    ("Anomaly", "WARN", egui::Color32::from_rgb(255, 165, 0)),
-    ("Interesting", "INFO", egui::Color32::from_rgb(100, 180, 255)),
-    ("Bug", "ERROR", egui::Color32::from_rgb(255, 80, 80)),
-    ("Note", "INFO", egui::Color32::from_rgb(180, 180, 180)),
+/// Default quick-tag labels, used to seed `custom_tags` on first run.
+const DEFAULT_QUICK_TAGS: &[(&str, &str, [u8; 3])] = &[
+    ("Anomaly", "WARN", [255, 165, 0]),
+    ("Interesting", "INFO", [100, 180, 255]),
+    ("Bug", "ERROR", [255, 80, 80]),
+    ("Note", "INFO", [180, 180, 180]),
 ];
 
 /// Base entity path under which all annotations are stored.
@@ -57,11 +57,17 @@ impl CustomTag {
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct AnnotationPanel {
-    /// Whether the panel is currently shown.
-    pub visible: bool,
+    /// Whether the side panel (editor) is currently shown.
+    pub editor_visible: bool,
+
+    /// Whether the horizontal tag bar is currently shown.
+    pub tag_bar_visible: bool,
 
     /// User-defined quick tags, persisted across sessions.
     custom_tags: Vec<CustomTag>,
+
+    /// Whether defaults have been seeded. Once true, deleting all tags won't re-seed.
+    defaults_seeded: bool,
 
     /// Free-text input buffer.
     #[serde(skip)]
@@ -92,16 +98,130 @@ pub struct AnnotationPanel {
 }
 
 impl AnnotationPanel {
-    /// Toggle visibility of the annotation panel.
-    pub fn toggle(&mut self) {
-        self.visible = !self.visible;
+    /// Seed default tags on first run only. Once seeded, never re-seeds.
+    fn ensure_default_tags(&mut self) {
+        if !self.defaults_seeded {
+            if self.custom_tags.is_empty() {
+                self.custom_tags = DEFAULT_QUICK_TAGS
+                    .iter()
+                    .map(|&(label, level, color)| CustomTag {
+                        label: label.to_owned(),
+                        level: level.to_owned(),
+                        color,
+                    })
+                    .collect();
+            }
+            self.defaults_seeded = true;
+        }
     }
 
-    /// Main UI entry point. Call from `AppState::show()`.
-    pub fn show_panel(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
-        if !self.visible {
+    /// Toggle visibility of the editor side panel.
+    pub fn toggle_editor(&mut self) {
+        self.editor_visible = !self.editor_visible;
+    }
+
+    /// Toggle visibility of the quick-tag bar.
+    pub fn toggle_tag_bar(&mut self) {
+        self.tag_bar_visible = !self.tag_bar_visible;
+    }
+
+    /// Update locked entity from the current viewport selection.
+    /// Called from both the tag bar and the editor panel.
+    fn update_locked_entity(&mut self, ctx: &ViewerContext<'_>) {
+        let current_selection: Option<EntityPath> = ctx
+            .selection_state
+            .selected_items()
+            .first_item()
+            .and_then(|item| item.entity_path().cloned());
+
+        if let Some(ref sel) = current_selection {
+            if self.locked_entity.as_ref() != Some(sel) {
+                self.locked_entity = Some(sel.clone());
+            }
+        }
+    }
+
+    /// Show the horizontal quick-tag bar above the time panel.
+    pub fn show_tag_bar(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
+        if !self.tag_bar_visible {
             return;
         }
+
+        self.ensure_default_tags();
+        self.update_locked_entity(ctx);
+
+        let store_id = ctx.store_context.recording.store_id().clone();
+        let time_ctrl = ctx.rec_cfg.time_ctrl.read();
+        let current_timeline = time_ctrl.timeline().clone();
+        let current_time = time_ctrl.time_int();
+        drop(time_ctrl);
+
+        let selected_entity = self.locked_entity.clone();
+
+        egui::TopBottomPanel::bottom("annotation_tag_bar")
+            .resizable(false)
+            .frame(egui::Frame {
+                fill: ui.style().visuals.panel_fill,
+                inner_margin: egui::Margin::symmetric(8, 6),
+                ..Default::default()
+            })
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Left side: tags (wrapping)
+                    let tags_snapshot: Vec<_> = self
+                        .custom_tags
+                        .iter()
+                        .map(|t| (t.label.clone(), t.level.clone(), t.egui_color()))
+                        .collect();
+
+                    let base_size = ui.style().text_styles[&egui::TextStyle::Body].size;
+                    let tag_size = base_size * 1.25;
+
+                    for (label, level, color) in &tags_snapshot {
+                        let button = egui::Button::new(
+                            egui::RichText::new(label).color(*color).size(tag_size),
+                        );
+                        if ui.add(button).clicked() {
+                            if let Some(time) = current_time {
+                                self.add_annotation(
+                                    ctx,
+                                    &store_id,
+                                    &current_timeline,
+                                    time,
+                                    label.clone(),
+                                    level.clone(),
+                                    *color,
+                                    selected_entity.as_ref(),
+                                );
+                            }
+                        }
+                    }
+
+                    // Right side: entity path + export
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui.button("Export").on_hover_text("Export annotations to .rrd").clicked() {
+                            ctx.command_sender()
+                                .send_system(SystemCommand::ExportAnnotations {
+                                    store_id: store_id.clone(),
+                                });
+                        }
+
+                        if let Some(ref entity) = selected_entity {
+                            ui.weak(format!("@ {entity}"));
+                        }
+                    });
+                });
+            });
+    }
+
+    /// Main UI entry point for the editor side panel.
+    pub fn show_panel(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
+        if !self.editor_visible {
+            return;
+        }
+
+        self.ensure_default_tags();
 
         // Load custom tags and existing annotations from recording on first open
         // (or when recording changes)
@@ -162,22 +282,7 @@ impl AnnotationPanel {
             ui.label("Time: (none)");
         }
 
-        // Entity selection with lock:
-        // When the user selects an entity in the viewport, we capture it here.
-        // It stays locked so that clicking buttons in this panel doesn't lose it.
-        let current_selection: Option<EntityPath> = ctx
-            .selection_state
-            .selected_items()
-            .first_item()
-            .and_then(|item| item.entity_path().cloned());
-
-        // Update locked entity if the user selected something new in the viewport
-        if let Some(ref sel) = current_selection {
-            if self.locked_entity.as_ref() != Some(sel) {
-                self.locked_entity = Some(sel.clone());
-            }
-        }
-
+        self.update_locked_entity(ctx);
         let selected_entity = self.locked_entity.clone();
 
         ui.add_space(4.0);
@@ -219,49 +324,23 @@ impl AnnotationPanel {
         ui.separator();
         ui.add_space(4.0);
 
-        // Quick-tag buttons
+        // Quick-tag buttons (unified: defaults + custom, all deletable)
         ui.strong("Quick tags");
         ui.add_space(4.0);
 
         let store_id = ctx.store_context.recording.store_id().clone();
 
-        // Built-in tags
-        ui.horizontal_wrapped(|ui| {
-            for &(label, level, color) in QUICK_TAGS {
-                let button = egui::Button::new(
-                    egui::RichText::new(label).color(color),
-                );
-                if ui.add(button).clicked() {
-                    if let Some(time) = current_time {
-                        self.add_annotation(
-                            ctx,
-                            &store_id,
-                            &current_timeline,
-                            time,
-                            label.to_owned(),
-                            level.to_owned(),
-                            color,
-                            selected_entity.as_ref(),
-                        );
-                    }
-                }
-            }
-        });
-
-        // Custom user-defined tags
-        if !self.custom_tags.is_empty() {
-            ui.add_space(2.0);
+        {
             let mut tag_to_remove: Option<usize> = None;
             let mut tag_to_annotate: Option<(String, String, egui::Color32)> = None;
 
-            // Collect tag info from immutable borrow first
             let tags_snapshot: Vec<_> = self
                 .custom_tags
                 .iter()
                 .map(|t| (t.label.clone(), t.level.clone(), t.egui_color()))
                 .collect();
 
-            // Check which tags are in use by active annotations
+            // Only protect tags that have annotations in the current recording
             let tags_in_use: std::collections::HashSet<&str> = self
                 .annotations
                 .iter()
@@ -269,30 +348,28 @@ impl AnnotationPanel {
                 .collect();
 
             ui.horizontal_wrapped(|ui| {
-                for (idx, (label, _level, color)) in tags_snapshot.iter().enumerate() {
+                for (idx, (label, level, color)) in tags_snapshot.iter().enumerate() {
                     let in_use = tags_in_use.contains(label.as_str());
                     let button = egui::Button::new(
                         egui::RichText::new(label).color(*color),
                     );
                     let response = ui.add(button);
                     if response.clicked() {
-                        tag_to_annotate =
-                            Some((label.clone(), _level.clone(), *color));
+                        tag_to_annotate = Some((label.clone(), level.clone(), *color));
                     }
                     if response.secondary_clicked() && !in_use {
                         tag_to_remove = Some(idx);
                     }
                     if in_use {
                         response.on_hover_text(
-                            "Click to annotate. Tag is in use — remove its annotations first to delete it.",
+                            "Click to annotate. In use — remove annotations first to delete.",
                         );
                     } else {
-                        response.on_hover_text("Click to annotate. Right-click to remove tag.");
+                        response.on_hover_text("Click to annotate. Right-click to remove.");
                     }
                 }
             });
 
-            // Now apply mutations
             if let Some((label, level, color)) = tag_to_annotate {
                 if let Some(time) = current_time {
                     self.add_annotation(
@@ -320,10 +397,10 @@ impl AnnotationPanel {
         egui::CollapsingHeader::new("Add custom tag")
             .default_open(false)
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                let label_response = ui.horizontal(|ui| {
                     ui.label("Label:");
-                    ui.text_edit_singleline(&mut self.new_tag_label);
-                });
+                    ui.text_edit_singleline(&mut self.new_tag_label)
+                }).inner;
                 ui.horizontal(|ui| {
                     ui.label("Level:");
                     for (i, &(name, _)) in TAG_LEVELS.iter().enumerate() {
@@ -331,7 +408,11 @@ impl AnnotationPanel {
                     }
                 });
                 let can_add = !self.new_tag_label.trim().is_empty();
-                if ui.add_enabled(can_add, egui::Button::new("Add to Quick Tags")).clicked() {
+                let enter_pressed = label_response.has_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (can_add && enter_pressed)
+                    || ui.add_enabled(can_add, egui::Button::new("Add to Quick Tags")).clicked()
+                {
                     let (level, color) = TAG_LEVELS[self.new_tag_level_idx];
                     self.custom_tags.push(CustomTag {
                         label: self.new_tag_label.trim().to_owned(),
@@ -545,12 +626,38 @@ impl AnnotationPanel {
             EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/{sub}"))
         };
 
+        // Snap time to the latest actual data point for the selected entity.
+        // This avoids annotating at a time where the entity has no data,
+        // which would show "nothing logged at that time" in the text log.
+        let snapped_time = if let Some(selected) = selected_entity {
+            let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), time);
+            let chunks = ctx.recording()
+                .storage_engine()
+                .store()
+                .latest_at_relevant_chunks_for_all_components(&query, selected, true);
+            // The first chunk's time column gives us the actual data time
+            chunks
+                .first()
+                .and_then(|chunk| chunk.timelines().get(timeline.name()))
+                .and_then(|col| {
+                    // Find the latest time <= cursor time
+                    col.times_raw()
+                        .iter()
+                        .map(|&t| TimeInt::new_temporal(t))
+                        .filter(|&t| t <= time)
+                        .max()
+                })
+                .unwrap_or(time)
+        } else {
+            time
+        };
+
         // Record locally
         self.annotations.push(AnnotationEntry {
             text: text.clone(),
             level: level.clone(),
             timeline: timeline.clone(),
-            time,
+            time: snapped_time,
             entity_path: entity_path.clone(),
             source_entity: selected_entity.cloned(),
             color,
@@ -562,7 +669,7 @@ impl AnnotationPanel {
                 store_id: store_id.clone(),
                 entity_path,
                 timeline: timeline.clone(),
-                time,
+                time: snapped_time,
                 text,
                 level,
             });

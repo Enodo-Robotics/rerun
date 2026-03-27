@@ -263,18 +263,28 @@ fn panel_buttons_r2l(app: &mut App, app_blueprint: &AppBlueprint<'_>, ui: &mut e
         }
     }
 
-    // annotation panel
+    // annotation quick-tag bar
     {
-        let annotation_visible = app.state.annotation_panel.visible;
         if ui
-            .selectable_label(annotation_visible, "Ann.")
+            .selectable_label(app.state.annotation_panel.tag_bar_visible, "Qt.Ann")
+            .on_hover_text("Toggle quick-tag annotation bar above timeline")
+            .clicked()
+        {
+            app.state.annotation_panel.toggle_tag_bar();
+        }
+    }
+
+    // annotation editor panel
+    {
+        if ui
+            .selectable_label(app.state.annotation_panel.editor_visible, "Ed.Ann")
             .on_hover_text(format!(
-                "Toggle annotation panel{}",
+                "Toggle annotation editor panel{}",
                 UICommand::ToggleAnnotationPanel.format_shortcut_tooltip_suffix(ui.ctx())
             ))
             .clicked()
         {
-            app.state.annotation_panel.toggle();
+            app.state.annotation_panel.toggle_editor();
         }
     }
 

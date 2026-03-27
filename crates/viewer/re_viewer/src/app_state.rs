@@ -464,7 +464,7 @@ impl AppState {
             }
 
             //
-            // Time panel
+            // Time panel (rendered first so it claims the very bottom)
             //
 
             if *display_mode == DisplayMode::LocalRecordings {
@@ -477,6 +477,14 @@ impl AppState {
                     app_blueprint.time_panel_state(),
                     DesignTokens::bottom_panel_frame(),
                 );
+            }
+
+            //
+            // Annotation tag bar (rendered after time panel → sits above it)
+            //
+
+            if *display_mode == DisplayMode::LocalRecordings {
+                annotation_panel.show_tag_bar(&ctx, ui);
             }
 
             //
