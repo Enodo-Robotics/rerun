@@ -32,15 +32,14 @@ jobs:
           - name: Windows x86_64
             os: windows-latest
             cli_binary: rerun.exe
-            install_deps: choco install nasm binaryen -y
-
-          - name: macOS Intel
-            os: macos-13
-            cli_binary: rerun
-            install_deps: brew install nasm binaryen
+            install_deps: |
+              choco install nasm -y
+              curl -L -o binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-windows.tar.gz
+              tar -xzf binaryen.tar.gz
+              echo "$PWD/binaryen-version_121/bin" >> $GITHUB_PATH
 
           - name: macOS Apple Silicon
-            os: macos-14
+            os: macos-latest
             cli_binary: rerun
             install_deps: brew install nasm binaryen
 
