@@ -32,11 +32,7 @@ jobs:
           - name: Windows x86_64
             os: windows-latest
             cli_binary: rerun.exe
-            install_deps: |
-              choco install nasm -y
-              curl -L -o binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-windows.tar.gz
-              tar -xzf binaryen.tar.gz
-              echo "$PWD/binaryen-version_121/bin" >> $GITHUB_PATH
+            install_deps: choco install nasm -y
 
           - name: macOS Apple Silicon
             os: macos-latest
@@ -67,6 +63,14 @@ jobs:
       - name: Add NASM to PATH (Windows)
         if: runner.os == 'Windows'
         run: echo "C:\Program Files\NASM" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Install binaryen (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          curl -L -o binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-windows.tar.gz
+          tar -xzf binaryen.tar.gz
+          echo "$PWD/binaryen-version_121/bin" >> $GITHUB_PATH
         shell: bash
 
       - name: Install maturin
