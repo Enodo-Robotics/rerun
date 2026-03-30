@@ -9,87 +9,127 @@ on:
 permissions:
   contents: write
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   build-wheel:
-    name: "Build Wheel (self-hosted, Docker)"
-    runs-on: self-hosted
-    timeout-minutes: 120
+    name: "Build Wheel (${{ matrix.name }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            cli_binary: rerun
+            install_deps: |
+              sudo apt-get update && sudo apt-get install -y \
+                libatk-bridge2.0-dev libatk1.0-dev libfontconfig-dev libfreetype-dev \
+                libgl-dev libglib2.0-dev libgtk-3-dev libpango1.0-dev libssl-dev \
+                libvulkan-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+                libxkbcommon-dev nasm binaryen pkg-config
+
+          - name: Windows x86_64
+            os: windows-latest
+            cli_binary: rerun.exe
+            install_deps: choco install nasm binaryen -y
+
+          - name: macOS Intel
+            os: macos-13
+            cli_binary: rerun
+            install_deps: brew install nasm binaryen
+
+          - name: macOS Apple Silicon
+            os: macos-14
+            cli_binary: rerun
+            install_deps: brew install nasm binaryen
 
     steps:
-      - name: Fix permissions from previous Docker run
-        run: docker run --rm -v "${{ github.workspace }}:/build" ubuntu:22.04 chown -R $(id -u):$(id -g) /build 2>/dev/null || true
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.ref }}
 
-      - name: Extract tag name
-        id: version
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Building for tag: $TAG"
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.84.0
+          targets: wasm32-unknown-unknown
 
-      - name: Build Docker image
-        run: docker build -t rerun-builder -f .github/Dockerfile.build .
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Build wheel inside Docker
+      - name: Install system dependencies
+        run: ${{ matrix.install_deps }}
+        shell: bash
+
+      - name: Add NASM to PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\NASM" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build web viewer WASM
+        run: cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g
+
+      - name: Build CLI binary
+        run: cargo build --release --bin rerun
+
+      - name: Copy CLI into Python package
+        run: cp ./target/release/${{ matrix.cli_binary }} ./rerun_py/rerun_sdk/rerun_cli/${{ matrix.cli_binary }}
+        shell: bash
+
+      - name: Build Python wheel
         run: |
           mkdir -p wheels
-          HOST_UID=$(id -u)
-          HOST_GID=$(id -g)
-          docker run --rm \
-            -v "${{ github.workspace }}:/build" \
-            -w /build \
-            rerun-builder \
-            bash -c "
-              set -euo pipefail
+          RERUN_BUILDING_WHEEL=1 maturin build \
+            --release \
+            --manifest-path rerun_py/Cargo.toml \
+            --features web_viewer,nasm \
+            --out ./wheels/
+        shell: bash
+        env:
+          RERUN_BUILDING_WHEEL: "1"
 
-              echo '==> Building web viewer WASM...'
-              cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g
-
-              echo '==> Building CLI binary...'
-              cargo build --release --bin rerun
-
-              echo '==> Copying CLI into Python package...'
-              cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
-
-              echo '==> Building Python wheel...'
-              RERUN_BUILDING_WHEEL=1 maturin build \
-                --release \
-                --manifest-path rerun_py/Cargo.toml \
-                --features web_viewer,nasm \
-                --out ./wheels/
-
-              echo '==> Verifying custom features...'
-              python3 -m zipfile -e ./wheels/rerun_sdk-*.whl /tmp/extracted_wheel
-              chmod +x /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun
-              /tmp/extracted_wheel/rerun_sdk/rerun_cli/rerun --help | grep -q save-dir \
-                && echo 'Custom features verified!' \
-                || (echo 'ERROR: Custom features missing!' && exit 1)
-
-              echo '==> Fixing file ownership...'
-              chown -R ${HOST_UID}:${HOST_GID} /build/target /build/wheels /build/web_viewer
-            "
+      - name: Verify custom features
+        run: |
+          python3 -m zipfile -e wheels/rerun_sdk-*.whl extracted_wheel || python -m zipfile -e wheels/rerun_sdk-*.whl extracted_wheel
+          chmod +x extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} 2>/dev/null || true
+          extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} --help | grep -q "save-dir" \
+            && echo "Custom features verified!" \
+            || (echo "ERROR: Custom features missing!" && exit 1)
+          rm -rf extracted_wheel
+        shell: bash
 
       - name: Upload wheel as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ steps.version.outputs.tag }}
+          name: wheel-${{ matrix.name }}
           path: ./wheels/*.whl
 
-      - name: Create release and upload wheel
-        if: startsWith(github.ref, 'refs/tags/')
+  release:
+    name: "Upload to Release"
+    needs: [build-wheel]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Create release and upload wheels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          # Create release if it doesn't exist
+          ls -la wheels/
           gh release view "$TAG" || gh release create "$TAG" --title "$TAG" --generate-notes
-          # Upload wheel (overwrite if exists)
-          gh release upload "$TAG" ./wheels/*.whl --clobber
+          gh release upload "$TAG" wheels/*.whl --clobber
