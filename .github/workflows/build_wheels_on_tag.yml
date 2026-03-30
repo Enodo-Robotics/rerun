@@ -45,6 +45,10 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
+      - name: Clean up existing Rust toolchain
+        run: rustup toolchain remove 1.84.0 2>/dev/null || true
+        shell: bash
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
