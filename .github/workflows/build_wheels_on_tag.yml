@@ -71,11 +71,15 @@ jobs:
 
       - name: Install binaryen (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          curl -L -o binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-windows.tar.gz
+          Invoke-WebRequest -Uri "https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-windows.tar.gz" -OutFile binaryen.tar.gz
           tar -xzf binaryen.tar.gz
-          echo "$PWD/binaryen-version_121/bin" >> $GITHUB_PATH
-        shell: bash
+          $binPath = Join-Path $env:GITHUB_WORKSPACE "binaryen-version_121" "bin"
+          Write-Host "Adding to PATH: $binPath"
+          Write-Host "Contents:"
+          Get-ChildItem $binPath
+          Add-Content $env:GITHUB_PATH $binPath
 
       - name: Install maturin
         run: pip install maturin
