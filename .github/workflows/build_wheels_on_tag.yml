@@ -45,8 +45,11 @@ jobs:
         with:
           ref: ${{ github.ref }}
 
-      - name: Clean up existing Rust toolchain
-        run: rustup toolchain remove 1.84.0 2>/dev/null || true
+      - name: Clean up existing Rust toolchains
+        run: |
+          rustup toolchain list | while read tc; do
+            rustup toolchain remove "$tc" 2>/dev/null || true
+          done
         shell: bash
 
       - name: Set up Rust
