@@ -375,8 +375,8 @@ fn table_ui(
                         // For _annotation entities, select the parent instead.
                         if time_response.clicked() {
                             let path_str = entry.entity_path.to_string();
-                            let select_path = if path_str.ends_with("/_annotation") {
-                                let parent = path_str.trim_end_matches("/_annotation");
+                            let select_path = if let Some(pos) = path_str.find("/_annotation") {
+                                let parent = &path_str[..pos];
                                 if parent.is_empty() { None } else { Some(EntityPath::from(parent)) }
                             } else {
                                 Some(entry.entity_path.clone())

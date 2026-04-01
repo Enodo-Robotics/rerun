@@ -10,7 +10,8 @@ use re_log_types::{EntityPath, ResolvedEntityPathRule, RuleEffect};
 use re_ui::{design_tokens, ContextExt as _, DesignTokens, Icon, UiExt as _};
 use re_viewer_context::{
     icon_for_container_kind, Contents, DragAndDropFeedback, DragAndDropPayload, Item,
-    PublishedViewInfo, SystemExecutionOutput, ViewId, ViewQuery, ViewStates, ViewerContext,
+    PublishedViewInfo, SystemExecutionOutput, ViewId, ViewQuery,
+    ViewStates, ViewerContext,
 };
 use re_viewport_blueprint::{
     create_entity_add_info, ViewBlueprint, ViewportBlueprint, ViewportCommand,
@@ -565,6 +566,9 @@ impl<'a> egui_tiles::Behavior<ViewId> for TilesDelegate<'a, '_> {
                 );
             });
 
+        // Annotation tag indicators
+        annotation_tag_chips(self.ctx, ui, &view_blueprint.space_origin);
+
         ui.help_hover_button().on_hover_ui(|ui| {
             view_class.help(ui.ctx()).ui(ui);
         });
@@ -835,5 +839,117 @@ impl TabWidget {
             self.galley,
             label_color,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Show annotation tag chips for entities under the given space origin.
+///
+/// Only shows annotations whose parent entity has data at the current time
+/// (respects `rr.clear()`). Counts annotations only at the exact time of
+/// the parent entity's latest data point — not across the full history.
+fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin: &EntityPath) {
+    let recording = ctx.recording();
+    let time_ctrl = ctx.rec_cfg.time_ctrl.read();
+    let timeline = time_ctrl.timeline().clone();
+    let current_time = time_ctrl.time_int();
+    drop(time_ctrl);
+
+    let Some(current_time) = current_time else {
+        return;
+    };
+
+    let annotation_marker = "/_annotation";
+    // tag label → (color, list of parent entity paths)
+    let mut tag_entities: std::collections::BTreeMap<String, (egui::Color32, Vec<EntityPath>)> =
+        Default::default();
+
+    let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), current_time);
+
+    for entity_path in recording.entity_paths() {
+        let path_str = entity_path.to_string();
+
+        // Match paths containing /_annotation (either as suffix or with sub-path)
+        let annotation_pos = match path_str.find(annotation_marker) {
+            Some(pos) => pos,
+            None => continue,
+        };
+
+        // The parent is everything before /_annotation
+        let parent = &path_str[..annotation_pos];
+        if parent.is_empty() {
+            continue;
+        }
+        let parent_path = EntityPath::from(parent);
+        if !parent_path.starts_with(space_origin) && &parent_path != space_origin {
+            continue;
+        }
+
+        let parent_chunks = recording
+            .storage_engine()
+            .store()
+            .latest_at_relevant_chunks_for_all_components(&query, &parent_path, false);
+        if parent_chunks.is_empty() {
+            continue;
+        }
+
+        if let Some(((_time, _row_id), text)) =
+            recording.latest_at_component::<re_types::components::Text>(entity_path, &query)
+        {
+            let level: Option<re_types::components::TextLogLevel> =
+                recording
+                    .latest_at_component(entity_path, &query)
+                    .map(|(_, l)| l);
+
+            let label = text.0 .0.as_str().to_owned();
+            let level_str = level
+                .map(|l| l.0 .0.as_str().to_owned())
+                .unwrap_or_default();
+            let color = match level_str.as_str() {
+                "WARN" => egui::Color32::from_rgb(255, 165, 0),
+                "ERROR" => egui::Color32::from_rgb(255, 80, 80),
+                _ => egui::Color32::from_rgb(100, 180, 255),
+            };
+            let entry = tag_entities.entry(label).or_insert_with(|| (color, Vec::new()));
+            entry.1.push(parent_path);
+        }
+    }
+
+    if tag_entities.is_empty() {
+        return;
+    }
+
+    ui.add_space(4.0);
+    for (label, (color, entities)) in &tag_entities {
+        let text = if entities.len() > 1 {
+            format!("{label} ×{}", entities.len())
+        } else {
+            label.clone()
+        };
+
+        let response = re_ui::annotation_chips::tag_chip(ui, &text, *color, None);
+
+        if response.clicked() {
+            // Multi-select all entities that share this tag
+            let items = entities.iter().map(|entity| {
+                (
+                    Item::InstancePath(
+                        re_entity_db::InstancePath::entity_all(entity.clone()),
+                    ),
+                    None,
+                )
+            });
+            ctx.selection_state.set_selection(
+                re_viewer_context::ItemCollection::from(items),
+            );
+        }
+
+        // Tooltip showing all entities with this tag
+        response.on_hover_ui(|ui| {
+            for entity in entities {
+                ui.label(entity.to_string());
+            }
+        });
     }
 }

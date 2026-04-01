@@ -8,6 +8,8 @@ use re_viewer_context::{SystemCommand, SystemCommandSender as _, ViewerContext};
 
 // ---------------------------------------------------------------------------
 
+use re_ui::annotation_chips::tag_chip;
+
 /// Default quick-tag labels, used to seed `custom_tags` on first run.
 const DEFAULT_QUICK_TAGS: &[(&str, &str, [u8; 3])] = &[
     ("Anomaly", "WARN", [255, 165, 0]),
@@ -178,10 +180,7 @@ impl AnnotationPanel {
                     let tag_size = base_size * 1.25;
 
                     for (label, level, color) in &tags_snapshot {
-                        let button = egui::Button::new(
-                            egui::RichText::new(label).color(*color).size(tag_size),
-                        );
-                        if ui.add(button).clicked() {
+                        if tag_chip(ui, label, *color, Some(tag_size)).clicked() {
                             if let Some(time) = current_time {
                                 self.add_annotation(
                                     ctx,
@@ -300,7 +299,7 @@ impl AnnotationPanel {
             });
             ui.label(
                 egui::RichText::new(
-                    format!("Annotations → {}/_annotation", entity)
+                    format!("Annotations → {}/_annotation/{{tag}}", entity)
                 )
                 .small()
                 .weak(),
@@ -350,10 +349,7 @@ impl AnnotationPanel {
             ui.horizontal_wrapped(|ui| {
                 for (idx, (label, level, color)) in tags_snapshot.iter().enumerate() {
                     let in_use = tags_in_use.contains(label.as_str());
-                    let button = egui::Button::new(
-                        egui::RichText::new(label).color(*color),
-                    );
-                    let response = ui.add(button);
+                    let response = tag_chip(ui, label, *color, None);
                     if response.clicked() {
                         tag_to_annotate = Some((label.clone(), level.clone(), *color));
                     }
@@ -407,7 +403,9 @@ impl AnnotationPanel {
                         ui.selectable_value(&mut self.new_tag_level_idx, i, name);
                     }
                 });
-                let can_add = !self.new_tag_label.trim().is_empty();
+                let trimmed = self.new_tag_label.trim().to_owned();
+                let duplicate = self.custom_tags.iter().any(|t| t.label == trimmed);
+                let can_add = !trimmed.is_empty() && !duplicate;
                 let enter_pressed = label_response.has_focus()
                     && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (can_add && enter_pressed)
@@ -415,12 +413,15 @@ impl AnnotationPanel {
                 {
                     let (level, color) = TAG_LEVELS[self.new_tag_level_idx];
                     self.custom_tags.push(CustomTag {
-                        label: self.new_tag_label.trim().to_owned(),
+                        label: trimmed.to_owned(),
                         level: level.to_owned(),
                         color,
                     });
                     self.new_tag_label.clear();
                     self.save_tags_to_recording(ctx, &store_id);
+                }
+                if duplicate && !trimmed.is_empty() {
+                    ui.weak("Tag already exists");
                 }
             });
 
@@ -471,10 +472,11 @@ impl AnnotationPanel {
                 }
             }
 
-            let can_add_tag = !text_for_tag.is_empty();
+            let tag_duplicate = self.custom_tags.iter().any(|t| t.label == text_for_tag);
+            let can_add_tag = !text_for_tag.is_empty() && !tag_duplicate;
             if ui
                 .add_enabled(can_add_tag, egui::Button::new("Add to Quick Tags"))
-                .on_hover_text("Promote this text to a reusable quick tag")
+                .on_hover_text(if tag_duplicate { "Tag already exists" } else { "Promote this text to a reusable quick tag" })
                 .clicked()
             {
                 self.custom_tags.push(CustomTag {
@@ -492,6 +494,17 @@ impl AnnotationPanel {
         ui.add_space(4.0);
 
         // List existing annotations
+        // First, prune any that were cleared externally (e.g. from the selection panel)
+        {
+            let recording = ctx.store_context.recording;
+            let query = re_chunk_store::LatestAtQuery::new(*current_timeline.name(), current_time.unwrap_or(re_log_types::TimeInt::MAX));
+            self.annotations.retain(|ann| {
+                recording
+                    .latest_at_component::<re_types::components::Text>(&ann.entity_path, &query)
+                    .is_some()
+            });
+        }
+
         ui.strong("Session annotations");
         ui.add_space(4.0);
 
@@ -576,14 +589,13 @@ impl AnnotationPanel {
         // Annotations persist in the EntityDb across sessions.
         let has_annotations_in_store = {
             let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-            let suffix = "_annotation";
             ctx.store_context
                 .recording
                 .entity_paths()
                 .iter()
                 .any(|path| {
                     path.starts_with(&annotation_prefix)
-                        || path.to_string().ends_with(suffix)
+                        || path.to_string().contains("/_annotation")
                 })
         };
 
@@ -617,13 +629,14 @@ impl AnnotationPanel {
         selected_entity: Option<&EntityPath>,
     ) {
         // Determine annotation entity path:
-        // - If an entity is selected: {selected_entity}/_annotation
-        // - Otherwise: annotations/{level}
+        // - If an entity is selected: {selected_entity}/_annotation/{tag_label}
+        //   Each tag gets its own sub-entity so multiple tags can coexist.
+        // - Otherwise: annotations/{tag_label}
+        let tag_slug = text.to_lowercase().replace(' ', "_");
         let entity_path = if let Some(selected) = selected_entity {
-            EntityPath::from(format!("{}/_annotation", selected))
+            EntityPath::from(format!("{}/_annotation/{tag_slug}", selected))
         } else {
-            let sub = level.to_lowercase();
-            EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/{sub}"))
+            EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/{tag_slug}"))
         };
 
         // Snap time to the latest actual data point for the selected entity.
@@ -782,10 +795,10 @@ impl AnnotationPanel {
 
                     if !already_exists {
                         // Infer source entity from path:
-                        // If path ends with /_annotation, the source is the parent
+                        // Path contains /_annotation → parent is everything before it
                         let path_str = path.to_string();
-                        let source_entity = if path_str.ends_with("/_annotation") {
-                            let parent = path_str.trim_end_matches("/_annotation");
+                        let source_entity = if let Some(pos) = path_str.find("/_annotation") {
+                            let parent = &path_str[..pos];
                             if !parent.is_empty() {
                                 Some(EntityPath::from(parent))
                             } else {
@@ -890,9 +903,8 @@ pub fn prepare_annotation_export(
 
     // Collect all chunks that belong to annotation entity paths:
     // - /annotations/** (generic annotations)
-    // - **/_annotation (entity-specific annotations)
+    // - **/_annotation/** (entity-specific annotations)
     let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-    let annotation_suffix = "_annotation";
 
     let mut annotation_chunks: Vec<Arc<Chunk>> = entity_db
         .storage_engine()
@@ -900,8 +912,9 @@ pub fn prepare_annotation_export(
         .iter_chunks()
         .filter(|chunk| {
             let path = chunk.entity_path();
+            let path_str = path.to_string();
             path.starts_with(&annotation_prefix)
-                || path.to_string().ends_with(annotation_suffix)
+                || path_str.contains("/_annotation")
         })
         .cloned()
         .collect();

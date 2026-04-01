@@ -15,7 +15,8 @@ use re_ui::{
 };
 use re_viewer_context::{
     contents_name_style, icon_for_container_kind, ContainerId, Contents, DataQueryResult,
-    DataResult, HoverHighlight, Item, UiLayout, ViewContext, ViewId, ViewStates, ViewerContext,
+    DataResult, HoverHighlight, Item, SystemCommandSender as _, UiLayout, ViewContext, ViewId,
+    ViewStates, ViewerContext,
 };
 use re_viewport_blueprint::{ui::show_add_view_or_container_modal, ViewportBlueprint};
 
@@ -187,6 +188,7 @@ impl SelectionPanel {
                 );
 
                 list_existing_data_blueprints(ctx, viewport, ui, &entity_path.clone().into());
+                annotation_tags_ui(ctx, ui, entity_path);
             }
 
             Item::InstancePath(instance_path) => {
@@ -214,6 +216,7 @@ impl SelectionPanel {
                 }
 
                 list_existing_data_blueprints(ctx, viewport, ui, instance_path);
+                annotation_tags_ui(ctx, ui, &instance_path.entity_path);
             }
 
             Item::Container(container_id) => {
@@ -276,6 +279,8 @@ impl SelectionPanel {
                         }
                     }
                 }
+
+                annotation_tags_ui(ctx, ui, &instance_path.entity_path);
             }
 
             _ => {}
@@ -1003,5 +1008,86 @@ fn visible_interactive_toggle_ui(
         if interactive_before != interactive {
             data_result.save_interactive(ctx.viewer_ctx, &query_result.tree, interactive);
         }
+    }
+}
+
+/// Show annotation tags for the given entity, with clickable removal.
+fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &EntityPath) {
+    let recording = ctx.recording();
+    let annotation_prefix = format!("{entity_path}/_annotation");
+
+    // Find all annotation sub-entities for this entity
+    let annotation_paths: Vec<EntityPath> = recording
+        .entity_paths()
+        .iter()
+        .filter(|p| {
+            let s = p.to_string();
+            s.starts_with(&annotation_prefix)
+        })
+        .cloned()
+        .cloned()
+        .collect();
+
+    if annotation_paths.is_empty() {
+        return;
+    }
+
+    let time_ctrl = ctx.rec_cfg.time_ctrl.read();
+    let timeline = time_ctrl.timeline().clone();
+    let current_time = time_ctrl.time_int();
+    drop(time_ctrl);
+
+    let Some(current_time) = current_time else {
+        return;
+    };
+
+    let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), current_time);
+
+    struct TagInfo {
+        label: String,
+        color: egui::Color32,
+        path: EntityPath,
+    }
+
+    let mut tags = Vec::new();
+    for ann_path in &annotation_paths {
+        if let Some((_, text)) =
+            recording.latest_at_component::<re_types::components::Text>(ann_path, &query)
+        {
+            let level: Option<re_types::components::TextLogLevel> =
+                recording.latest_at_component(ann_path, &query).map(|(_, l)| l);
+
+            let label = text.0 .0.as_str().to_owned();
+            let level_str = level.map(|l| l.0 .0.as_str().to_owned()).unwrap_or_default();
+            let color = match level_str.as_str() {
+                "WARN" => egui::Color32::from_rgb(255, 165, 0),
+                "ERROR" => egui::Color32::from_rgb(255, 80, 80),
+                _ => egui::Color32::from_rgb(100, 180, 255),
+            };
+            tags.push(TagInfo { label, color, path: ann_path.clone() });
+        }
+    }
+
+    if tags.is_empty() {
+        return;
+    }
+
+    ui.add_space(8.0);
+    ui.strong("Annotations");
+    for tag in &tags {
+        ui.horizontal(|ui| {
+            re_ui::annotation_chips::tag_chip_label(ui, &tag.label, tag.color);
+            if ui.small_button("Remove").clicked() {
+                let store_id = recording.store_id();
+                ctx.command_sender().send_system(
+                    re_viewer_context::SystemCommand::ClearAnnotation {
+                        store_id,
+                        entity_path: tag.path.clone(),
+                        timeline: timeline.clone(),
+                        time: current_time,
+                    },
+                );
+            }
+        });
     }
 }
