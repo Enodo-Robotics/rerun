@@ -97,6 +97,10 @@ pub struct AnnotationPanel {
     /// Track which recording we've loaded tags from to avoid re-loading every frame.
     #[serde(skip)]
     tags_loaded_for: Option<re_log_types::StoreId>,
+
+    /// Fixed autosave path for this session, computed once on first save.
+    #[serde(skip)]
+    autosave_path: Option<std::path::PathBuf>,
 }
 
 impl AnnotationPanel {
@@ -120,6 +124,18 @@ impl AnnotationPanel {
     /// Toggle visibility of the editor side panel.
     pub fn toggle_editor(&mut self) {
         self.editor_visible = !self.editor_visible;
+    }
+
+    /// Auto-save annotations every 30 seconds if they've changed.
+    /// Save annotations immediately. Called after every add/remove action.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn save_now(&mut self, ctx: &ViewerContext<'_>) {
+        if self.autosave_path.is_none() {
+            self.autosave_path = compute_autosave_path(ctx.store_context.recording);
+        }
+        if let Some(path) = &self.autosave_path {
+            autosave_annotations_to(ctx.store_context.recording, path);
+        }
     }
 
     /// Toggle visibility of the quick-tag bar.
@@ -494,17 +510,6 @@ impl AnnotationPanel {
         ui.add_space(4.0);
 
         // List existing annotations
-        // First, prune any that were cleared externally (e.g. from the selection panel)
-        {
-            let recording = ctx.store_context.recording;
-            let query = re_chunk_store::LatestAtQuery::new(*current_timeline.name(), current_time.unwrap_or(re_log_types::TimeInt::MAX));
-            self.annotations.retain(|ann| {
-                recording
-                    .latest_at_component::<re_types::components::Text>(&ann.entity_path, &query)
-                    .is_some()
-            });
-        }
-
         ui.strong("Session annotations");
         ui.add_space(4.0);
 
@@ -576,6 +581,9 @@ impl AnnotationPanel {
                             timeline: ann.timeline.clone(),
                             time: ann.time,
                         });
+                        // Save immediately after removal
+                        #[cfg(not(target_arch = "wasm32"))]
+                        self.save_now(ctx);
                     }
                 });
         }
@@ -686,6 +694,10 @@ impl AnnotationPanel {
                 text,
                 level,
             });
+
+        // Save immediately — no data loss on crash
+        #[cfg(not(target_arch = "wasm32"))]
+        self.save_now(ctx);
     }
 
     /// Save custom tags to the recording as a static TextDocument entity.
@@ -720,7 +732,6 @@ impl AnnotationPanel {
     /// This allows continuity after importing an annotations.rrd.
     fn load_annotations_from_store(&mut self, entity_db: &re_entity_db::EntityDb) {
         let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-        let annotation_suffix = "_annotation";
         let config_prefix = EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/_config"));
 
         let engine = entity_db.storage_engine();
@@ -734,7 +745,7 @@ impl AnnotationPanel {
             }
 
             let is_annotation = path.starts_with(&annotation_prefix)
-                || path.to_string().ends_with(annotation_suffix);
+                || path.to_string().contains("/_annotation");
 
             if !is_annotation {
                 continue;
@@ -943,9 +954,28 @@ pub fn prepare_annotation_export(
 
     let messages: Vec<_> = store_info_msg.into_iter().chain(data_messages).collect();
 
-    // Open file dialog
+    // Derive default filename from the recording's application ID or data source
+    let default_name = entity_db
+        .data_source
+        .as_ref()
+        .and_then(|src| {
+            if let re_smart_channel::SmartChannelSource::File(path) = src {
+                path.file_stem()
+                    .map(|s| format!("{}_annotations.rrd", s.to_string_lossy()))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            let app_id = entity_db
+                .store_info()
+                .map(|info| crate::saving::sanitize_app_id(&info.application_id))
+                .unwrap_or_else(|| "recording".to_owned());
+            format!("{app_id}_annotations.rrd")
+        });
+
     let path = rfd::FileDialog::new()
-        .set_file_name("annotations.rrd")
+        .set_file_name(&default_name)
         .set_title("Export annotations")
         .save_file();
 
@@ -958,4 +988,93 @@ pub fn prepare_annotation_export(
         crate::saving::encode_to_file(rrd_version, &path_for_closure, messages.into_iter())?;
         Ok(path_for_closure)
     })))
+}
+
+/// Auto-save annotations to a file alongside the recording.
+/// Saves to `{recording_dir}/{recording_name}_annotations.rrd`.
+/// Returns the path saved to, or None if nothing to save.
+#[cfg(not(target_arch = "wasm32"))]
+/// Compute the autosave path once per session.
+/// Returns `{recording_dir}/{recording_name}_{YYYY-MM-DD_HHMM}_annotations.rrd`.
+#[cfg(not(target_arch = "wasm32"))]
+fn compute_autosave_path(entity_db: &re_entity_db::EntityDb) -> Option<std::path::PathBuf> {
+    let (save_dir, file_stem) = entity_db
+        .data_source
+        .as_ref()
+        .and_then(|src| {
+            if let re_smart_channel::SmartChannelSource::File(path) = src {
+                let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| ".".into());
+                let stem = path.file_stem().map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "recording".to_owned());
+                Some((dir, stem))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| (".".into(), "recording".to_owned()));
+
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let session_id = format!("{:016x}", secs.wrapping_mul(2654435761).wrapping_add(std::process::id() as u64 * 6364136223846793005));
+
+    Some(save_dir.join(format!("{file_stem}_{session_id}_annotations.rrd")))
+}
+
+/// Save annotations to a specific path. Called repeatedly by autosave.
+#[cfg(not(target_arch = "wasm32"))]
+fn autosave_annotations_to(
+    entity_db: &re_entity_db::EntityDb,
+    save_path: &std::path::Path,
+) {
+    let rrd_version = entity_db
+        .store_info()
+        .and_then(|info| info.store_version)
+        .unwrap_or(re_build_info::CrateVersion::LOCAL);
+
+    let store_id = entity_db.store_id();
+    let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
+
+    let mut annotation_chunks: Vec<Arc<Chunk>> = entity_db
+        .storage_engine()
+        .store()
+        .iter_chunks()
+        .filter(|chunk| {
+            let path_str = chunk.entity_path().to_string();
+            chunk.entity_path().starts_with(&annotation_prefix)
+                || path_str.contains("/_annotation")
+        })
+        .cloned()
+        .collect();
+
+    if annotation_chunks.is_empty() {
+        return;
+    }
+
+    annotation_chunks.sort_by_key(|chunk| chunk.row_id_range().map(|(min, _)| min));
+
+    let store_info_msg = entity_db
+        .store_info_msg()
+        .map(|msg| Ok(re_log_types::LogMsg::SetStoreInfo(msg.clone())));
+
+    let data_messages: Vec<re_chunk::ChunkResult<re_log_types::LogMsg>> = annotation_chunks
+        .into_iter()
+        .map(|chunk| {
+            chunk
+                .to_arrow_msg()
+                .map(|msg| re_log_types::LogMsg::ArrowMsg(store_id.clone(), msg))
+        })
+        .collect();
+
+    let messages: Vec<_> = store_info_msg.into_iter().chain(data_messages).collect();
+
+    match crate::saving::encode_to_file(rrd_version, save_path, messages.into_iter()) {
+        Ok(()) => {
+            re_log::debug!("Auto-saved annotations to {}", save_path.display());
+        }
+        Err(err) => {
+            re_log::warn!("Failed to auto-save annotations: {err}");
+        }
+    }
 }
