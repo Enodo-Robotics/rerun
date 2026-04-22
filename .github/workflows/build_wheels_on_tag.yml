@@ -103,7 +103,7 @@ jobs:
           RERUN_BUILDING_WHEEL=1 maturin build \
             --release \
             --manifest-path rerun_py/Cargo.toml \
-            --features web_viewer,nasm \
+            --features web_viewer,nasm,server \
             --out ./wheels/
         shell: bash
         env:

@@ -87,7 +87,7 @@ cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
 
 Build the wheel with the correct CLI binary:
 ```bash
-RERUN_BUILDING_WHEEL=1 maturin build --release --manifest-path rerun_py/Cargo.toml --features web_viewer,nasm --out ./wheels/
+RERUN_BUILDING_WHEEL=1 maturin build --release --manifest-path rerun_py/Cargo.toml --features web_viewer,nasm,server --out ./wheels/
 ```
 
 ### Step 4: Verify the Wheel
@@ -165,5 +165,5 @@ If the wheel doesn't contain custom features:
 git checkout oscar-rrl
 cargo build --release --bin rerun
 cp ./target/release/rerun ./rerun_py/rerun_sdk/rerun_cli/rerun
-RERUN_BUILDING_WHEEL=1 maturin build --release --manifest-path rerun_py/Cargo.toml --features web_viewer,nasm --out ./wheels/
+RERUN_BUILDING_WHEEL=1 maturin build --release --manifest-path rerun_py/Cargo.toml --features web_viewer,nasm,server --out ./wheels/
 ```
