@@ -221,6 +221,10 @@ pub fn build(
         // to get wasm-opt:  apt/brew/dnf install binaryen
         let mut cmd = std::process::Command::new("wasm-opt");
 
+        // All target features present in the input wasm must be enabled here,
+        // otherwise wasm-opt will *lower* them — and the multivalue lowering in
+        // particular can shuffle wasm-bindgen's __wbindgen_export_* table indices,
+        // leaving the JS glue pointing at the wrong table.
         let mut args = vec![
             wasm_path.as_str(),
             "-O2",
@@ -229,6 +233,9 @@ pub fn build(
             "--enable-reference-types",
             "--enable-bulk-memory",
             "--enable-simd",
+            "--enable-multivalue",
+            "--enable-sign-ext",
+            "--enable-mutable-globals",
         ];
         if debug_symbols {
             args.push("-g");
