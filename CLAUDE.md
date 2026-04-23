@@ -148,6 +148,23 @@ rerun --serve-grpc --save my_app --save-dir /data --save-interval 30
    - Without `--save-interval`: Creates `<application_id>_1.rrd`
    - With `--save-interval`: Creates `<application_id>_1.rrd`, `<application_id>_2.rrd`, etc.
 
+5. **WASM linker flags (web viewer)**:
+   The web viewer requires specific linker flags to work correctly. These are configured in two places:
+   - `.cargo/config.toml` — under `[target.wasm32-unknown-unknown]` rustflags
+   - `crates/build/re_dev_tools/src/build_web_viewer/lib.rs` — in the `RUSTFLAGS`/`CARGO_ENCODED_RUSTFLAGS` env vars (this script overrides `.cargo/config.toml`, so flags must be set in both places)
+
+   Required flags:
+   - `--growable-table`: Without this, `wasm-ld` emits `table[0]` with `max == min`, preventing the function table from growing. The viewer crashes at load time.
+   - `--export-table`: Needed alongside `--growable-table` for wasm-bindgen compatibility.
+   - `+bulk-memory,+simd128`: Target features for native memcpy/memset and SIMD. Stock Rerun enables these; without them the fork is slower than upstream.
+
+   Note: `CARGO_ENCODED_RUSTFLAGS` uses `\x1f` (unit separator) to delimit flags, not spaces like `RUSTFLAGS`.
+
+6. **wasm-opt is disabled in the build**:
+   binaryen 105 (shipped by Ubuntu 22.04's `apt install binaryen`) has a bug where `-O2` rewrites `__wbindgen_export_1` (externref table) to point at table[0] (funcref), crashing the viewer at load time. We skip wasm-opt entirely in `build_web_viewer/lib.rs`. This adds ~8 MiB to the WASM size but avoids the bug.
+
+   To re-enable wasm-opt in the future: bump the CI binaryen to >= 121 on all platforms (Linux needs to switch from `apt` to the release tarball, as Windows already does), then restore the wasm-opt block in `build_web_viewer/lib.rs`. Verify the built wasm afterwards by checking the table exports — `__wbindgen_export_1` must point at the externref table (index 1), `__wbindgen_export_6` must point at the funcref table (index 0).
+
 ## Troubleshooting
 
 If the wheel doesn't contain custom features:
@@ -157,6 +174,37 @@ If the wheel doesn't contain custom features:
 3. Check wheel contents: `python -m zipfile -l ./wheels/rerun_sdk-*.whl | grep rerun_cli`
 4. Test extracted binary as shown in Step 4
 5. Verify directory creation: `mkdir -p /tmp/test && ./target/release/rerun --save test --save-dir /tmp/test --help`
+
+If the web viewer fails to load (table growth error, RuntimeError, or "table.set called with wrong type"):
+
+1. Check that `--growable-table` is in the RUSTFLAGS: inspect `.cargo/config.toml` and `build_web_viewer/lib.rs`
+2. Verify the built wasm table exports — `__wbindgen_export_1` must point at the externref table (index 1) and `__wbindgen_export_6` at the funcref table (index 0). Use this inspector against `web_viewer/re_viewer_bg.wasm` or any wheel's bundled wasm:
+   ```bash
+   python3 -c "
+   with open('re_viewer_bg.wasm','rb') as f: d=f.read()
+   def leb(b,o):
+       r=0;s=0
+       while True:
+           x=b[o]; o+=1; r|=(x&0x7f)<<s
+           if not (x&0x80): break
+           s+=7
+       return r,o
+   off=8
+   KIND={0:'func',1:'table',2:'memory',3:'global'}
+   while off<len(d):
+       sid=d[off]; off+=1; size,off=leb(d,off)
+       if sid==7:
+           n,p=leb(d,off)
+           for _ in range(n):
+               nl,p=leb(d,p); nm=bytes(d[p:p+nl]).decode(); p+=nl
+               k=d[p]; p+=1; ix,p=leb(d,p)
+               if KIND.get(k)=='table':
+                   print(f'{nm} -> table[{ix}]')
+           break
+       off+=size"
+   ```
+   If both exports point at `table[0]`, wasm-opt has scrambled them — verify it's disabled in `build_web_viewer/lib.rs`.
+3. Build the WASM locally (`cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g`) and re-run the inspector — faster than waiting for CI.
 
 ## Build Commands Reference
 
