@@ -138,17 +138,11 @@ pub fn build(
         // --export-table: needed alongside --growable-table for wasm-bindgen compatibility.
         // +bulk-memory,+simd128: native memcpy/memset and SIMD — meaningful perf wins
         //   in the viewer, supported by all modern browsers.
-        // -reference-types: rustc 1.82+ enables this by default on wasm32, but
-        //   wasm-bindgen 0.2.100 has a regression where the externref table export
-        //   metadata is wrong (both __wbindgen_export_* entries end up pointing at
-        //   table[0] funcref instead of table[1] externref), crashing the viewer
-        //   at load time. Disabling falls back to legacy i32-indexed externref.
-        //   Revisit once wasm-bindgen is bumped to 0.2.105+.
         let wasm_rustflags_parts = [
             "--cfg=web_sys_unstable_apis",
             "-Clink-arg=--growable-table",
             "-Clink-arg=--export-table",
-            "-Ctarget-feature=+bulk-memory,+simd128,-reference-types",
+            "-Ctarget-feature=+bulk-memory,+simd128",
         ];
         // RUSTFLAGS is space-separated.
         cmd.env("RUSTFLAGS", wasm_rustflags_parts.join(" "));
@@ -220,51 +214,20 @@ pub fn build(
         );
     }
 
-    if profile == Profile::Release {
-        eprintln!("Optimizing wasm with wasm-opt…");
-        let start_time = Instant::now();
-
-        // to get wasm-opt:  apt/brew/dnf install binaryen
-        let mut cmd = std::process::Command::new("wasm-opt");
-
-        // All target features present in the input wasm must be enabled here,
-        // otherwise wasm-opt will *lower* them — and the multivalue lowering in
-        // particular can shuffle wasm-bindgen's __wbindgen_export_* table indices,
-        // leaving the JS glue pointing at the wrong table.
-        let mut args = vec![
-            wasm_path.as_str(),
-            "-O2",
-            "--output",
-            wasm_path.as_str(),
-            "--enable-reference-types",
-            "--enable-bulk-memory",
-            "--enable-simd",
-            "--enable-multivalue",
-            "--enable-sign-ext",
-            "--enable-mutable-globals",
-        ];
-        if debug_symbols {
-            args.push("-g");
-        }
-        cmd.args(args);
-        eprintln!("{root_dir}> {cmd:?}");
-
-        let output = cmd
-            .current_dir(root_dir)
-            .output()
-            .context("Failed to run wasm-opt, it may not be installed")?;
-
-        anyhow::ensure!(
-            output.status.success(),
-            "Failed to run wasm-opt:\n{}",
-            String::from_utf8_lossy(&output.stderr),
-        );
-
-        eprintln!(
-            "Optimized wasm in {:.1}s\n",
-            start_time.elapsed().as_secs_f32()
-        );
-    }
+    // wasm-opt is intentionally skipped.
+    //
+    // binaryen 105 (what Ubuntu 22.04's `apt install binaryen` ships) rewrites
+    // the __wbindgen_export_* table metadata during `-O2`, leaving both exports
+    // pointing at table[0] (funcref) even though the externref table exists at
+    // table[1]. The JS glue then calls `.set(idx, obj)` on the funcref table
+    // and the viewer crashes at WASM init with a type error.
+    //
+    // Skipping wasm-opt trades ~20% WASM size for correctness. To re-enable,
+    // bump the CI binaryen to >= 121 (download the release tarball on Linux
+    // rather than using apt) and verify the table exports on the built wasm:
+    //   __wbindgen_export_1 must point at the externref table (index 1)
+    //   __wbindgen_export_6 must point at the funcref table   (index 0)
+    let _ = debug_symbols;
 
     // --------------------------------------------------------------------------------
 
