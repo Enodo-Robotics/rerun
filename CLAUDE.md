@@ -198,6 +198,7 @@ Wheels are built on GitHub-hosted runners (`ubuntu-22.04`, `windows-latest`, `ma
 ### Custom CLI flags added to the `rerun` binary
 
 - **`--save-interval <seconds>`**: Continuously rotates the save file every N seconds. Requires `--save <path>` to be set; the path is then treated as a prefix, producing `<path>_1.rrd`, `<path>_2.rrd`, etc. Each rotated file gets a copy of the most recent `SetStoreInfo` so it's loadable on its own.
+- **`--save-static <path>`**: Streams static chunks (plus `BlueprintActivationCommand`) to a dedicated sidecar file instead of inlining them into the temporal output. Keeps rotated files small and avoids duplicating static data across every rotation. Valid on its own (without `--save`) to capture only static data. `SetStoreInfo` is written to both temporal and static files so each is independently loadable.
 - **`--application-id <id>`**: Overrides `application_id` on every incoming log message. Useful for centralized ingestion (`--serve-grpc --save …`) so all captured recordings are tagged with a consistent ID regardless of what the logging SDKs sent.
 
 Upstream's `--save <path>` semantics are unchanged — without `--save-interval`, it writes a single file to the exact given path.
@@ -205,7 +206,10 @@ Upstream's `--save <path>` semantics are unchanged — without `--save-interval`
 Example combining everything:
 
 ```
-rerun --serve-grpc --save /data/run --save-interval 30 --application-id my_robot
+rerun --serve-grpc \
+      --save /data/run --save-interval 30 \
+      --save-static /data/static.rrd \
+      --application-id my_robot
 ```
 
-Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `rewrite_application_id`, `rotated_path`).
+Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `Sinks`, `classify`, `rewrite_application_id`, `rotated_path`). Static vs temporal classification is done by parsing each `ArrowMsg` into a `re_chunk::Chunk` and calling `is_static()`.

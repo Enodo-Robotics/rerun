@@ -117,6 +117,7 @@ jobs:
           help_out=$(extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} --help)
           echo "$help_out" | grep -q "save-interval" \
             && echo "$help_out" | grep -q "application-id" \
+            && echo "$help_out" | grep -q "save-static" \
             && echo "Custom features verified!" \
             || (echo "ERROR: Custom features missing!" && exit 1)
           rm -rf extracted_wheel

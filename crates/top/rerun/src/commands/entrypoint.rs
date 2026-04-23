@@ -230,6 +230,20 @@ When persisted, the state will be stored at the following locations:
     #[clap(long, value_name = "ID")]
     application_id: Option<String>,
 
+    /// Stream static data to a dedicated .rrd file, separate from temporal data.
+    ///
+    /// When set, all static chunks (meshes, coordinate systems, annotations,
+    /// blueprint activations, etc.) are routed to this file and kept out of
+    /// `--save` and any `--save-interval` rotations. Combined with
+    /// `--save-interval`, this keeps rotated temporal files small and avoids
+    /// duplicating static data across every rotation.
+    ///
+    /// The static file accumulates over time as new static chunks arrive.
+    /// `SetStoreInfo` is written to both files so each is independently loadable.
+    /// Valid on its own (without `--save`) to capture only static data.
+    #[clap(long, value_name = "PATH")]
+    save_static: Option<String>,
+
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
     /// Useful together with `--window-size`.
@@ -889,7 +903,7 @@ fn run_impl(
     }
 
     // Now what do we do with the data?
-    if args.test_receive || args.save.is_some() {
+    if args.test_receive || args.save.is_some() || args.save_static.is_some() {
         let receivers = ReceiversFromUrlParams::new(
             url_or_paths,
             &UrlParamProcessingConfig::convert_everything_to_data_sources(),
@@ -900,6 +914,7 @@ fn run_impl(
         save_or_test_receive(
             args.save,
             args.save_interval,
+            args.save_static,
             args.application_id,
             receivers,
             #[cfg(feature = "server")]
@@ -1291,16 +1306,20 @@ fn serve_grpc(
 fn save_or_test_receive(
     save: Option<String>,
     save_interval: Option<u64>,
+    save_static: Option<String>,
     application_id: Option<String>,
     receivers: ReceiversFromUrlParams,
     #[cfg(feature = "server")] server_addr: std::net::SocketAddr,
     #[cfg(feature = "server")] server_options: re_sdk::ServerOptions,
 ) -> anyhow::Result<()> {
-    receivers.error_on_unhandled_urls(if save.is_none() {
-        "--test-receive"
-    } else {
+    let mode_label = if save.is_some() {
         "--save"
-    })?;
+    } else if save_static.is_some() {
+        "--save-static"
+    } else {
+        "--test-receive"
+    };
+    receivers.error_on_unhandled_urls(mode_label)?;
 
     #[allow(clippy::allow_attributes, unused_mut)]
     let mut log_receivers = receivers.log_receivers;
@@ -1318,25 +1337,38 @@ fn save_or_test_receive(
 
     let receive_set = LogReceiverSet::new(log_receivers);
     let app_id_override = application_id.map(re_log_types::ApplicationId::from);
+    let static_path = save_static.map(std::path::PathBuf::from);
 
-    if let Some(rrd_path) = save {
-        let path: std::path::PathBuf = rrd_path.into();
+    if save.is_none() && static_path.is_none() {
+        return assert_receive_into_entity_db(&receive_set).map(|_db| ());
+    }
+
+    if let Some(temporal_path) = save {
+        let path: std::path::PathBuf = temporal_path.into();
         if let Some(interval_seconds) = save_interval {
             Ok(stream_to_rrd_rotating(
                 &receive_set,
                 &path,
                 interval_seconds,
+                static_path.as_deref(),
                 app_id_override.as_ref(),
             )?)
         } else {
             Ok(stream_to_rrd_on_disk(
                 &receive_set,
-                &path,
+                Some(&path),
+                static_path.as_deref(),
                 app_id_override.as_ref(),
             )?)
         }
     } else {
-        assert_receive_into_entity_db(&receive_set).map(|_db| ())
+        // --save-static only: no temporal file.
+        Ok(stream_to_rrd_on_disk(
+            &receive_set,
+            None,
+            static_path.as_deref(),
+            app_id_override.as_ref(),
+        )?)
     }
 }
 
@@ -1563,29 +1595,119 @@ fn parse_size(size: &str) -> anyhow::Result<[f32; 2]> {
 
 // TODO(cmc): dedicated module for io utils, especially stdio streaming in and out.
 
-fn stream_to_rrd_on_disk(
-    rx: &re_log_channel::LogReceiverSet,
-    path: &std::path::PathBuf,
-    application_id: Option<&re_log_types::ApplicationId>,
-) -> Result<(), re_log_encoding::FileSinkError> {
+/// Where a given `LogMsg` should be written.
+enum MsgRoute {
+    /// Goes to the temporal sink only (or nowhere if no temporal sink).
+    Temporal,
+    /// Goes to the static sink only (or falls back to the temporal sink if no static sink).
+    Static,
+    /// Duplicated to both sinks (e.g. `SetStoreInfo` so each file is independently loadable).
+    Both,
+}
+
+fn classify(msg: &re_log_types::LogMsg) -> MsgRoute {
+    match msg {
+        re_log_types::LogMsg::SetStoreInfo(_) => MsgRoute::Both,
+        re_log_types::LogMsg::BlueprintActivationCommand(_) => MsgRoute::Static,
+        re_log_types::LogMsg::ArrowMsg(_, arrow_msg) => {
+            match re_chunk::Chunk::from_arrow_msg(arrow_msg) {
+                Ok(chunk) if chunk.is_static() => MsgRoute::Static,
+                _ => MsgRoute::Temporal,
+            }
+        }
+    }
+}
+
+fn open_encoder(
+    path: &std::path::Path,
+) -> Result<re_log_encoding::Encoder<std::fs::File>, re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|err| FileSinkError::CreateFile {
+                path: parent.to_path_buf(),
+                source: err,
+            })?;
+        }
+    }
     if path.exists() {
         re_log::warn!(?path, "Overwriting existing file");
     }
-
-    re_log::info!("Saving incoming log stream to {path:?}. Abort with Ctrl-C.");
-
-    let encoding_options = re_log_encoding::rrd::EncodingOptions::PROTOBUF_COMPRESSED;
     let file = std::fs::File::create(path).map_err(|err| FileSinkError::CreateFile {
-        path: path.clone(),
+        path: path.to_path_buf(),
         source: err,
     })?;
-    let mut encoder = re_log_encoding::Encoder::new_eager(
+    Ok(re_log_encoding::Encoder::new_eager(
         re_build_info::CrateVersion::LOCAL,
-        encoding_options,
+        re_log_encoding::rrd::EncodingOptions::PROTOBUF_COMPRESSED,
         file,
-    )?;
+    )?)
+}
+
+/// Dual-sink writer that routes each message according to [`classify`].
+struct Sinks {
+    temporal: Option<re_log_encoding::Encoder<std::fs::File>>,
+    static_: Option<re_log_encoding::Encoder<std::fs::File>>,
+}
+
+impl Sinks {
+    fn write(&mut self, msg: &re_log_types::LogMsg) -> Result<(), re_log_encoding::FileSinkError> {
+        match classify(msg) {
+            MsgRoute::Temporal => {
+                if let Some(t) = self.temporal.as_mut() {
+                    t.append(msg)?;
+                }
+            }
+            MsgRoute::Static => {
+                // Fall back to temporal if there's no static sink, so behavior is unchanged
+                // when the user hasn't opted into --save-static.
+                let sink = self.static_.as_mut().or(self.temporal.as_mut());
+                if let Some(s) = sink {
+                    s.append(msg)?;
+                }
+            }
+            MsgRoute::Both => {
+                if let Some(t) = self.temporal.as_mut() {
+                    t.append(msg)?;
+                }
+                if let Some(s) = self.static_.as_mut() {
+                    s.append(msg)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Stream to one temporal file (or just the static file if temporal is None).
+///
+/// If `static_path` is set, static chunks and `BlueprintActivationCommand` are routed there
+/// instead of the temporal file. `SetStoreInfo` is written to both so each file is
+/// independently loadable.
+fn stream_to_rrd_on_disk(
+    rx: &re_log_channel::LogReceiverSet,
+    temporal_path: Option<&std::path::Path>,
+    static_path: Option<&std::path::Path>,
+    application_id: Option<&re_log_types::ApplicationId>,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    let mut sinks = Sinks {
+        temporal: temporal_path.map(open_encoder).transpose()?,
+        static_: static_path.map(open_encoder).transpose()?,
+    };
+
+    match (temporal_path, static_path) {
+        (Some(t), Some(s)) => re_log::info!(
+            "Saving temporal stream to {t:?}, static stream to {s:?}. Abort with Ctrl-C."
+        ),
+        (Some(t), None) => {
+            re_log::info!("Saving incoming log stream to {t:?}. Abort with Ctrl-C.");
+        }
+        (None, Some(s)) => {
+            re_log::info!("Saving static-only stream to {s:?}. Abort with Ctrl-C.");
+        }
+        (None, None) => unreachable!("at least one sink must be provided"),
+    }
 
     loop {
         if let Ok(msg) = rx.recv() {
@@ -1595,7 +1717,7 @@ fn stream_to_rrd_on_disk(
                         if let Some(app_id) = application_id {
                             rewrite_application_id(&mut log_msg, app_id);
                         }
-                        encoder.append(&log_msg)?;
+                        sinks.write(&log_msg)?;
                     }
                     unsupported => {
                         re_log::error_once!(
@@ -1611,79 +1733,61 @@ fn stream_to_rrd_on_disk(
         }
     }
 
-    re_log::info!("File saved to {path:?}");
-
     Ok(())
 }
 
-/// Stream incoming log messages to disk, rotating into numbered files every `interval_seconds`.
+/// Stream to rotated temporal files + an optional static sidecar.
 ///
-/// Output files are named `<base_path>_1.rrd`, `<base_path>_2.rrd`, ... If `base_path` already
-/// ends in `.rrd`, the extension is stripped first so `/data/run.rrd` → `/data/run_1.rrd`.
+/// Temporal output is rotated into `<base_path>_1.rrd`, `<base_path>_2.rrd`, … every
+/// `interval_seconds`. If `static_path` is set, static chunks are written there instead and
+/// kept out of the rotation — this keeps rotated files small and avoids duplicating static
+/// data across rotations.
 ///
-/// Every rotated file gets a copy of the most recent `SetStoreInfo` so it's loadable on its own.
-/// Other messages (temporal data, static chunks logged in earlier windows) are NOT replayed into
-/// later files — if a file's time window saw no temporal data for a given entity, that entity
-/// will be absent from the file.
+/// Each rotated temporal file gets a copy of the most recent `SetStoreInfo` so it's
+/// loadable on its own. The static file also gets `SetStoreInfo`.
 fn stream_to_rrd_rotating(
     rx: &re_log_channel::LogReceiverSet,
     base_path: &std::path::Path,
     interval_seconds: u64,
+    static_path: Option<&std::path::Path>,
     application_id: Option<&re_log_types::ApplicationId>,
 ) -> Result<(), re_log_encoding::FileSinkError> {
-    use re_log_encoding::FileSinkError;
     use std::time::{Duration, Instant};
-
-    if let Some(parent) = base_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|err| FileSinkError::CreateFile {
-                path: parent.to_path_buf(),
-                source: err,
-            })?;
-        }
-    }
 
     let interval = Duration::from_secs(interval_seconds);
     let mut counter: u64 = 1;
     let mut store_info_prelude: Option<re_log_types::LogMsg> = None;
 
-    let open_encoder = |path: &std::path::PathBuf| -> Result<
-        re_log_encoding::Encoder<std::fs::File>,
-        FileSinkError,
-    > {
-        if path.exists() {
-            re_log::warn!(?path, "Overwriting existing file");
-        }
-        let file = std::fs::File::create(path).map_err(|err| FileSinkError::CreateFile {
-            path: path.clone(),
-            source: err,
-        })?;
-        Ok(re_log_encoding::Encoder::new_eager(
-            re_build_info::CrateVersion::LOCAL,
-            re_log_encoding::rrd::EncodingOptions::PROTOBUF_COMPRESSED,
-            file,
-        )?)
-    };
-
     let mut current_path = rotated_path(base_path, counter);
-    let mut encoder = open_encoder(&current_path)?;
+    let mut sinks = Sinks {
+        temporal: Some(open_encoder(&current_path)?),
+        static_: static_path.map(open_encoder).transpose()?,
+    };
     let mut window_start = Instant::now();
 
-    re_log::info!(
-        "Saving rotating log stream to {base_path:?}_N.rrd, new file every {interval_seconds}s (currently: {current_path:?}). Abort with Ctrl-C."
-    );
+    match static_path {
+        Some(s) => re_log::info!(
+            "Saving rotating log stream to {base_path:?}_N.rrd every {interval_seconds}s (starting: {current_path:?}), static data to {s:?}. Abort with Ctrl-C."
+        ),
+        None => re_log::info!(
+            "Saving rotating log stream to {base_path:?}_N.rrd, new file every {interval_seconds}s (starting: {current_path:?}). Abort with Ctrl-C."
+        ),
+    }
 
     let poll_interval = Duration::from_millis(250).min(interval);
     loop {
         if window_start.elapsed() >= interval {
-            drop(encoder);
+            // Drop the old temporal encoder to flush + write end marker, then open the next file.
+            sinks.temporal.take();
             re_log::info!(?current_path, "Rotated file");
             counter += 1;
             current_path = rotated_path(base_path, counter);
-            encoder = open_encoder(&current_path)?;
+            sinks.temporal = Some(open_encoder(&current_path)?);
             window_start = Instant::now();
             if let Some(prelude) = &store_info_prelude {
-                encoder.append(prelude)?;
+                if let Some(t) = sinks.temporal.as_mut() {
+                    t.append(prelude)?;
+                }
             }
         }
 
@@ -1697,7 +1801,7 @@ fn stream_to_rrd_rotating(
                         if matches!(&log_msg, re_log_types::LogMsg::SetStoreInfo(_)) {
                             store_info_prelude = Some(log_msg.clone());
                         }
-                        encoder.append(&log_msg)?;
+                        sinks.write(&log_msg)?;
                     }
                     unsupported => {
                         re_log::error_once!(
@@ -1717,8 +1821,8 @@ fn stream_to_rrd_rotating(
         }
     }
 
-    drop(encoder);
-    re_log::info!("Rotating save complete. Wrote {counter} file(s).");
+    drop(sinks);
+    re_log::info!("Rotating save complete. Wrote {counter} temporal file(s).");
     Ok(())
 }
 
@@ -1928,6 +2032,7 @@ fn record_cli_command_analytics(args: &Args) {
         new: _,
         save_interval: _,
         application_id: _,
+        save_static: _,
     } = args;
 
     let (command, subcommand) = match command {
