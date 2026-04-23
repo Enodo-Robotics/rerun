@@ -1,0 +1,150 @@
+name: Build Wheels on Tag
+
+on:
+  push:
+    tags:
+      - "RRL-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheel:
+    name: "Build Wheel (${{ matrix.name }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            cli_binary: rerun
+            install_deps: |
+              sudo apt-get update && sudo apt-get install -y \
+                libatk-bridge2.0-dev libatk1.0-dev libfontconfig-dev libfreetype-dev \
+                libgl-dev libglib2.0-dev libgtk-3-dev libpango1.0-dev libssl-dev \
+                libvulkan-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+                libxkbcommon-dev nasm binaryen pkg-config
+
+          - name: Windows x86_64
+            os: windows-latest
+            cli_binary: rerun.exe
+            install_deps: choco install nasm -y
+
+          - name: macOS Apple Silicon
+            os: macos-latest
+            cli_binary: rerun
+            install_deps: brew install nasm binaryen
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Clean up existing Rust toolchains
+        run: |
+          rustup toolchain list | while read tc; do
+            rustup toolchain remove "$tc" 2>/dev/null || true
+          done
+        shell: bash
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: ${{ matrix.install_deps }}
+        shell: bash
+
+      - name: Add NASM to PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\NASM" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Install binaryen (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-windows.tar.gz" -OutFile binaryen.tar.gz
+          tar -xzf binaryen.tar.gz
+          $binPath = Join-Path $env:GITHUB_WORKSPACE "binaryen-version_121" "bin"
+          Write-Host "Adding to PATH: $binPath"
+          Write-Host "Contents:"
+          Get-ChildItem $binPath
+          Add-Content $env:GITHUB_PATH $binPath
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build web viewer WASM
+        run: cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g
+
+      - name: Build CLI binary
+        run: cargo build --release --bin rerun
+
+      - name: Copy CLI into Python package
+        run: cp ./target/release/${{ matrix.cli_binary }} ./rerun_py/rerun_sdk/rerun_cli/${{ matrix.cli_binary }}
+        shell: bash
+
+      - name: Build Python wheel
+        run: |
+          mkdir -p wheels
+          RERUN_BUILDING_WHEEL=1 maturin build \
+            --release \
+            --manifest-path rerun_py/Cargo.toml \
+            --features web_viewer,nasm,server \
+            --out ./wheels/
+        shell: bash
+        env:
+          RERUN_BUILDING_WHEEL: "1"
+
+      - name: Verify custom features
+        run: |
+          python3 -m zipfile -e wheels/rerun_sdk-*.whl extracted_wheel || python -m zipfile -e wheels/rerun_sdk-*.whl extracted_wheel
+          chmod +x extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} 2>/dev/null || true
+          extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} --help | grep -q "save-dir" \
+            && echo "Custom features verified!" \
+            || (echo "ERROR: Custom features missing!" && exit 1)
+          rm -rf extracted_wheel
+        shell: bash
+
+      - name: Upload wheel as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: ./wheels/*.whl
+
+  release:
+    name: "Upload to Release"
+    needs: [build-wheel]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: Create release and upload wheels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          ls -la wheels/
+          gh release view "$TAG" || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" wheels/*.whl --clobber
