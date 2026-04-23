@@ -16,11 +16,16 @@ IS_IN_RERUN_WORKSPACE = "yes"
 # https://rustwasm.github.io/wasm-bindgen/api/web_sys/struct.Clipboard.html
 # https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html
 [target.wasm32-unknown-unknown]
+# -reference-types: rustc 1.82+ enables reference-types by default on wasm32,
+# but wasm-bindgen 0.2.100 has a regression where the externref table export
+# metadata is wrong, leaving __wbindgen_export_6 pointing at table[0] (funcref)
+# instead of table[1] (externref). Opting out falls back to legacy i32-indexed
+# externref, which works. Revisit once we bump wasm-bindgen to 0.2.105+.
 rustflags = [
     "--cfg=web_sys_unstable_apis",
     "-C", "link-arg=--growable-table",
     "-C", "link-arg=--export-table",
-    "-C", "target-feature=+bulk-memory,+simd128",
+    "-C", "target-feature=+bulk-memory,+simd128,-reference-types",
 ]
 
 # TODO(emilk): This should be unnecessary when we update to the 2024 edition in Rust 1.85.

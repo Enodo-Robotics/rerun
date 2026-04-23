@@ -138,11 +138,17 @@ pub fn build(
         // --export-table: needed alongside --growable-table for wasm-bindgen compatibility.
         // +bulk-memory,+simd128: native memcpy/memset and SIMD — meaningful perf wins
         //   in the viewer, supported by all modern browsers.
+        // -reference-types: rustc 1.82+ enables this by default on wasm32, but
+        //   wasm-bindgen 0.2.100 has a regression where the externref table export
+        //   metadata is wrong (both __wbindgen_export_* entries end up pointing at
+        //   table[0] funcref instead of table[1] externref), crashing the viewer
+        //   at load time. Disabling falls back to legacy i32-indexed externref.
+        //   Revisit once wasm-bindgen is bumped to 0.2.105+.
         let wasm_rustflags_parts = [
             "--cfg=web_sys_unstable_apis",
             "-Clink-arg=--growable-table",
             "-Clink-arg=--export-table",
-            "-Ctarget-feature=+bulk-memory,+simd128",
+            "-Ctarget-feature=+bulk-memory,+simd128,-reference-types",
         ];
         // RUSTFLAGS is space-separated.
         cmd.env("RUSTFLAGS", wasm_rustflags_parts.join(" "));
