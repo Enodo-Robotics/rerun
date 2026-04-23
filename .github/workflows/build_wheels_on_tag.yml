@@ -114,7 +114,9 @@ jobs:
         run: |
           python3 -m zipfile -e wheels/rerun_sdk-*.whl extracted_wheel || python -m zipfile -e wheels/rerun_sdk-*.whl extracted_wheel
           chmod +x extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} 2>/dev/null || true
-          extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} --help | grep -q "save-dir" \
+          help_out=$(extracted_wheel/rerun_sdk/rerun_cli/${{ matrix.cli_binary }} --help)
+          echo "$help_out" | grep -q "save-interval" \
+            && echo "$help_out" | grep -q "application-id" \
             && echo "Custom features verified!" \
             || (echo "ERROR: Custom features missing!" && exit 1)
           rm -rf extracted_wheel

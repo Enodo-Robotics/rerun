@@ -184,3 +184,28 @@ Key things to know:
 - [`DESIGN.md`](DESIGN.md) - Guidelines for UI design, covering GUI, CLI, documentation, log messages, etc
 - [`docs/README.md`](docs/README.md) - Documentation system (sites, builds, deployment)
 - [`rerun_py/README.md`](rerun_py/README.md) - Python SDK specific instructions
+
+## Enodo Robotics fork (RRL) — custom features
+
+This is a fork maintained by Enodo Robotics. Release wheels are built by a single GitHub Actions workflow triggered by tags matching `RRL-v*`:
+
+```
+git tag RRL-v3.0.0 && git push origin RRL-v3.0.0
+```
+
+Wheels are built on GitHub-hosted runners (`ubuntu-22.04`, `windows-latest`, `macos-latest`) and uploaded to a GitHub release for the tag. Workflow: `.github/workflows/build_wheels_on_tag.yml`.
+
+### Custom CLI flags added to the `rerun` binary
+
+- **`--save-interval <seconds>`**: Continuously rotates the save file every N seconds. Requires `--save <path>` to be set; the path is then treated as a prefix, producing `<path>_1.rrd`, `<path>_2.rrd`, etc. Each rotated file gets a copy of the most recent `SetStoreInfo` so it's loadable on its own.
+- **`--application-id <id>`**: Overrides `application_id` on every incoming log message. Useful for centralized ingestion (`--serve-grpc --save …`) so all captured recordings are tagged with a consistent ID regardless of what the logging SDKs sent.
+
+Upstream's `--save <path>` semantics are unchanged — without `--save-interval`, it writes a single file to the exact given path.
+
+Example combining everything:
+
+```
+rerun --serve-grpc --save /data/run --save-interval 30 --application-id my_robot
+```
+
+Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `rewrite_application_id`, `rotated_path`).

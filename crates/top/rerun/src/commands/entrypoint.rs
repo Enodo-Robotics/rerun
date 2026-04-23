@@ -208,8 +208,27 @@ When persisted, the state will be stored at the following locations:
     profile: bool,
 
     /// Stream incoming log events to an .rrd file at the given path.
+    ///
+    /// When combined with `--save-interval`, the path is treated as a prefix and
+    /// output is rotated into `<path>_1.rrd`, `<path>_2.rrd`, ...
     #[clap(long)]
     save: Option<String>,
+
+    /// Continuously rotate the save file every N seconds.
+    ///
+    /// Requires `--save` to be set. The `--save` path is treated as a prefix:
+    /// output files are named `<path>_1.rrd`, `<path>_2.rrd`, etc., with a new
+    /// file opened every N seconds.
+    #[clap(long, value_name = "SECONDS")]
+    save_interval: Option<u64>,
+
+    /// Override the `application_id` on every incoming log message.
+    ///
+    /// Useful when running a centralized ingestion server (`--serve-grpc --save …`):
+    /// all captured recordings will be tagged with this ID regardless of what the
+    /// logging SDK sent in its `StoreInfo`.
+    #[clap(long, value_name = "ID")]
+    application_id: Option<String>,
 
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
@@ -865,6 +884,10 @@ fn run_impl(
         url_or_paths.push(url);
     }
 
+    if args.save_interval.is_some() && args.save.is_none() {
+        anyhow::bail!("--save-interval requires --save <path> to be set");
+    }
+
     // Now what do we do with the data?
     if args.test_receive || args.save.is_some() {
         let receivers = ReceiversFromUrlParams::new(
@@ -876,6 +899,8 @@ fn run_impl(
         )?;
         save_or_test_receive(
             args.save,
+            args.save_interval,
+            args.application_id,
             receivers,
             #[cfg(feature = "server")]
             server_addr,
@@ -1265,6 +1290,8 @@ fn serve_grpc(
 
 fn save_or_test_receive(
     save: Option<String>,
+    save_interval: Option<u64>,
+    application_id: Option<String>,
     receivers: ReceiversFromUrlParams,
     #[cfg(feature = "server")] server_addr: std::net::SocketAddr,
     #[cfg(feature = "server")] server_options: re_sdk::ServerOptions,
@@ -1290,9 +1317,24 @@ fn save_or_test_receive(
     }
 
     let receive_set = LogReceiverSet::new(log_receivers);
+    let app_id_override = application_id.map(re_log_types::ApplicationId::from);
 
     if let Some(rrd_path) = save {
-        Ok(stream_to_rrd_on_disk(&receive_set, &rrd_path.into())?)
+        let path: std::path::PathBuf = rrd_path.into();
+        if let Some(interval_seconds) = save_interval {
+            Ok(stream_to_rrd_rotating(
+                &receive_set,
+                &path,
+                interval_seconds,
+                app_id_override.as_ref(),
+            )?)
+        } else {
+            Ok(stream_to_rrd_on_disk(
+                &receive_set,
+                &path,
+                app_id_override.as_ref(),
+            )?)
+        }
     } else {
         assert_receive_into_entity_db(&receive_set).map(|_db| ())
     }
@@ -1524,6 +1566,7 @@ fn parse_size(size: &str) -> anyhow::Result<[f32; 2]> {
 fn stream_to_rrd_on_disk(
     rx: &re_log_channel::LogReceiverSet,
     path: &std::path::PathBuf,
+    application_id: Option<&re_log_types::ApplicationId>,
 ) -> Result<(), re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
@@ -1548,7 +1591,10 @@ fn stream_to_rrd_on_disk(
         if let Ok(msg) = rx.recv() {
             if let Some(payload) = msg.into_data() {
                 match payload {
-                    DataSourceMessage::LogMsg(log_msg) => {
+                    DataSourceMessage::LogMsg(mut log_msg) => {
+                        if let Some(app_id) = application_id {
+                            rewrite_application_id(&mut log_msg, app_id);
+                        }
                         encoder.append(&log_msg)?;
                     }
                     unsupported => {
@@ -1568,6 +1614,140 @@ fn stream_to_rrd_on_disk(
     re_log::info!("File saved to {path:?}");
 
     Ok(())
+}
+
+/// Stream incoming log messages to disk, rotating into numbered files every `interval_seconds`.
+///
+/// Output files are named `<base_path>_1.rrd`, `<base_path>_2.rrd`, ... If `base_path` already
+/// ends in `.rrd`, the extension is stripped first so `/data/run.rrd` → `/data/run_1.rrd`.
+///
+/// Every rotated file gets a copy of the most recent `SetStoreInfo` so it's loadable on its own.
+/// Other messages (temporal data, static chunks logged in earlier windows) are NOT replayed into
+/// later files — if a file's time window saw no temporal data for a given entity, that entity
+/// will be absent from the file.
+fn stream_to_rrd_rotating(
+    rx: &re_log_channel::LogReceiverSet,
+    base_path: &std::path::Path,
+    interval_seconds: u64,
+    application_id: Option<&re_log_types::ApplicationId>,
+) -> Result<(), re_log_encoding::FileSinkError> {
+    use re_log_encoding::FileSinkError;
+    use std::time::{Duration, Instant};
+
+    if let Some(parent) = base_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|err| FileSinkError::CreateFile {
+                path: parent.to_path_buf(),
+                source: err,
+            })?;
+        }
+    }
+
+    let interval = Duration::from_secs(interval_seconds);
+    let mut counter: u64 = 1;
+    let mut store_info_prelude: Option<re_log_types::LogMsg> = None;
+
+    let open_encoder = |path: &std::path::PathBuf| -> Result<
+        re_log_encoding::Encoder<std::fs::File>,
+        FileSinkError,
+    > {
+        if path.exists() {
+            re_log::warn!(?path, "Overwriting existing file");
+        }
+        let file = std::fs::File::create(path).map_err(|err| FileSinkError::CreateFile {
+            path: path.clone(),
+            source: err,
+        })?;
+        Ok(re_log_encoding::Encoder::new_eager(
+            re_build_info::CrateVersion::LOCAL,
+            re_log_encoding::rrd::EncodingOptions::PROTOBUF_COMPRESSED,
+            file,
+        )?)
+    };
+
+    let mut current_path = rotated_path(base_path, counter);
+    let mut encoder = open_encoder(&current_path)?;
+    let mut window_start = Instant::now();
+
+    re_log::info!(
+        "Saving rotating log stream to {base_path:?}_N.rrd, new file every {interval_seconds}s (currently: {current_path:?}). Abort with Ctrl-C."
+    );
+
+    let poll_interval = Duration::from_millis(250).min(interval);
+    loop {
+        if window_start.elapsed() >= interval {
+            drop(encoder);
+            re_log::info!(?current_path, "Rotated file");
+            counter += 1;
+            current_path = rotated_path(base_path, counter);
+            encoder = open_encoder(&current_path)?;
+            window_start = Instant::now();
+            if let Some(prelude) = &store_info_prelude {
+                encoder.append(prelude)?;
+            }
+        }
+
+        match rx.recv_timeout(poll_interval) {
+            Some((_, msg)) => match msg.payload {
+                SmartMessagePayload::Msg(data) => match data {
+                    DataSourceMessage::LogMsg(mut log_msg) => {
+                        if let Some(app_id) = application_id {
+                            rewrite_application_id(&mut log_msg, app_id);
+                        }
+                        if matches!(&log_msg, re_log_types::LogMsg::SetStoreInfo(_)) {
+                            store_info_prelude = Some(log_msg.clone());
+                        }
+                        encoder.append(&log_msg)?;
+                    }
+                    unsupported => {
+                        re_log::error_once!(
+                            "Received a {} which can't be stored in a file",
+                            unsupported.variant_name()
+                        );
+                    }
+                },
+                SmartMessagePayload::Flush { on_flush_done } => on_flush_done(),
+                SmartMessagePayload::Quit(_) => break,
+            },
+            None => {
+                if !rx.is_connected() {
+                    break;
+                }
+            }
+        }
+    }
+
+    drop(encoder);
+    re_log::info!("Rotating save complete. Wrote {counter} file(s).");
+    Ok(())
+}
+
+/// Build the path for the Nth rotated file: `<base>_<n>.rrd`.
+/// If `base` ends in `.rrd`, strip the extension first so `/x/run.rrd` → `/x/run_1.rrd`.
+fn rotated_path(base: &std::path::Path, counter: u64) -> std::path::PathBuf {
+    let stem = if base.extension().and_then(|s| s.to_str()) == Some("rrd") {
+        base.with_extension("")
+    } else {
+        base.to_path_buf()
+    };
+    let mut s = stem.into_os_string();
+    s.push(format!("_{counter}.rrd"));
+    std::path::PathBuf::from(s)
+}
+
+/// Override the `application_id` on a log message.
+///
+/// Both `SetStoreInfo` and `ArrowMsg` carry the application id (via their `StoreId`),
+/// so every message must be rewritten if we want the saved file to be self-consistent.
+fn rewrite_application_id(
+    msg: &mut re_log_types::LogMsg,
+    new_app_id: &re_log_types::ApplicationId,
+) {
+    let new_store_id = msg
+        .store_id()
+        .clone()
+        .with_application_id(new_app_id.clone());
+    msg.set_store_id(new_store_id);
 }
 
 /// Describes how to handle URLs passed on the CLI.
@@ -1746,6 +1926,8 @@ fn record_cli_command_analytics(args: &Args) {
         cors_allow_origin: _,
         port: _,
         new: _,
+        save_interval: _,
+        application_id: _,
     } = args;
 
     let (command, subcommand) = match command {
