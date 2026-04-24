@@ -378,15 +378,25 @@ fn panel_buttons_r2l(
         }
     }
 
-    // annotation panel
+    // annotation quick-tag bar (horizontal bar above timeline)
     if matches!(route, Route::LocalRecording { .. }) {
-        let annotation_visible = app.state.annotation_panel.visible;
         if ui
-            .selectable_label(annotation_visible, "Ann.")
+            .selectable_label(app.state.annotation_panel.tag_bar_visible, "Qt.Ann")
+            .on_hover_text("Toggle quick-tag annotation bar above timeline")
+            .clicked()
+        {
+            app.state.annotation_panel.toggle_tag_bar();
+        }
+    }
+
+    // annotation editor panel (side panel)
+    if matches!(route, Route::LocalRecording { .. }) {
+        if ui
+            .selectable_label(app.state.annotation_panel.editor_visible, "Ed.Ann")
             .on_hover_ui(|ui| UICommand::ToggleAnnotationPanel.tooltip_ui(ui))
             .clicked()
         {
-            app.state.annotation_panel.toggle();
+            app.state.annotation_panel.toggle_editor();
         }
     }
 

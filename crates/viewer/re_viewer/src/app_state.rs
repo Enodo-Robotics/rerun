@@ -562,10 +562,11 @@ impl AppState {
                 }
 
                 //
-                // Annotation Panel
+                // Annotation tag bar (above the time panel) + editor side panel
                 //
 
                 if matches!(route, Route::LocalRecording { .. }) {
+                    self.annotation_panel.show_tag_bar(&ctx, ui);
                     self.annotation_panel.show_panel(&ctx, ui);
                 }
 
