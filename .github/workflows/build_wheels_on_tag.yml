@@ -115,7 +115,10 @@ jobs:
       - name: Generate pyo3-build.cfg
         # .cargo/config.toml references this file via PYO3_CONFIG_FILE.
         # Outside of pixi we have to generate it ourselves before any cargo build.
+        # ensure-pyo3-build-cfg resolves the output path from PIXI_PROJECT_ROOT.
         shell: bash
+        env:
+          PIXI_PROJECT_ROOT: ${{ github.workspace }}
         run: |
           pip install ./rerun_pixi_env
           ensure-pyo3-build-cfg
