@@ -1,0 +1,39 @@
+# Local reproduction of the Linux x86_64 CI job.
+#
+# Usage:
+#   cd docker
+#   docker compose build            # default: binaryen=apt (v105, buggy)
+#   docker compose run --rm ci bash # interactive shell in the mirrored env
+#
+# Or build the web viewer in one shot:
+#   docker compose run --rm ci \
+#     cargo run --release -p re_dev_tools -- \
+#       build-web-viewer --no-default-features --features analytics,map_view --release -g
+#
+# To A/B test the binaryen fix:
+#   BINARYEN=121 docker compose build
+#   BINARYEN=121 docker compose run --rm ci <cmd>
+
+services:
+  ci:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        BINARYEN: "${BINARYEN:-apt}"
+        USER_UID: "${HOST_UID:-1000}"
+        USER_GID: "${HOST_GID:-1000}"
+    image: rerun-ci-linux:${BINARYEN:-apt}
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+      # Persist cargo registry/git caches across runs (big: dep downloads).
+      - cargo-registry:/home/builder/.cargo/registry
+      - cargo-git:/home/builder/.cargo/git
+    # Needed for some cargo/rustc incremental-compilation scenarios.
+    tty: true
+    stdin_open: true
+
+volumes:
+  cargo-registry:
+  cargo-git:
