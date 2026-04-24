@@ -37,7 +37,10 @@ jobs:
           - name: macOS Apple Silicon
             os: macos-latest
             cli_binary: rerun
-            install_deps: brew install nasm binaryen
+            # llvm provides a clang that knows the wasm32-unknown-unknown
+            # target, needed to cross-compile zstd-sys for the web viewer.
+            install_deps: |
+              brew install nasm binaryen llvm
 
     steps:
       - name: Checkout
@@ -95,8 +98,27 @@ jobs:
           Get-ChildItem $binPath
           Add-Content $env:GITHUB_PATH $binPath
 
+      - name: Use Homebrew LLVM clang (macOS)
+        # The default Apple clang on macos-latest does not know the
+        # wasm32-unknown-unknown target, which breaks zstd-sys. Homebrew's
+        # llvm ships a clang that does.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          echo "CC=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
+          echo "CC_wasm32_unknown_unknown=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
+
       - name: Install maturin
         run: pip install maturin
+
+      - name: Generate pyo3-build.cfg
+        # .cargo/config.toml references this file via PYO3_CONFIG_FILE.
+        # Outside of pixi we have to generate it ourselves before any cargo build.
+        shell: bash
+        run: |
+          pip install ./rerun_pixi_env
+          ensure-pyo3-build-cfg
 
       - name: Build web viewer WASM
         run: cargo run --release -p re_dev_tools -- build-web-viewer --no-default-features --features analytics,map_view --release -g
