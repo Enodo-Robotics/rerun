@@ -27,7 +27,7 @@ jobs:
                 libatk-bridge2.0-dev libatk1.0-dev libfontconfig-dev libfreetype-dev \
                 libgl-dev libglib2.0-dev libgtk-3-dev libpango1.0-dev libssl-dev \
                 libvulkan-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-                libxkbcommon-dev nasm binaryen pkg-config
+                libxkbcommon-dev nasm pkg-config
 
           - name: Windows x86_64
             os: windows-latest
@@ -72,6 +72,16 @@ jobs:
         if: runner.os == 'Windows'
         run: echo "C:\Program Files\NASM" >> $GITHUB_PATH
         shell: bash
+
+      - name: Install binaryen (Linux)
+        # Ubuntu 22.04's apt ships binaryen 105, whose -O2 pass mis-rewrites the
+        # `__wbindgen_externrefs` table export to point at the funcref table,
+        # crashing the viewer on load. 121+ fixes this.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/version_121/binaryen-version_121-x86_64-linux.tar.gz" | tar -xz
+          echo "$GITHUB_WORKSPACE/binaryen-version_121/bin" >> $GITHUB_PATH
 
       - name: Install binaryen (Windows)
         if: runner.os == 'Windows'
