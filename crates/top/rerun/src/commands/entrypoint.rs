@@ -1743,8 +1743,11 @@ fn stream_to_rrd_on_disk(
 /// kept out of the rotation — this keeps rotated files small and avoids duplicating static
 /// data across rotations.
 ///
-/// Each rotated temporal file gets a copy of the most recent `SetStoreInfo` so it's
-/// loadable on its own. The static file also gets `SetStoreInfo`.
+/// Each rotated temporal file gets a copy of every `SetStoreInfo` seen so far so it's
+/// independently loadable — a single stream can carry multiple stores (e.g. a recording
+/// plus an auto-generated blueprint), and each store's identity must be present in every
+/// rotated file for `load_archive()` to find all recordings. The static file also gets
+/// every `SetStoreInfo`.
 fn stream_to_rrd_rotating(
     rx: &re_log_channel::LogReceiverSet,
     base_path: &std::path::Path,
@@ -1752,11 +1755,13 @@ fn stream_to_rrd_rotating(
     static_path: Option<&std::path::Path>,
     application_id: Option<&re_log_types::ApplicationId>,
 ) -> Result<(), re_log_encoding::FileSinkError> {
+    use std::collections::HashMap;
     use std::time::{Duration, Instant};
 
     let interval = Duration::from_secs(interval_seconds);
     let mut counter: u64 = 1;
-    let mut store_info_prelude: Option<re_log_types::LogMsg> = None;
+    let mut store_info_preludes: HashMap<re_log_types::StoreId, re_log_types::LogMsg> =
+        HashMap::new();
 
     let mut current_path = rotated_path(base_path, counter);
     let mut sinks = Sinks {
@@ -1784,8 +1789,8 @@ fn stream_to_rrd_rotating(
             current_path = rotated_path(base_path, counter);
             sinks.temporal = Some(open_encoder(&current_path)?);
             window_start = Instant::now();
-            if let Some(prelude) = &store_info_prelude {
-                if let Some(t) = sinks.temporal.as_mut() {
+            if let Some(t) = sinks.temporal.as_mut() {
+                for prelude in store_info_preludes.values() {
                     t.append(prelude)?;
                 }
             }
@@ -1798,8 +1803,9 @@ fn stream_to_rrd_rotating(
                         if let Some(app_id) = application_id {
                             rewrite_application_id(&mut log_msg, app_id);
                         }
-                        if matches!(&log_msg, re_log_types::LogMsg::SetStoreInfo(_)) {
-                            store_info_prelude = Some(log_msg.clone());
+                        if let re_log_types::LogMsg::SetStoreInfo(set_store_info) = &log_msg {
+                            store_info_preludes
+                                .insert(set_store_info.info.store_id.clone(), log_msg.clone());
                         }
                         sinks.write(&log_msg)?;
                     }
