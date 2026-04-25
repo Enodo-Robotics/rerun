@@ -58,6 +58,7 @@ pub struct AppState {
     selection_panel: re_selection_panel::SelectionPanel,
     time_panel: re_time_panel::TimePanel,
     blueprint_time_panel: re_time_panel::TimePanel,
+    pub(crate) annotation_panel: crate::ui::annotation_panel::AnnotationPanel,
     #[serde(skip)]
     blueprint_tree: re_blueprint_tree::BlueprintTree,
     #[serde(skip)]
@@ -133,6 +134,7 @@ impl Default for AppState {
             selection_panel: Default::default(),
             time_panel: Default::default(),
             blueprint_time_panel: re_time_panel::TimePanel::new_blueprint_panel(),
+            annotation_panel: Default::default(),
             recording_panel: Default::default(),
             blueprint_tree: Default::default(),
             welcome_screen: Default::default(),
@@ -557,6 +559,15 @@ impl AppState {
                         app_blueprint.time_panel_state(),
                         ui.tokens().bottom_panel_frame(),
                     );
+                }
+
+                //
+                // Annotation tag bar (above the time panel) + editor side panel
+                //
+
+                if matches!(route, Route::LocalRecording { .. }) {
+                    self.annotation_panel.show_tag_bar(&ctx, ui);
+                    self.annotation_panel.show_panel(&ctx, ui);
                 }
 
                 //

@@ -1288,6 +1288,72 @@ impl App {
                 self.texture_readback.push(texture_readback_id);
             }
 
+            SystemCommand::AddAnnotation {
+                store_id,
+                entity_path,
+                timeline,
+                time,
+                text,
+                level,
+            } => {
+                match crate::ui::annotation_panel::build_annotation_chunk(
+                    &entity_path, &timeline, time, &text, &level,
+                ) {
+                    Ok(chunk) => {
+                        let db = store_hub.entity_db_entry(&store_id);
+                        match db.add_chunk(&Arc::new(chunk)) {
+                            Ok(_) => re_log::info!("Added annotation: {text}"),
+                            Err(err) => re_log::error!("Failed to add annotation chunk: {err}"),
+                        }
+                    }
+                    Err(err) => re_log::error!("Failed to build annotation chunk: {err}"),
+                }
+            }
+
+            SystemCommand::ClearAnnotation {
+                store_id,
+                entity_path,
+                timeline,
+                time,
+            } => {
+                match crate::ui::annotation_panel::build_clear_chunk(&entity_path, &timeline, time)
+                {
+                    Ok(chunk) => {
+                        let db = store_hub.entity_db_entry(&store_id);
+                        match db.add_chunk(&Arc::new(chunk)) {
+                            Ok(_) => re_log::info!("Cleared annotation at {entity_path}"),
+                            Err(err) => re_log::error!("Failed to clear annotation: {err}"),
+                        }
+                    }
+                    Err(err) => re_log::error!("Failed to build clear chunk: {err}"),
+                }
+            }
+
+            SystemCommand::UpdateRecording(store_id, chunks) => {
+                let db = store_hub.entity_db_entry(&store_id);
+                for chunk in chunks {
+                    match db.add_chunk(&Arc::new(chunk)) {
+                        Ok(_) => {}
+                        Err(err) => re_log::warn_once!("Failed to update recording: {err}"),
+                    }
+                }
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            SystemCommand::ExportAnnotations { store_id } => {
+                if let Some(entity_db) = store_hub.entity_db_mut(&store_id) {
+                    match crate::ui::annotation_panel::prepare_annotation_export(entity_db) {
+                        Ok(Some(file_saver)) => {
+                            if let Err(err) = self.background_tasks.spawn_file_saver(file_saver) {
+                                re_log::error!("Failed to export annotations: {err}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => re_log::error!("Failed to prepare annotation export: {err}"),
+                    }
+                }
+            }
+
             #[cfg(not(target_arch = "wasm32"))]
             SystemCommand::FileSaver(file_saver) => {
                 if let Err(err) = self.background_tasks.spawn_file_saver(file_saver) {
@@ -2213,6 +2279,10 @@ impl App {
 
             UICommand::CopyEntityHierarchy => {
                 self.copy_entity_hierarchy_to_clipboard(egui_ctx, store_context);
+            }
+
+            UICommand::ToggleAnnotationPanel => {
+                self.state.annotation_panel.toggle_editor();
             }
 
             UICommand::AddRedapServer => {

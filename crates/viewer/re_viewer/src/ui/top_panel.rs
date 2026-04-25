@@ -7,7 +7,7 @@ use re_format::format_uint;
 use re_renderer::WgpuResourcePoolStatistics;
 use re_sorbet::TimestampLocation;
 use re_ui::{ContextExt as _, UICommand, UiExt as _, icons};
-use re_viewer_context::{ActiveStoreContext, StoreHub, SystemCommand, SystemCommandSender as _};
+use re_viewer_context::{ActiveStoreContext, Route, StoreHub, SystemCommand, SystemCommandSender as _};
 
 use crate::App;
 use crate::app_blueprint::AppBlueprint;
@@ -375,6 +375,28 @@ fn panel_buttons_r2l(
             .clicked()
         {
             app.toggle_fullscreen();
+        }
+    }
+
+    // annotation quick-tag bar (horizontal bar above timeline)
+    if matches!(route, Route::LocalRecording { .. }) {
+        if ui
+            .selectable_label(app.state.annotation_panel.tag_bar_visible, "Qt.Ann")
+            .on_hover_text("Toggle quick-tag annotation bar above timeline")
+            .clicked()
+        {
+            app.state.annotation_panel.toggle_tag_bar();
+        }
+    }
+
+    // annotation editor panel (side panel)
+    if matches!(route, Route::LocalRecording { .. }) {
+        if ui
+            .selectable_label(app.state.annotation_panel.editor_visible, "Ed.Ann")
+            .on_hover_ui(|ui| UICommand::ToggleAnnotationPanel.tooltip_ui(ui))
+            .clicked()
+        {
+            app.state.annotation_panel.toggle_editor();
         }
     }
 

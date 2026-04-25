@@ -669,6 +669,9 @@ impl<'a> egui_tiles::Behavior<ViewId> for TilesDelegate<'a, '_> {
                 );
             });
 
+        // Annotation tag chips
+        annotation_tag_chips(self.ctx, ui, &view_blueprint.space_origin);
+
         ui.help_button(|ui| {
             view_class.help(ui.os()).ui(ui);
         });
@@ -1266,5 +1269,124 @@ impl MaximizeAnimationState {
         let animated_rect = animated_rect.intersect(viewport_rect);
 
         (animating_view_id, animated_rect)
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+/// Show annotation tag chips for entities under the given space origin, grouped
+/// by tag label. Clicking a chip multi-selects all entities with that tag.
+fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin: &EntityPath) {
+    let recording = ctx.recording();
+    let Some(timeline) = ctx.time_ctrl.timeline().cloned() else {
+        return;
+    };
+    let Some(current_time) = ctx.time_ctrl.time_int() else {
+        return;
+    };
+
+    let annotation_marker = "/_annotation";
+    // tag label → (color, list of parent entity paths)
+    let mut tag_entities: std::collections::BTreeMap<
+        String,
+        (egui::Color32, Vec<EntityPath>),
+    > = Default::default();
+
+    let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), current_time);
+
+    let entity_paths: Vec<EntityPath> = recording.sorted_entity_paths().cloned().collect();
+    for entity_path in &entity_paths {
+        let path_str = entity_path.to_string();
+
+        let Some(annotation_pos) = path_str.find(annotation_marker) else {
+            continue;
+        };
+
+        let parent = &path_str[..annotation_pos];
+        if parent.is_empty() {
+            continue;
+        }
+        let parent_path = EntityPath::from(parent);
+        if !parent_path.starts_with(space_origin) && &parent_path != space_origin {
+            continue;
+        }
+
+        // Only show the tag if the parent entity has data at the current time
+        // (respects rr.clear()).
+        let parent_results = recording
+            .storage_engine()
+            .store()
+            .latest_at_relevant_chunks_for_all_components(
+                re_chunk_store::ChunkTrackingMode::Ignore,
+                &query,
+                &parent_path,
+                false,
+            );
+        if parent_results.chunks.is_empty() {
+            continue;
+        }
+
+        let Some(((_time, _row_id), text)) = recording
+            .latest_at_component::<re_sdk_types::components::Text>(
+                entity_path,
+                &query,
+                re_sdk_types::archetypes::TextLog::descriptor_text().component,
+            )
+        else {
+            continue;
+        };
+
+        let level = recording
+            .latest_at_component::<re_sdk_types::components::TextLogLevel>(
+                entity_path,
+                &query,
+                re_sdk_types::archetypes::TextLog::descriptor_level().component,
+            )
+            .map(|(_, l)| l);
+
+        let label = text.0 .0.as_str().to_owned();
+        let level_str = level.map(|l| l.0 .0.as_str().to_owned()).unwrap_or_default();
+        let color = match level_str.as_str() {
+            "WARN" => egui::Color32::from_rgb(255, 165, 0),
+            "ERROR" => egui::Color32::from_rgb(255, 80, 80),
+            _ => egui::Color32::from_rgb(100, 180, 255),
+        };
+        let entry = tag_entities
+            .entry(label)
+            .or_insert_with(|| (color, Vec::new()));
+        entry.1.push(parent_path);
+    }
+
+    if tag_entities.is_empty() {
+        return;
+    }
+
+    ui.add_space(4.0);
+    for (label, (color, entities)) in &tag_entities {
+        let text = if entities.len() > 1 {
+            format!("{label} \u{00d7}{}", entities.len())
+        } else {
+            label.clone()
+        };
+
+        let response = re_ui::annotation_chips::tag_chip(ui, &text, *color, None);
+
+        if response.clicked() {
+            let items = entities.iter().map(|entity| {
+                (
+                    Item::InstancePath(re_entity_db::InstancePath::entity_all(entity.clone())),
+                    None,
+                )
+            });
+            ctx.command_sender().send_system(SystemCommand::set_selection(
+                re_viewer_context::ItemCollection::from_items_and_context(items),
+            ));
+        }
+
+        response.on_hover_ui(|ui| {
+            for entity in entities {
+                ui.label(entity.to_string());
+            }
+        });
     }
 }

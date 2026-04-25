@@ -1,3 +1,4 @@
+pub(crate) mod annotation_panel;
 mod mobile_warning_ui;
 mod open_url_modal;
 mod rerun_menu;

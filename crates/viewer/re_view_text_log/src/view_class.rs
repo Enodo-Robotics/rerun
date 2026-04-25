@@ -10,9 +10,9 @@ use re_sdk_types::{View as _, ViewClassIdentifier, datatypes};
 use re_ui::list_item::LabelContent;
 use re_ui::{DesignTokens, Help, UiExt as _};
 use re_viewer_context::{
-    IdentifiedViewSystem as _, ViewClass, ViewClassExt as _, ViewClassRegistryError, ViewContext,
-    ViewId, ViewQuery, ViewSpawnHeuristics, ViewState, ViewStateExt as _, ViewSystemExecutionError,
-    ViewerContext, level_to_rich_text,
+    IdentifiedViewSystem as _, SystemCommandSender as _, ViewClass, ViewClassExt as _,
+    ViewClassRegistryError, ViewContext, ViewId, ViewQuery, ViewSpawnHeuristics, ViewState,
+    ViewStateExt as _, ViewSystemExecutionError, ViewerContext, level_to_rich_text,
 };
 use re_viewport_blueprint::ViewProperty;
 
@@ -401,7 +401,33 @@ fn table_ui(
                             .get(&timeline)
                             .map(re_log_types::TimeInt::from)
                             .unwrap_or(re_log_types::TimeInt::STATIC);
-                        item_ui::time_button(ctx, ui, &timeline, row_time);
+                        let time_response =
+                            item_ui::time_button(ctx, ui, &timeline, row_time);
+
+                        // Clicking the time button also selects the row's entity.
+                        // For _annotation paths, select the parent entity instead.
+                        if time_response.clicked() {
+                            let path_str = entry.entity_path.to_string();
+                            let select_path = if let Some(pos) = path_str.find("/_annotation") {
+                                let parent = &path_str[..pos];
+                                if parent.is_empty() {
+                                    None
+                                } else {
+                                    Some(EntityPath::from(parent))
+                                }
+                            } else {
+                                Some(entry.entity_path.clone())
+                            };
+                            if let Some(path) = select_path {
+                                ctx.command_sender().send_system(
+                                    re_viewer_context::SystemCommand::set_selection(
+                                        re_viewer_context::Item::InstancePath(
+                                            re_entity_db::InstancePath::entity_all(path),
+                                        ),
+                                    ),
+                                );
+                            }
+                        }
 
                         if let Some(global_time) = global_time
                             && timeline == global_timeline
