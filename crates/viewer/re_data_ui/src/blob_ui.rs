@@ -285,7 +285,7 @@ impl BlobUi {
         }
 
         if let Some(video) = &self.video {
-            video.data_ui(ctx, ui, ui_layout);
+            video.data_ui(ctx, ui, ui_layout, entity_path);
         }
     }
 }
