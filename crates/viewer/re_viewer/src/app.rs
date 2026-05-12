@@ -1297,11 +1297,19 @@ impl App {
                 level,
             } => {
                 match crate::ui::annotation_panel::build_annotation_chunk(
-                    &entity_path, &timeline, time, &text, &level,
+                    &entity_path,
+                    &timeline,
+                    time,
+                    &text,
+                    &level,
                 ) {
                     Ok(chunk) => {
-                        let db = store_hub.entity_db_entry(&store_id);
-                        match db.add_chunk(&Arc::new(chunk)) {
+                        match add_chunk_and_notify_cache(
+                            store_hub,
+                            &self.view_class_registry,
+                            &store_id,
+                            Arc::new(chunk),
+                        ) {
                             Ok(_) => re_log::info!("Added annotation: {text}"),
                             Err(err) => re_log::error!("Failed to add annotation chunk: {err}"),
                         }
@@ -1319,8 +1327,12 @@ impl App {
                 match crate::ui::annotation_panel::build_clear_chunk(&entity_path, &timeline, time)
                 {
                     Ok(chunk) => {
-                        let db = store_hub.entity_db_entry(&store_id);
-                        match db.add_chunk(&Arc::new(chunk)) {
+                        match add_chunk_and_notify_cache(
+                            store_hub,
+                            &self.view_class_registry,
+                            &store_id,
+                            Arc::new(chunk),
+                        ) {
                             Ok(_) => re_log::info!("Cleared annotation at {entity_path}"),
                             Err(err) => re_log::error!("Failed to clear annotation: {err}"),
                         }
@@ -1330,11 +1342,14 @@ impl App {
             }
 
             SystemCommand::UpdateRecording(store_id, chunks) => {
-                let db = store_hub.entity_db_entry(&store_id);
                 for chunk in chunks {
-                    match db.add_chunk(&Arc::new(chunk)) {
-                        Ok(_) => {}
-                        Err(err) => re_log::warn_once!("Failed to update recording: {err}"),
+                    if let Err(err) = add_chunk_and_notify_cache(
+                        store_hub,
+                        &self.view_class_registry,
+                        &store_id,
+                        Arc::new(chunk),
+                    ) {
+                        re_log::warn_once!("Failed to update recording: {err}");
                     }
                 }
             }
@@ -4097,6 +4112,29 @@ impl eframe::App for App {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         Some(&mut *self)
     }
+}
+
+/// Add a chunk to a recording and forward the resulting store events to the
+/// recording's [`re_viewer_context::StoreCache`].
+///
+/// Calling [`re_entity_db::EntityDb::add_chunk`] directly only updates the store
+/// itself; entity-subscriber caches (e.g. `visualizable_entities`) won't pick up
+/// the new entity until the next bootstrap, which can hide freshly-added rows
+/// from views until the recording is reloaded.
+fn add_chunk_and_notify_cache(
+    store_hub: &mut re_viewer_context::StoreHub,
+    view_class_registry: &re_viewer_context::ViewClassRegistry,
+    store_id: &re_log_types::StoreId,
+    chunk: Arc<re_chunk::Chunk>,
+) -> Result<(), re_entity_db::Error> {
+    let db = store_hub.entity_db_entry(store_id);
+    let events = db.add_chunk(&chunk)?;
+
+    if let Some((db, cache)) = store_hub.entity_db_and_cache(store_id, view_class_registry) {
+        cache.on_store_events(&events, db);
+    }
+
+    Ok(())
 }
 
 fn paint_background_fill(ui: &egui::Ui) {
