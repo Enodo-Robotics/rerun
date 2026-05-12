@@ -562,29 +562,6 @@ impl AnnotationPanel {
                                 timeline: ann.timeline.clone(),
                                 time: ann.time,
                             });
-
-                        // Removing an annotation drops the entire entity path
-                        // (since `Clear` doesn't hide rows from range queries).
-                        // Re-log any remaining annotations that shared the path
-                        // so they aren't lost.
-                        let survivors: Vec<_> = self
-                            .annotations
-                            .iter()
-                            .filter(|other| other.entity_path == ann.entity_path)
-                            .cloned()
-                            .collect();
-                        for other in survivors {
-                            ctx.command_sender()
-                                .send_system(SystemCommand::AddAnnotation {
-                                    store_id: store_id.clone(),
-                                    entity_path: other.entity_path.clone(),
-                                    timeline: other.timeline.clone(),
-                                    time: other.time,
-                                    text: other.text.clone(),
-                                    level: other.level.clone(),
-                                });
-                        }
-
                         #[cfg(not(target_arch = "wasm32"))]
                         self.save_now(ctx);
                     }
@@ -638,14 +615,6 @@ impl AnnotationPanel {
         color: egui::Color32,
         selected_entity: Option<&EntityPath>,
     ) {
-        // Each tag gets its own sub-entity so multiple tags can coexist under the same parent.
-        let tag_slug = text.to_lowercase().replace(' ', "_");
-        let entity_path = if let Some(selected) = selected_entity {
-            EntityPath::from(format!("{}/_annotation/{tag_slug}", selected))
-        } else {
-            EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/{tag_slug}"))
-        };
-
         // Snap the annotation time to the latest actual data point for the
         // selected entity. Avoids attaching the annotation at a cursor position
         // where the entity has no data (which shows as empty in the text log).
@@ -675,6 +644,19 @@ impl AnnotationPanel {
                 .unwrap_or(time)
         } else {
             time
+        };
+
+        // Per-row entity path: `<entity>/_annotation/<tag>/<time>`. Each annotation
+        // gets its own unique path so it can be removed in isolation via
+        // `drop_entity_path` without disturbing siblings of the same tag.
+        let tag_slug = text.to_lowercase().replace(' ', "_");
+        let time_segment = snapped_time.as_i64().to_string();
+        let entity_path = if let Some(selected) = selected_entity {
+            EntityPath::from(format!("{selected}/_annotation/{tag_slug}/{time_segment}"))
+        } else {
+            EntityPath::from(format!(
+                "{ANNOTATIONS_ENTITY_BASE}/{tag_slug}/{time_segment}"
+            ))
         };
 
         self.annotations.push(AnnotationEntry {

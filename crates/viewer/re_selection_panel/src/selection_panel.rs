@@ -1466,15 +1466,20 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
 
     let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), current_time);
 
+    #[derive(Clone)]
     struct TagInfo {
         label: String,
         color: egui::Color32,
         path: EntityPath,
     }
 
-    let mut tags = Vec::new();
+    // Each annotation lives at a unique `<entity>/_annotation/<tag>/<time>`
+    // path. Dedupe by label and keep the most-recent (latest time ≤ cursor) so
+    // we show one chip per tag; the chip's "Remove" deletes that specific row.
+    let mut tags_by_label: std::collections::HashMap<String, (TagInfo, re_log_types::TimeInt)> =
+        std::collections::HashMap::new();
     for ann_path in &annotation_paths {
-        let Some(((_, _), text)) = recording
+        let Some(((time, _), text)) = recording
             .latest_at_component::<re_sdk_types::components::Text>(
                 ann_path,
                 &query,
@@ -1492,19 +1497,31 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
             )
             .map(|(_, l)| l);
 
-        let label = text.0 .0.as_str().to_owned();
-        let level_str = level.map(|l| l.0 .0.as_str().to_owned()).unwrap_or_default();
+        let label = text.0.0.as_str().to_owned();
+        let level_str = level.map(|l| l.0.0.as_str().to_owned()).unwrap_or_default();
         let color = match level_str.as_str() {
             "WARN" => egui::Color32::from_rgb(255, 165, 0),
             "ERROR" => egui::Color32::from_rgb(255, 80, 80),
             _ => egui::Color32::from_rgb(100, 180, 255),
         };
-        tags.push(TagInfo {
-            label,
+
+        let info = TagInfo {
+            label: label.clone(),
             color,
             path: ann_path.clone(),
-        });
+        };
+        tags_by_label
+            .entry(label)
+            .and_modify(|existing| {
+                if time > existing.1 {
+                    *existing = (info.clone(), time);
+                }
+            })
+            .or_insert((info, time));
     }
+
+    let mut tags: Vec<TagInfo> = tags_by_label.into_values().map(|(info, _)| info).collect();
+    tags.sort_by(|a, b| a.label.cmp(&b.label));
 
     if tags.is_empty() {
         return;
@@ -1517,12 +1534,13 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
             re_ui::annotation_chips::tag_chip_label(ui, &tag.label, tag.color);
             if ui.small_button("Remove").clicked() {
                 let store_id = recording.store_id().clone();
-                ctx.command_sender().send_system(SystemCommand::ClearAnnotation {
-                    store_id,
-                    entity_path: tag.path.clone(),
-                    timeline: timeline.clone(),
-                    time: current_time,
-                });
+                ctx.command_sender()
+                    .send_system(SystemCommand::ClearAnnotation {
+                        store_id,
+                        entity_path: tag.path.clone(),
+                        timeline: timeline.clone(),
+                        time: current_time,
+                    });
             }
         });
     }

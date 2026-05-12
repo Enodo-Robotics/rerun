@@ -1324,12 +1324,10 @@ impl App {
                 timeline: _,
                 time: _,
             } => {
-                // The Text Log view uses range queries, which don't respect `Clear`
-                // archetypes — those only shadow data in latest-at queries. To make
-                // removal actually hide the annotation in views, drop the entity
-                // entirely. Siblings sharing the same path (same tag at the same
-                // entity but different times) are re-logged by the annotation panel
-                // after the drop.
+                // Each annotation lives at its own unique entity path
+                // (`<entity>/_annotation/<tag>/<time>`), so dropping that path
+                // removes exactly one row. Range queries — which `Clear` archetypes
+                // don't suppress — therefore stop returning the row as well.
                 let events = {
                     let db = store_hub.entity_db_entry(&store_id);
                     db.drop_entity_path(&entity_path)
