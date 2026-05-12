@@ -1321,24 +1321,25 @@ impl App {
             SystemCommand::ClearAnnotation {
                 store_id,
                 entity_path,
-                timeline,
-                time,
+                timeline: _,
+                time: _,
             } => {
-                match crate::ui::annotation_panel::build_clear_chunk(&entity_path, &timeline, time)
+                // The Text Log view uses range queries, which don't respect `Clear`
+                // archetypes — those only shadow data in latest-at queries. To make
+                // removal actually hide the annotation in views, drop the entity
+                // entirely. Siblings sharing the same path (same tag at the same
+                // entity but different times) are re-logged by the annotation panel
+                // after the drop.
+                let events = {
+                    let db = store_hub.entity_db_entry(&store_id);
+                    db.drop_entity_path(&entity_path)
+                };
+                if let Some((db, cache)) =
+                    store_hub.entity_db_and_cache(&store_id, &self.view_class_registry)
                 {
-                    Ok(chunk) => {
-                        match add_chunk_and_notify_cache(
-                            store_hub,
-                            &self.view_class_registry,
-                            &store_id,
-                            Arc::new(chunk),
-                        ) {
-                            Ok(_) => re_log::info!("Cleared annotation at {entity_path}"),
-                            Err(err) => re_log::error!("Failed to clear annotation: {err}"),
-                        }
-                    }
-                    Err(err) => re_log::error!("Failed to build clear chunk: {err}"),
+                    cache.on_store_events(&events, db);
                 }
+                re_log::info!("Cleared annotation at {entity_path}");
             }
 
             SystemCommand::UpdateRecording(store_id, chunks) => {

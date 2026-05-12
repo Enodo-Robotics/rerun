@@ -3,9 +3,10 @@ use std::sync::Arc;
 use re_chunk::{Chunk, EntityPath, RowId, Timeline};
 use re_log_types::{TimeInt, TimePoint, TimeReal};
 use re_sdk_types::archetypes::TextLog;
-use re_types_core::archetypes::Clear;
 use re_ui::annotation_chips::tag_chip;
-use re_viewer_context::{SystemCommand, SystemCommandSender as _, TimeControlCommand, ViewerContext};
+use re_viewer_context::{
+    SystemCommand, SystemCommandSender as _, TimeControlCommand, ViewerContext,
+};
 
 // ---------------------------------------------------------------------------
 
@@ -400,8 +401,8 @@ impl AnnotationPanel {
                 let trimmed = self.new_tag_label.trim().to_owned();
                 let duplicate = self.custom_tags.iter().any(|t| t.label == trimmed);
                 let can_add = !trimmed.is_empty() && !duplicate;
-                let enter_pressed = label_response.has_focus()
-                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let enter_pressed =
+                    label_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (can_add && enter_pressed)
                     || ui
                         .add_enabled(can_add, egui::Button::new("Add to Quick Tags"))
@@ -437,8 +438,9 @@ impl AnnotationPanel {
 
         ui.add_space(4.0);
 
-        let can_submit =
-            !self.text_input.trim().is_empty() && current_time.is_some() && current_timeline.is_some();
+        let can_submit = !self.text_input.trim().is_empty()
+            && current_time.is_some()
+            && current_timeline.is_some();
 
         let ctrl_enter = response.has_focus()
             && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
@@ -523,19 +525,17 @@ impl AnnotationPanel {
                                     },
                                 );
                                 if let Some(ref source) = ann.source_entity {
-                                    ctx.command_sender().send_system(
-                                        SystemCommand::set_selection(
+                                    ctx.command_sender()
+                                        .send_system(SystemCommand::set_selection(
                                             re_viewer_context::Item::InstancePath(
                                                 re_entity_db::InstancePath::entity_all(
                                                     source.clone(),
                                                 ),
                                             ),
-                                        ),
-                                    );
+                                        ));
                                 }
                             }
-                            time_response
-                                .on_hover_text("Click to jump to this annotation's time");
+                            time_response.on_hover_text("Click to jump to this annotation's time");
 
                             if let Some(ref source) = ann.source_entity {
                                 ui.weak(format!("@ {source}"));
@@ -562,6 +562,29 @@ impl AnnotationPanel {
                                 timeline: ann.timeline.clone(),
                                 time: ann.time,
                             });
+
+                        // Removing an annotation drops the entire entity path
+                        // (since `Clear` doesn't hide rows from range queries).
+                        // Re-log any remaining annotations that shared the path
+                        // so they aren't lost.
+                        let survivors: Vec<_> = self
+                            .annotations
+                            .iter()
+                            .filter(|other| other.entity_path == ann.entity_path)
+                            .cloned()
+                            .collect();
+                        for other in survivors {
+                            ctx.command_sender()
+                                .send_system(SystemCommand::AddAnnotation {
+                                    store_id: store_id.clone(),
+                                    entity_path: other.entity_path.clone(),
+                                    timeline: other.timeline.clone(),
+                                    time: other.time,
+                                    text: other.text.clone(),
+                                    level: other.level.clone(),
+                                });
+                        }
+
                         #[cfg(not(target_arch = "wasm32"))]
                         self.save_now(ctx);
                     }
@@ -574,10 +597,13 @@ impl AnnotationPanel {
 
         let has_annotations_in_store = {
             let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-            ctx.store_context.recording.sorted_entity_paths().any(|path| {
-                path.starts_with(&annotation_prefix)
-                    || path.to_string().contains("/_annotation")
-            })
+            ctx.store_context
+                .recording
+                .sorted_entity_paths()
+                .any(|path| {
+                    path.starts_with(&annotation_prefix)
+                        || path.to_string().contains("/_annotation")
+                })
         };
 
         let has_annotations = !self.annotations.is_empty() || has_annotations_in_store;
@@ -675,11 +701,7 @@ impl AnnotationPanel {
         self.save_now(ctx);
     }
 
-    fn save_tags_to_recording(
-        &self,
-        ctx: &ViewerContext<'_>,
-        store_id: &re_log_types::StoreId,
-    ) {
+    fn save_tags_to_recording(&self, ctx: &ViewerContext<'_>, store_id: &re_log_types::StoreId) {
         let tags_json = serde_json::to_string_pretty(&self.custom_tags).unwrap_or_default();
         let entity_path = EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/_config/tags"));
 
@@ -693,7 +715,10 @@ impl AnnotationPanel {
             .build()
         {
             ctx.command_sender()
-                .send_system(SystemCommand::UpdateRecording(store_id.clone(), vec![chunk]));
+                .send_system(SystemCommand::UpdateRecording(
+                    store_id.clone(),
+                    vec![chunk],
+                ));
         }
     }
 
@@ -710,8 +735,8 @@ impl AnnotationPanel {
                 continue;
             }
 
-            let is_annotation = path.starts_with(&annotation_prefix)
-                || path.to_string().contains("/_annotation");
+            let is_annotation =
+                path.starts_with(&annotation_prefix) || path.to_string().contains("/_annotation");
 
             if !is_annotation {
                 continue;
@@ -720,21 +745,17 @@ impl AnnotationPanel {
             for row_idx in 0..chunk.num_rows() {
                 let unit = chunk.row_sliced_unit_shallow(row_idx);
                 let text: Option<re_sdk_types::components::Text> = unit
-                    .component_mono(
-                        re_sdk_types::archetypes::TextLog::descriptor_text().component,
-                    )
+                    .component_mono(re_sdk_types::archetypes::TextLog::descriptor_text().component)
                     .and_then(|r| r.ok());
 
                 let level: Option<re_sdk_types::components::TextLogLevel> = unit
-                    .component_mono(
-                        re_sdk_types::archetypes::TextLog::descriptor_level().component,
-                    )
+                    .component_mono(re_sdk_types::archetypes::TextLog::descriptor_level().component)
                     .and_then(|r| r.ok());
 
                 if let Some(text) = text {
-                    let text_str = text.0 .0.as_str().to_owned();
+                    let text_str = text.0.0.as_str().to_owned();
                     let level_str = level
-                        .map(|l| l.0 .0.as_str().to_owned())
+                        .map(|l| l.0.0.as_str().to_owned())
                         .unwrap_or_else(|| "INFO".to_owned());
 
                     let (timeline, time) = chunk
@@ -768,9 +789,10 @@ impl AnnotationPanel {
                         _ => egui::Color32::from_rgb(180, 180, 180),
                     };
 
-                    let already_exists = self.annotations.iter().any(|a| {
-                        a.entity_path == *path && a.time == time && a.text == text_str
-                    });
+                    let already_exists = self
+                        .annotations
+                        .iter()
+                        .any(|a| a.entity_path == *path && a.time == time && a.text == text_str);
 
                     if !already_exists {
                         let path_str = path.to_string();
@@ -809,7 +831,7 @@ impl AnnotationPanel {
             &query,
             re_sdk_types::archetypes::TextDocument::descriptor_text().component,
         ) {
-            let text_str = text.0 .0.as_str();
+            let text_str = text.0.0.as_str();
             if let Ok(tags) = serde_json::from_str::<Vec<CustomTag>>(text_str) {
                 if self.custom_tags.is_empty() {
                     self.custom_tags = tags;
@@ -827,8 +849,8 @@ pub fn build_annotation_chunk(
     text: &str,
     level: &str,
 ) -> anyhow::Result<Chunk> {
-    let text_log = TextLog::new(text)
-        .with_level(re_sdk_types::components::TextLogLevel(level.into()));
+    let text_log =
+        TextLog::new(text).with_level(re_sdk_types::components::TextLogLevel(level.into()));
 
     let timepoint = TimePoint::from_iter([(
         *timeline.name(),
@@ -837,26 +859,6 @@ pub fn build_annotation_chunk(
 
     let chunk = Chunk::builder(entity_path.clone())
         .with_archetype(RowId::new(), timepoint, &text_log)
-        .build()?;
-
-    Ok(chunk)
-}
-
-/// Build a [`Chunk`] containing a [`Clear`] to remove annotation data at a specific time.
-pub fn build_clear_chunk(
-    entity_path: &EntityPath,
-    timeline: &Timeline,
-    time: TimeInt,
-) -> anyhow::Result<Chunk> {
-    let clear = Clear::new(false);
-
-    let timepoint = TimePoint::from_iter([(
-        *timeline.name(),
-        re_log_types::TimeCell::new(timeline.typ(), time.as_i64()),
-    )]);
-
-    let chunk = Chunk::builder(entity_path.clone())
-        .with_archetype(RowId::new(), timepoint, &clear)
         .build()?;
 
     Ok(chunk)
@@ -1003,8 +1005,7 @@ fn autosave_annotations_to(entity_db: &re_entity_db::EntityDb, save_path: &std::
         .iter_physical_chunks()
         .filter(|chunk| {
             let path_str = chunk.entity_path().to_string();
-            chunk.entity_path().starts_with(&annotation_prefix)
-                || path_str.contains("/_annotation")
+            chunk.entity_path().starts_with(&annotation_prefix) || path_str.contains("/_annotation")
         })
         .cloned()
         .collect();
