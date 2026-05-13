@@ -124,7 +124,11 @@ impl AnnotationPanel {
             self.autosave_path = compute_autosave_path(ctx.store_context.recording);
         }
         if let Some(path) = &self.autosave_path {
-            autosave_annotations_to(ctx.store_context.recording, path);
+            // Source from `self.annotations` (the panel's in-memory truth)
+            // rather than scanning the store. Add/Clear go through
+            // `command_sender.send_system`, which only processes on the next
+            // frame, so reading the store here would lag one event behind.
+            autosave_annotations_to(ctx.store_context.recording, &self.annotations, path);
         }
     }
 
@@ -971,38 +975,66 @@ fn compute_autosave_path(entity_db: &re_entity_db::EntityDb) -> Option<std::path
 
 /// Write all current annotation chunks to `save_path`. Called after every
 /// add/remove so an unexpected crash doesn't lose work.
+///
+/// Chunks are built from the panel's in-memory `annotations` list, not by
+/// scanning the recording — `AddAnnotation` / `ClearAnnotation` are queued
+/// system commands that don't take effect until the next frame, so the live
+/// store would lag one event behind.
 #[cfg(not(target_arch = "wasm32"))]
-fn autosave_annotations_to(entity_db: &re_entity_db::EntityDb, save_path: &std::path::Path) {
+fn autosave_annotations_to(
+    entity_db: &re_entity_db::EntityDb,
+    annotations: &[AnnotationEntry],
+    save_path: &std::path::Path,
+) {
     let rrd_version = entity_db
         .store_info()
         .and_then(|info| info.store_version)
         .unwrap_or(re_build_info::CrateVersion::LOCAL);
 
     let store_id = entity_db.store_id();
-    let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
 
-    let mut annotation_chunks: Vec<Arc<Chunk>> = entity_db
-        .storage_engine()
-        .store()
-        .iter_physical_chunks()
-        .filter(|chunk| {
-            let path_str = chunk.entity_path().to_string();
-            chunk.entity_path().starts_with(&annotation_prefix) || path_str.contains("/_annotation")
-        })
-        .cloned()
-        .collect();
-
-    if annotation_chunks.is_empty() {
+    if annotations.is_empty() {
+        // Truncate the file so removing the last annotation isn't silently
+        // dropped (otherwise a stale save would survive on disk).
+        if save_path.exists() {
+            if let Err(err) = std::fs::remove_file(save_path) {
+                re_log::warn!(
+                    "Failed to remove stale annotation autosave {}: {err}",
+                    save_path.display()
+                );
+            }
+        }
         return;
     }
 
-    annotation_chunks.sort_by_key(|chunk| chunk.row_id_range().map(|(min, _)| min));
+    let chunks: Vec<Arc<Chunk>> = annotations
+        .iter()
+        .filter_map(|ann| {
+            match build_annotation_chunk(
+                &ann.entity_path,
+                &ann.timeline,
+                ann.time,
+                &ann.text,
+                &ann.level,
+            ) {
+                Ok(chunk) => Some(Arc::new(chunk)),
+                Err(err) => {
+                    re_log::warn_once!("Failed to build annotation chunk for autosave: {err}");
+                    None
+                }
+            }
+        })
+        .collect();
+
+    if chunks.is_empty() {
+        return;
+    }
 
     let store_info_msg = entity_db
         .store_info_msg()
         .map(|msg| Ok(re_log_types::LogMsg::SetStoreInfo(msg.clone())));
 
-    let data_messages: Vec<re_chunk::ChunkResult<re_log_types::LogMsg>> = annotation_chunks
+    let data_messages: Vec<re_chunk::ChunkResult<re_log_types::LogMsg>> = chunks
         .into_iter()
         .map(|chunk| {
             chunk
