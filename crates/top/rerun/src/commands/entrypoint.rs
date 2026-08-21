@@ -244,6 +244,19 @@ When persisted, the state will be stored at the following locations:
     #[clap(long, value_name = "PATH")]
     save_static: Option<String>,
 
+    /// Name rotated files by their time span instead of a counter.
+    ///
+    /// Requires `--save-interval`. Each rotated file is named
+    /// `<path>_<start_ms>__<end_ms>.rrd`, where the two numbers are the
+    /// zero-padded epoch milliseconds (UTC) at which the sink opened and
+    /// closed that segment. Consecutive segments tile exactly, i.e.
+    /// `end_ms(N) == start_ms(N+1)`, so a missing file is a real time hole.
+    ///
+    /// The window is the rotation window, not the span of the data inside it:
+    /// an idle segment still gets a full, correctly-named window.
+    #[clap(long)]
+    save_name_by_span: bool,
+
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
     /// Useful together with `--window-size`.
@@ -902,6 +915,10 @@ fn run_impl(
         anyhow::bail!("--save-interval requires --save <path> to be set");
     }
 
+    if args.save_name_by_span && args.save_interval.is_none() {
+        anyhow::bail!("--save-name-by-span requires --save-interval <seconds> to be set");
+    }
+
     // Now what do we do with the data?
     if args.test_receive || args.save.is_some() || args.save_static.is_some() {
         let receivers = ReceiversFromUrlParams::new(
@@ -916,7 +933,10 @@ fn run_impl(
             args.save_interval,
             args.save_static,
             args.application_id,
+            args.save_name_by_span,
             receivers,
+            #[cfg(feature = "server")]
+            tokio_runtime_handle,
             #[cfg(feature = "server")]
             server_addr,
             #[cfg(feature = "server")]
@@ -1303,12 +1323,15 @@ fn serve_grpc(
     Ok(())
 }
 
+#[expect(clippy::too_many_arguments)] // Each one is a distinct CLI flag; bundling them would only hide that.
 fn save_or_test_receive(
     save: Option<String>,
     save_interval: Option<u64>,
     save_static: Option<String>,
     application_id: Option<String>,
+    save_name_by_span: bool,
     receivers: ReceiversFromUrlParams,
+    #[cfg(feature = "server")] tokio_runtime_handle: &tokio::runtime::Handle,
     #[cfg(feature = "server")] server_addr: std::net::SocketAddr,
     #[cfg(feature = "server")] server_options: re_sdk::ServerOptions,
 ) -> anyhow::Result<()> {
@@ -1346,13 +1369,22 @@ fn save_or_test_receive(
     if let Some(temporal_path) = save {
         let path: std::path::PathBuf = temporal_path.into();
         if let Some(interval_seconds) = save_interval {
-            Ok(stream_to_rrd_rotating(
+            // Without this, a Ctrl-C or `systemctl stop` would kill us mid-segment and
+            // leave the open segment behind under its `.partial` name.
+            #[cfg(feature = "server")]
+            let shutdown = Some(spawn_shutdown_watcher(tokio_runtime_handle));
+            #[cfg(not(feature = "server"))]
+            let shutdown = None;
+
+            stream_to_rrd_rotating(
                 &receive_set,
                 &path,
                 interval_seconds,
                 static_path.as_deref(),
                 app_id_override.as_ref(),
-            )?)
+                save_name_by_span,
+                shutdown.as_deref(),
+            )
         } else {
             Ok(stream_to_rrd_on_disk(
                 &receive_set,
@@ -1754,46 +1786,82 @@ fn stream_to_rrd_rotating(
     interval_seconds: u64,
     static_path: Option<&std::path::Path>,
     application_id: Option<&re_log_types::ApplicationId>,
-) -> Result<(), re_log_encoding::FileSinkError> {
+    name_by_span: bool,
+    shutdown: Option<&std::sync::atomic::AtomicBool>,
+) -> anyhow::Result<()> {
     use std::collections::HashMap;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     let interval = Duration::from_secs(interval_seconds);
     let mut counter: u64 = 1;
     let mut store_info_preludes: HashMap<re_log_types::StoreId, re_log_types::LogMsg> =
         HashMap::new();
 
-    let mut current_path = rotated_path(base_path, counter);
+    warn_about_stale_partials(base_path);
+
+    // A segment is written under a name that deliberately does *not* match `<stem>_*.rrd`,
+    // and is only renamed into place once fully flushed. That way a consumer globbing for
+    // finished segments can never pick up one that is still being written.
+    // `Instant` drives the rotation interval because it is monotonic. `SystemTime` only
+    // supplies the epoch stamp for the filename — it is the same clock as `log_time`, so a
+    // logged timestamp can be compared directly against a segment's window.
+    let mut t_open = SystemTime::now();
+    let mut open_path = partial_path(base_path, t_open);
     let mut sinks = Sinks {
-        temporal: Some(open_encoder(&current_path)?),
+        temporal: Some(open_encoder(&open_path)?),
         static_: static_path.map(open_encoder).transpose()?,
     };
     let mut window_start = Instant::now();
 
-    match static_path {
-        Some(s) => re_log::info!(
-            "Saving rotating log stream to {base_path:?}_N.rrd every {interval_seconds}s (starting: {current_path:?}), static data to {s:?}. Abort with Ctrl-C."
-        ),
-        None => re_log::info!(
-            "Saving rotating log stream to {base_path:?}_N.rrd, new file every {interval_seconds}s (starting: {current_path:?}). Abort with Ctrl-C."
-        ),
+    let name_pattern = if name_by_span {
+        "_<start_ms>__<end_ms>.rrd"
+    } else {
+        "_N.rrd"
+    };
+    if let Some(s) = static_path {
+        re_log::info!(
+            "Saving rotating log stream to {base_path:?}{name_pattern} every {interval_seconds}s, static data to {s:?}. Abort with Ctrl-C."
+        );
+    } else {
+        re_log::info!(
+            "Saving rotating log stream to {base_path:?}{name_pattern}, new file every {interval_seconds}s. Abort with Ctrl-C."
+        );
     }
 
     let poll_interval = Duration::from_millis(250).min(interval);
     loop {
         if window_start.elapsed() >= interval {
-            // Drop the old temporal encoder to flush + write end marker, then open the next file.
+            // Drop the old temporal encoder to flush + write end marker, then give the
+            // finished segment its final name and open the next one.
             sinks.temporal.take();
-            re_log::info!(?current_path, "Rotated file");
+            let t_close = SystemTime::now();
+            let final_path = finalize_segment(
+                &open_path,
+                base_path,
+                counter,
+                t_open,
+                t_close,
+                name_by_span,
+            )?;
+            re_log::info!(?final_path, "Rotated file");
+
             counter += 1;
-            current_path = rotated_path(base_path, counter);
-            sinks.temporal = Some(open_encoder(&current_path)?);
+            // Tile exactly: the next segment starts where this one ended, so a gap between
+            // consecutive names is a real hole rather than an artifact of the naming.
+            t_open = t_close;
             window_start = Instant::now();
+            open_path = partial_path(base_path, t_open);
+            sinks.temporal = Some(open_encoder(&open_path)?);
             if let Some(t) = sinks.temporal.as_mut() {
                 for prelude in store_info_preludes.values() {
                     t.append(prelude)?;
                 }
             }
+        }
+
+        if shutdown.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            re_log::info!("Shutting down; finalizing the open segment.");
+            break;
         }
 
         match rx.recv_timeout(poll_interval) {
@@ -1827,22 +1895,245 @@ fn stream_to_rrd_rotating(
         }
     }
 
+    // Final (short) segment: flush it and name it just like a rotated one, otherwise it
+    // would be left behind under its `.partial` name.
+    sinks.temporal.take();
+    let final_path = finalize_segment(
+        &open_path,
+        base_path,
+        counter,
+        t_open,
+        SystemTime::now(),
+        name_by_span,
+    )?;
+    re_log::info!(?final_path, "Flushed final file");
+
     drop(sinks);
     re_log::info!("Rotating save complete. Wrote {counter} temporal file(s).");
     Ok(())
 }
 
-/// Build the path for the Nth rotated file: `<base>_<n>.rrd`.
-/// If `base` ends in `.rrd`, strip the extension first so `/x/run.rrd` → `/x/run_1.rrd`.
-fn rotated_path(base: &std::path::Path, counter: u64) -> std::path::PathBuf {
-    let stem = if base.extension().and_then(|s| s.to_str()) == Some("rrd") {
+/// Flip a flag when the process is asked to shut down, so that a rotating sink can
+/// finalize the segment it currently holds open instead of orphaning it.
+///
+/// `SIGTERM` is how a service manager stops us; `SIGINT` is Ctrl-C. Installing handlers
+/// for them also means the first signal no longer kills the process outright, which is
+/// what gives the sink time to write its footer and rename the file into place.
+#[cfg(feature = "server")]
+fn spawn_shutdown_watcher(
+    tokio_runtime_handle: &tokio::runtime::Handle,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let flag = Arc::new(AtomicBool::new(false));
+
+    let flag_for_task = Arc::clone(&flag);
+    tokio_runtime_handle.spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            match signal(SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {}
+                        _ = sigterm.recv() => {}
+                    }
+                }
+                Err(err) => {
+                    re_log::error!("Failed to listen for SIGTERM: {err}");
+                    tokio::signal::ctrl_c().await.ok();
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
+
+        re_log::info!("Caught shutdown signal.");
+        flag_for_task.store(true, Ordering::Relaxed);
+    });
+
+    flag
+}
+
+/// Give a just-flushed segment its final, glob-visible name.
+///
+/// The rename is what makes a segment visible to consumers, so a failure here would hide
+/// real data — it is propagated rather than logged and ignored.
+fn finalize_segment(
+    open_path: &std::path::Path,
+    base_path: &std::path::Path,
+    counter: u64,
+    t_open: std::time::SystemTime,
+    t_close: std::time::SystemTime,
+    name_by_span: bool,
+) -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context as _;
+
+    // The rename is what makes a segment visible, and its name asserts the window that its
+    // contents cover — so get those contents onto the disk *before* making the claim.
+    // Otherwise a power loss can leave a fully-named segment holding a truncated stream,
+    // which a consumer has no way to tell apart from a complete one.
+    std::fs::File::open(open_path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("Failed to fsync {open_path:?}"))?;
+
+    let final_path = if name_by_span {
+        span_path(base_path, t_open, t_close)
+    } else {
+        rotated_path(base_path, counter)
+    };
+    std::fs::rename(open_path, &final_path)
+        .with_context(|| format!("Failed to rename {open_path:?} to {final_path:?}"))?;
+
+    sync_dir_of(&final_path);
+
+    Ok(final_path)
+}
+
+/// Persist a rename by syncing the directory that holds it.
+///
+/// Best-effort: the segment's contents are already durable and named by this point, so a
+/// failure here is not worth aborting the sink over. If the rename is what gets lost, the
+/// segment stays behind under its `.partial` name — the same outcome as a crash.
+#[cfg(unix)]
+fn sync_dir_of(path: &std::path::Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    if let Err(err) = std::fs::File::open(dir).and_then(|handle| handle.sync_all()) {
+        re_log::warn!(?dir, "Failed to fsync directory: {err}");
+    }
+}
+
+/// Windows cannot open a directory as a file, so there is nothing to sync here.
+#[cfg(not(unix))]
+fn sync_dir_of(_path: &std::path::Path) {}
+
+/// `/x/run.rrd` → `/x/run`; any other path is returned unchanged.
+fn strip_rrd_extension(base: &std::path::Path) -> std::path::PathBuf {
+    if base.extension().and_then(|s| s.to_str()) == Some("rrd") {
         base.with_extension("")
     } else {
         base.to_path_buf()
-    };
-    let mut s = stem.into_os_string();
+    }
+}
+
+/// Build the path for the Nth rotated file: `<base>_<n>.rrd`.
+/// If `base` ends in `.rrd`, strip the extension first so `/x/run.rrd` → `/x/run_1.rrd`.
+fn rotated_path(base: &std::path::Path, counter: u64) -> std::path::PathBuf {
+    let mut s = strip_rrd_extension(base).into_os_string();
     s.push(format!("_{counter}.rrd"));
     std::path::PathBuf::from(s)
+}
+
+/// Build the path a segment is written to while it is still open:
+/// `<base>.partial_<start_ms>.rrd`.
+///
+/// Deliberately does *not* match `<base>_*.rrd`, so a consumer globbing for finished
+/// segments never sees a file that is still being written to.
+///
+/// Keyed on the segment's start rather than the rotation counter, for two reasons: the
+/// counter restarts at 1 on every run, so a later run would eventually reuse — and
+/// truncate — a name left behind by a crashed one; and the start time is the half of a
+/// crashed segment's window that cannot be recovered afterwards (its end is approximately
+/// the file's mtime).
+fn partial_path(base: &std::path::Path, t_open: std::time::SystemTime) -> std::path::PathBuf {
+    let mut s = strip_rrd_extension(base).into_os_string();
+    s.push(format!(".partial_{:013}.rrd", epoch_ms(t_open)));
+    std::path::PathBuf::from(s)
+}
+
+/// Build the path for a segment whose rotation window was `[t_open, t_close]`:
+/// `<base>_<start_ms>__<end_ms>.rrd`.
+///
+/// Both stamps are epoch milliseconds — an offset from 1970-01-01T00:00:00Z, so the value
+/// carries no timezone — zero-padded to a fixed width so that lexical order matches
+/// chronological order.
+fn span_path(
+    base: &std::path::Path,
+    t_open: std::time::SystemTime,
+    t_close: std::time::SystemTime,
+) -> std::path::PathBuf {
+    let start_ms = epoch_ms(t_open);
+    let raw_end_ms = epoch_ms(t_close);
+
+    // The wall clock is not monotonic, so a backwards NTP step (or a zero-length window)
+    // could produce `end <= start`, or two segments colliding on one name.
+    let end_ms = if raw_end_ms <= start_ms {
+        re_log::warn!(
+            start_ms,
+            raw_end_ms,
+            "Segment did not end after it started — the system clock may have stepped backwards. Clamping."
+        );
+        start_ms + 1
+    } else {
+        raw_end_ms
+    };
+
+    let mut s = strip_rrd_extension(base).into_os_string();
+    // 13 digits covers every timestamp until the year 2286.
+    s.push(format!("_{start_ms:013}__{end_ms:013}.rrd"));
+    std::path::PathBuf::from(s)
+}
+
+fn epoch_ms(t: std::time::SystemTime) -> u64 {
+    t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Warn about segments left behind by a previous run that died without rotating.
+///
+/// A hard crash (SIGKILL, power loss) leaves the open segment under its `.partial_N.rrd`
+/// name, which no consumer globbing for finished segments will match. We deliberately do
+/// not try to recover them — their true window is unknown — but they must not vanish
+/// silently.
+fn warn_about_stale_partials(base_path: &std::path::Path) {
+    let stem = strip_rrd_extension(base_path);
+    let Some(prefix) = stem.file_name().and_then(|s| s.to_str()) else {
+        return;
+    };
+    let prefix = format!("{prefix}.partial_");
+
+    let dir = stem.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let dir = if dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    let stale: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".rrd"))
+        })
+        .collect();
+
+    if !stale.is_empty() {
+        re_log::warn!(
+            ?stale,
+            "Found unfinished segment(s) from a previous run that crashed before rotating. \
+             They hold real data, but are not named like finished segments, so downstream \
+             consumers will ignore them. Each name carries the segment's start time in epoch \
+             milliseconds, and its end is approximately the file's mtime. Recover or delete \
+             them manually."
+        );
+    }
 }
 
 /// Override the `application_id` on a log message.
@@ -2039,6 +2330,7 @@ fn record_cli_command_analytics(args: &Args) {
         save_interval: _,
         application_id: _,
         save_static: _,
+        save_name_by_span: _,
     } = args;
 
     let (command, subcommand) = match command {
@@ -2107,4 +2399,170 @@ fn record_cli_command_analytics(args: &Args) {
         detach_process: *detach_process,
         test_receive: *test_receive,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    use super::{epoch_ms, partial_path, rotated_path, span_path};
+
+    fn at_ms(ms: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn rotated_path_strips_rrd_extension() {
+        assert_eq!(
+            rotated_path(Path::new("/x/run"), 1),
+            PathBuf::from("/x/run_1.rrd")
+        );
+        assert_eq!(
+            rotated_path(Path::new("/x/run.rrd"), 2),
+            PathBuf::from("/x/run_2.rrd")
+        );
+    }
+
+    #[test]
+    fn partial_path_does_not_match_the_finished_glob() {
+        // The whole point of the partial name: a consumer globbing `run_*.rrd` for finished
+        // segments must not match a segment that is still open.
+        let partial = partial_path(Path::new("/x/run"), at_ms(1_755_764_400_000));
+        assert_eq!(partial, PathBuf::from("/x/run.partial_1755764400000.rrd"));
+
+        let name = partial.file_name().unwrap().to_str().unwrap();
+        assert!(
+            !name.starts_with("run_"),
+            "{name} would be picked up as a finished segment"
+        );
+
+        assert_eq!(
+            partial_path(Path::new("/x/run.rrd"), at_ms(1_755_764_400_000)),
+            PathBuf::from("/x/run.partial_1755764400000.rrd")
+        );
+    }
+
+    #[test]
+    fn partial_path_cannot_be_clobbered_by_a_later_run() {
+        // The rotation counter restarts at 1 every run, so keying the partial name on it
+        // meant a later run's Nth segment would truncate a crashed run's Nth partial.
+        // Keying on the start time makes that impossible.
+        let crashed = partial_path(Path::new("/x/run"), at_ms(1_755_764_400_000));
+        let later_run = partial_path(Path::new("/x/run"), at_ms(1_755_768_000_000));
+        assert_ne!(crashed, later_run);
+    }
+
+    #[test]
+    fn partial_path_carries_the_recoverable_start_time() {
+        // A crashed segment's start must be readable off its name; its end is ~mtime.
+        let partial = partial_path(Path::new("/x/run"), at_ms(1_755_764_400_000));
+        let name = partial.file_name().unwrap().to_str().unwrap();
+        let start = name
+            .trim_start_matches("run.partial_")
+            .trim_end_matches(".rrd")
+            .parse::<u64>()
+            .expect("start time should parse straight out of the name");
+        assert_eq!(start, 1_755_764_400_000);
+    }
+
+    #[test]
+    fn span_path_is_zero_padded_to_a_fixed_width() {
+        assert_eq!(
+            span_path(
+                Path::new("/x/run"),
+                at_ms(1_755_764_400_000),
+                at_ms(1_755_764_412_000)
+            ),
+            PathBuf::from("/x/run_1755764400000__1755764412000.rrd")
+        );
+
+        // Narrow timestamps are padded so that lexical order stays chronological.
+        assert_eq!(
+            span_path(Path::new("/x/run"), at_ms(1), at_ms(2)),
+            PathBuf::from("/x/run_0000000000001__0000000000002.rrd")
+        );
+
+        let early = span_path(Path::new("/x/run"), at_ms(1), at_ms(2));
+        let late = span_path(
+            Path::new("/x/run"),
+            at_ms(1_755_764_400_000),
+            at_ms(1_755_764_412_000),
+        );
+        assert!(early < late, "lexical order must match chronological order");
+    }
+
+    #[test]
+    fn span_path_strips_rrd_extension() {
+        assert_eq!(
+            span_path(Path::new("/x/run.rrd"), at_ms(1_000), at_ms(2_000)),
+            PathBuf::from("/x/run_0000000001000__0000000002000.rrd")
+        );
+    }
+
+    #[test]
+    fn span_path_clamps_a_zero_length_window() {
+        // Two segments must never collide on one name.
+        assert_eq!(
+            span_path(Path::new("/x/run"), at_ms(5_000), at_ms(5_000)),
+            PathBuf::from("/x/run_0000000005000__0000000005001.rrd")
+        );
+    }
+
+    #[test]
+    fn span_path_clamps_a_backwards_clock_step() {
+        // An NTP step between open and close must not produce `end < start`.
+        assert_eq!(
+            span_path(Path::new("/x/run"), at_ms(9_000), at_ms(4_000)),
+            PathBuf::from("/x/run_0000000009000__0000000009001.rrd")
+        );
+    }
+
+    #[test]
+    fn consecutive_segments_tile_exactly() {
+        // `t_open(N+1) == t_close(N)` in the rotation loop, so the names must join up.
+        let close = at_ms(1_755_764_412_000);
+        let first = span_path(Path::new("/x/run"), at_ms(1_755_764_400_000), close);
+        let second = span_path(Path::new("/x/run"), close, at_ms(1_755_764_424_000));
+
+        let end_of_first = first
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim_end_matches(".rrd")
+            .split("__")
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let start_of_second = second
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim_start_matches("run_")
+            .split("__")
+            .next()
+            .unwrap()
+            .to_owned();
+
+        assert_eq!(end_of_first, start_of_second);
+    }
+
+    #[test]
+    fn epoch_ms_is_timezone_free() {
+        // Epoch milliseconds are an offset from 1970-01-01T00:00:00Z, so the local
+        // timezone cannot shift them.
+        assert_eq!(epoch_ms(SystemTime::UNIX_EPOCH), 0);
+        assert_eq!(epoch_ms(at_ms(1_755_764_400_123)), 1_755_764_400_123);
+
+        // Same clock and epoch as `log_time`, so a logged timestamp is directly
+        // comparable to a segment's window.
+        let now_ms = epoch_ms(SystemTime::now());
+        let log_time_ms = re_log_types::Timestamp::now().nanos_since_epoch() / 1_000_000;
+        assert!(
+            now_ms.abs_diff(log_time_ms as u64) < 1_000,
+            "epoch_ms ({now_ms}) and log_time ({log_time_ms}) disagree"
+        );
+    }
 }

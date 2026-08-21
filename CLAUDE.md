@@ -199,6 +199,12 @@ Wheels are built on GitHub-hosted runners (`ubuntu-22.04`, `windows-latest`, `ma
 
 - **`--save-interval <seconds>`**: Continuously rotates the save file every N seconds. Requires `--save <path>` to be set; the path is then treated as a prefix, producing `<path>_1.rrd`, `<path>_2.rrd`, etc. Each rotated file gets a copy of the most recent `SetStoreInfo` so it's loadable on its own.
 - **`--save-static <path>`**: Streams static chunks (plus `BlueprintActivationCommand`) to a dedicated sidecar file instead of inlining them into the temporal output. Keeps rotated files small and avoids duplicating static data across every rotation. Valid on its own (without `--save`) to capture only static data. `SetStoreInfo` is written to both temporal and static files so each is independently loadable.
+- **`--save-name-by-span <flag>`**: Requires `--save-interval`. Names each rotated file `<path>_<start_ms>__<end_ms>.rrd` (zero-padded epoch milliseconds, UTC) instead of `<path>_N.rrd`, where the window is the interval during which the sink held that segment open. Consecutive segments tile exactly (`end_ms(N) == start_ms(N+1)`), so a gap between filenames is a real hole in coverage rather than a naming artifact. Idle segments still get a full, correctly-named window. Off by default, so one wheel serves consumers that parse either naming scheme.
+
+  Independently of the flag, every rotated segment is written under `<path>.partial_<start_ms>.rrd`, fsynced, and only then renamed into place (the directory is fsynced after). A consumer globbing `<path>_*.rrd` therefore never picks up a segment that is still being written, nor one whose contents a power loss truncated after its name was published. `rename` preserves mtime, so consumers using mtime as the segment end are unaffected. The partial name is keyed on the segment's start rather than the rotation counter, because the counter restarts at 1 each run and would otherwise let a later run truncate a crashed run's leftover.
+
+  SIGINT and SIGTERM are caught while a rotating sink is active, so a normal service stop finalizes the open segment instead of orphaning it. A hard crash (SIGKILL, power loss) still leaves a `.partial_` file that no glob will match; its start is readable from the name and its end is approximately its mtime, and the next start logs a warning listing them, but it is not recovered automatically.
+
 - **`--application-id <id>`**: Overrides `application_id` on every incoming log message. Useful for centralized ingestion (`--serve-grpc --save …`) so all captured recordings are tagged with a consistent ID regardless of what the logging SDKs sent.
 
 Upstream's `--save <path>` semantics are unchanged — without `--save-interval`, it writes a single file to the exact given path.
@@ -212,4 +218,4 @@ rerun --serve-grpc \
       --application-id my_robot
 ```
 
-Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `Sinks`, `classify`, `rewrite_application_id`, `rotated_path`). Static vs temporal classification is done by parsing each `ArrowMsg` into a `re_chunk::Chunk` and calling `is_static()`.
+Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `Sinks`, `classify`, `rewrite_application_id`, `rotated_path`, `span_path`, `partial_path`, `finalize_segment`). Unit tests for the path builders are in the `tests` module at the bottom of that file. Static vs temporal classification is done by parsing each `ArrowMsg` into a `re_chunk::Chunk` and calling `is_static()`.
