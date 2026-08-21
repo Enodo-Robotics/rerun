@@ -210,15 +210,21 @@ When persisted, the state will be stored at the following locations:
     /// Stream incoming log events to an .rrd file at the given path.
     ///
     /// When combined with `--save-interval`, the path is treated as a prefix and
-    /// output is rotated into `<path>_1.rrd`, `<path>_2.rrd`, ...
+    /// output is rotated into `<path>_<start_ms>__<end_ms>.rrd` files.
     #[clap(long)]
     save: Option<String>,
 
     /// Continuously rotate the save file every N seconds.
     ///
-    /// Requires `--save` to be set. The `--save` path is treated as a prefix:
-    /// output files are named `<path>_1.rrd`, `<path>_2.rrd`, etc., with a new
-    /// file opened every N seconds.
+    /// Requires `--save` to be set. The `--save` path is treated as a prefix: a new
+    /// file is opened every N seconds, named `<path>_<start_ms>__<end_ms>.rrd` after
+    /// the window during which it was open (zero-padded epoch milliseconds, UTC).
+    /// Consecutive files tile exactly, so a gap between names is a real hole in
+    /// coverage. An idle interval still produces a file.
+    ///
+    /// While open, a file is named `<path>.partial_<start_ms>.rrd` and is renamed
+    /// into place once flushed, so a reader globbing `<path>_*.rrd` never sees a
+    /// partially-written file.
     #[clap(long, value_name = "SECONDS")]
     save_interval: Option<u64>,
 
@@ -243,19 +249,6 @@ When persisted, the state will be stored at the following locations:
     /// Valid on its own (without `--save`) to capture only static data.
     #[clap(long, value_name = "PATH")]
     save_static: Option<String>,
-
-    /// Name rotated files by their time span instead of a counter.
-    ///
-    /// Requires `--save-interval`. Each rotated file is named
-    /// `<path>_<start_ms>__<end_ms>.rrd`, where the two numbers are the
-    /// zero-padded epoch milliseconds (UTC) at which the sink opened and
-    /// closed that segment. Consecutive segments tile exactly, i.e.
-    /// `end_ms(N) == start_ms(N+1)`, so a missing file is a real time hole.
-    ///
-    /// The window is the rotation window, not the span of the data inside it:
-    /// an idle segment still gets a full, correctly-named window.
-    #[clap(long)]
-    save_name_by_span: bool,
 
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
@@ -915,10 +908,6 @@ fn run_impl(
         anyhow::bail!("--save-interval requires --save <path> to be set");
     }
 
-    if args.save_name_by_span && args.save_interval.is_none() {
-        anyhow::bail!("--save-name-by-span requires --save-interval <seconds> to be set");
-    }
-
     // Now what do we do with the data?
     if args.test_receive || args.save.is_some() || args.save_static.is_some() {
         let receivers = ReceiversFromUrlParams::new(
@@ -933,7 +922,6 @@ fn run_impl(
             args.save_interval,
             args.save_static,
             args.application_id,
-            args.save_name_by_span,
             receivers,
             #[cfg(feature = "server")]
             tokio_runtime_handle,
@@ -1329,7 +1317,6 @@ fn save_or_test_receive(
     save_interval: Option<u64>,
     save_static: Option<String>,
     application_id: Option<String>,
-    save_name_by_span: bool,
     receivers: ReceiversFromUrlParams,
     #[cfg(feature = "server")] tokio_runtime_handle: &tokio::runtime::Handle,
     #[cfg(feature = "server")] server_addr: std::net::SocketAddr,
@@ -1382,7 +1369,6 @@ fn save_or_test_receive(
                 interval_seconds,
                 static_path.as_deref(),
                 app_id_override.as_ref(),
-                save_name_by_span,
                 shutdown.as_deref(),
             )
         } else {
@@ -1786,7 +1772,6 @@ fn stream_to_rrd_rotating(
     interval_seconds: u64,
     static_path: Option<&std::path::Path>,
     application_id: Option<&re_log_types::ApplicationId>,
-    name_by_span: bool,
     shutdown: Option<&std::sync::atomic::AtomicBool>,
 ) -> anyhow::Result<()> {
     use std::collections::HashMap;
@@ -1813,18 +1798,13 @@ fn stream_to_rrd_rotating(
     };
     let mut window_start = Instant::now();
 
-    let name_pattern = if name_by_span {
-        "_<start_ms>__<end_ms>.rrd"
-    } else {
-        "_N.rrd"
-    };
     if let Some(s) = static_path {
         re_log::info!(
-            "Saving rotating log stream to {base_path:?}{name_pattern} every {interval_seconds}s, static data to {s:?}. Abort with Ctrl-C."
+            "Saving rotating log stream to {base_path:?}_<start_ms>__<end_ms>.rrd every {interval_seconds}s, static data to {s:?}. Abort with Ctrl-C."
         );
     } else {
         re_log::info!(
-            "Saving rotating log stream to {base_path:?}{name_pattern}, new file every {interval_seconds}s. Abort with Ctrl-C."
+            "Saving rotating log stream to {base_path:?}_<start_ms>__<end_ms>.rrd, new file every {interval_seconds}s. Abort with Ctrl-C."
         );
     }
 
@@ -1835,14 +1815,7 @@ fn stream_to_rrd_rotating(
             // finished segment its final name and open the next one.
             sinks.temporal.take();
             let t_close = SystemTime::now();
-            let final_path = finalize_segment(
-                &open_path,
-                base_path,
-                counter,
-                t_open,
-                t_close,
-                name_by_span,
-            )?;
+            let final_path = finalize_segment(&open_path, base_path, t_open, t_close)?;
             re_log::info!(?final_path, "Rotated file");
 
             counter += 1;
@@ -1898,14 +1871,7 @@ fn stream_to_rrd_rotating(
     // Final (short) segment: flush it and name it just like a rotated one, otherwise it
     // would be left behind under its `.partial` name.
     sinks.temporal.take();
-    let final_path = finalize_segment(
-        &open_path,
-        base_path,
-        counter,
-        t_open,
-        SystemTime::now(),
-        name_by_span,
-    )?;
+    let final_path = finalize_segment(&open_path, base_path, t_open, SystemTime::now())?;
     re_log::info!(?final_path, "Flushed final file");
 
     drop(sinks);
@@ -1966,10 +1932,8 @@ fn spawn_shutdown_watcher(
 fn finalize_segment(
     open_path: &std::path::Path,
     base_path: &std::path::Path,
-    counter: u64,
     t_open: std::time::SystemTime,
     t_close: std::time::SystemTime,
-    name_by_span: bool,
 ) -> anyhow::Result<std::path::PathBuf> {
     use anyhow::Context as _;
 
@@ -1981,11 +1945,7 @@ fn finalize_segment(
         .and_then(|file| file.sync_all())
         .with_context(|| format!("Failed to fsync {open_path:?}"))?;
 
-    let final_path = if name_by_span {
-        span_path(base_path, t_open, t_close)
-    } else {
-        rotated_path(base_path, counter)
-    };
+    let final_path = span_path(base_path, t_open, t_close);
     std::fs::rename(open_path, &final_path)
         .with_context(|| format!("Failed to rename {open_path:?} to {final_path:?}"))?;
 
@@ -2025,14 +1985,6 @@ fn strip_rrd_extension(base: &std::path::Path) -> std::path::PathBuf {
     } else {
         base.to_path_buf()
     }
-}
-
-/// Build the path for the Nth rotated file: `<base>_<n>.rrd`.
-/// If `base` ends in `.rrd`, strip the extension first so `/x/run.rrd` → `/x/run_1.rrd`.
-fn rotated_path(base: &std::path::Path, counter: u64) -> std::path::PathBuf {
-    let mut s = strip_rrd_extension(base).into_os_string();
-    s.push(format!("_{counter}.rrd"));
-    std::path::PathBuf::from(s)
 }
 
 /// Build the path a segment is written to while it is still open:
@@ -2330,7 +2282,6 @@ fn record_cli_command_analytics(args: &Args) {
         save_interval: _,
         application_id: _,
         save_static: _,
-        save_name_by_span: _,
     } = args;
 
     let (command, subcommand) = match command {
@@ -2406,22 +2357,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
-    use super::{epoch_ms, partial_path, rotated_path, span_path};
+    use super::{epoch_ms, partial_path, span_path};
 
     fn at_ms(ms: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
-    }
-
-    #[test]
-    fn rotated_path_strips_rrd_extension() {
-        assert_eq!(
-            rotated_path(Path::new("/x/run"), 1),
-            PathBuf::from("/x/run_1.rrd")
-        );
-        assert_eq!(
-            rotated_path(Path::new("/x/run.rrd"), 2),
-            PathBuf::from("/x/run_2.rrd")
-        );
     }
 
     #[test]
