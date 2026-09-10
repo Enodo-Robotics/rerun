@@ -120,16 +120,35 @@ pub struct AppState {
     #[serde(skip)]
     pub(crate) focused_item: Option<FocusTarget>,
 
-    /// Externally-driven framing command that arrived this frame, if any.
+    /// The current externally-driven framing command, if any.
     ///
-    /// Cleared every frame, like [`Self::focused_item`]: the selection is applied centrally, but
-    /// the camera move has to happen inside each view, where the eye and the scene bounds live.
+    /// Deliberately *not* cleared every frame: the selection is applied centrally as soon as a
+    /// command arrives, but the camera move happens inside each view, and a view in a background
+    /// tab does not render on the frame the command arrives. Views apply it at most once each by
+    /// remembering the row id they last framed.
     #[serde(skip)]
-    pub(crate) focus_command: Option<FocusCommand>,
+    pub(crate) focus_command: Option<(RowId, FocusCommand)>,
 
-    /// Row of the last framing command we acted on, so each command is applied exactly once.
+    /// Row of the last framing command acted on, per recording, so each is applied exactly once.
+    ///
+    /// Keyed by store: a single `Option` would re-fire a stale command when switching back and
+    /// forth between two recordings that both carry one.
     #[serde(skip)]
-    pub(crate) last_applied_focus_command: Option<RowId>,
+    pub(crate) last_applied_focus_command: HashMap<StoreId, RowId>,
+
+    /// A command whose entities exist but are not yet shown by any view, and when we first saw it.
+    ///
+    /// Commands can arrive before the entities they name are logged, or before auto-layout has
+    /// built a view to show them in, so they are retried briefly rather than dropped.
+    #[serde(skip)]
+    pub(crate) pending_focus_command: Option<(RowId, f64)>,
+
+    /// Frames left during which blueprint changes should not create an undo point.
+    ///
+    /// A command writes camera components, and at command rate that would fill the undo history
+    /// with camera micro-moves within seconds. See [`Self::focus_command`].
+    #[serde(skip)]
+    pub(crate) suppress_undo_frames: u8,
 
     /// Are we logged in?
     #[serde(skip)]
@@ -161,6 +180,8 @@ impl Default for AppState {
             focused_item: Default::default(),
             focus_command: Default::default(),
             last_applied_focus_command: Default::default(),
+            pending_focus_command: Default::default(),
+            suppress_undo_frames: 0,
             auth_state: Default::default(),
 
             #[cfg(feature = "testing")]
@@ -323,14 +344,22 @@ impl AppState {
                     focused_item,
                     focus_command,
                     last_applied_focus_command,
+                    pending_focus_command,
+                    suppress_undo_frames,
                     auth_state,
                     ..
                 } = self;
 
+                // A framing command writes camera components, so for a couple of frames after
+                // one arrives we must not turn that into an undo point — otherwise driving the
+                // viewer at cursor rate fills the whole undo history with camera micro-moves.
+                let externally_driven = *suppress_undo_frames > 0;
+                *suppress_undo_frames = suppress_undo_frames.saturating_sub(1);
+
                 blueprint_undo_state
                     .entry(store_context.blueprint.store_id().clone())
                     .or_default()
-                    .update(ui.ctx(), store_context.blueprint);
+                    .update(ui.ctx(), store_context.blueprint, externally_driven);
 
                 let viewport_blueprint =
                     ViewportBlueprint::from_db(store_context.blueprint, &blueprint_query);
@@ -450,12 +479,20 @@ impl AppState {
 
                 // Detect an externally-driven framing command before building the context, so
                 // that views can act on it during this same frame.
-                *focus_command = take_new_focus_command(
+                if let Some(new_command) = take_new_focus_command(
                     recording,
                     &query_results,
                     command_sender,
                     last_applied_focus_command,
-                );
+                    pending_focus_command,
+                    ui.input(|input| input.time),
+                ) {
+                    *focus_command = Some(new_command);
+                    // The camera write lands during view rendering, i.e. after this frame's undo
+                    // bookkeeping has already run, so the point would otherwise be created on the
+                    // following frame.
+                    *suppress_undo_frames = 2;
+                }
 
                 let egui_ctx = ui.ctx().clone();
                 let ctx = ViewerContext {
@@ -1057,6 +1094,12 @@ impl re_byte_size::MemUsageTreeCapture for AppState {
     }
 }
 
+/// How long to keep retrying a command whose entities exist but are not yet shown by any view.
+///
+/// Long enough to cover auto-layout building a view at load, short enough that a command for an
+/// entity no open view will ever show does not retry forever.
+const FOCUS_COMMAND_RETRY_SECONDS: f64 = 3.0;
+
 /// Pick up a newly-arrived framing command and apply the half of it that is view-independent.
 ///
 /// The selection is applied here, centrally, because sending it from inside each view would send
@@ -1070,11 +1113,13 @@ fn take_new_focus_command(
     recording: &re_entity_db::EntityDb,
     query_results: &ahash::HashMap<ViewId, re_viewer_context::DataQueryResult>,
     command_sender: &re_viewer_context::CommandSender,
-    last_applied: &mut Option<RowId>,
-) -> Option<FocusCommand> {
+    last_applied: &mut HashMap<StoreId, RowId>,
+    pending: &mut Option<(RowId, f64)>,
+    now: f64,
+) -> Option<(RowId, FocusCommand)> {
     let (row_id, command) = FocusCommand::latest_from_db(recording)?;
 
-    if *last_applied == Some(row_id) {
+    if last_applied.get(recording.store_id()) == Some(&row_id) {
         return None;
     }
 
@@ -1104,8 +1149,24 @@ fn take_new_focus_command(
     if !unresolved.is_empty() {
         // A path no view shows is not necessarily a bad path: a command can arrive before the
         // entities it names are logged, or before auto-layout has created a view to show them
-        // in. Distinguish the two by asking the store, and leave `last_applied` alone in the
-        // not-yet case so the command is retried on later frames rather than lost.
+        // in. So retry for a short while before giving up, and only then decide whether it was
+        // a bad command by asking the store — `all_entities` walks the whole recording, so it
+        // must not run every frame.
+        let waited_since = match *pending {
+            Some((pending_row, since)) if pending_row == row_id => since,
+            _ => {
+                *pending = Some((row_id, now));
+                now
+            }
+        };
+
+        if now - waited_since < FOCUS_COMMAND_RETRY_SECONDS {
+            return None; // Try again on a later frame.
+        }
+
+        *pending = None;
+        last_applied.insert(recording.store_id().clone(), row_id);
+
         let known_to_store = recording.storage_engine().store().all_entities();
         let missing_from_store: Vec<&EntityPath> = unresolved
             .iter()
@@ -1113,29 +1174,33 @@ fn take_new_focus_command(
             .filter(|path| !known_to_store.iter().any(|known| known.starts_with(path)))
             .collect();
 
-        if missing_from_store.is_empty() {
-            // Present in the store, not yet visible in any view. Try again next frame.
-            return None;
-        }
-
         // Reject the whole command: a partly applied framing is more confusing than none —
         // and silence would look like the feature is broken, hence the warning.
-        re_log::warn_once!(
-            "Ignoring focus command: {} of {} entity path(s) do not exist in this recording, \
-             starting with {:?}. The whole command is ignored so that the framing cannot be \
-             misleading.",
-            missing_from_store.len(),
-            command.entity_paths.len(),
-            missing_from_store
-                .first()
-                .map(|path| path.to_string())
-                .unwrap_or_default(),
-        );
-        *last_applied = Some(row_id);
+        if missing_from_store.is_empty() {
+            re_log::warn_once!(
+                "Ignoring focus command: {} of {} entity path(s) exist in this recording but are \
+                 not shown by any view, so there is nothing to frame. Is the entity filtered out \
+                 of every view, or shown only by a view type that cannot be framed?",
+                unresolved.len(),
+                command.entity_paths.len(),
+            );
+        } else {
+            re_log::warn_once!(
+                "Ignoring focus command: {} of {} entity path(s) do not exist in this recording, \
+                 starting with {:?}.",
+                missing_from_store.len(),
+                command.entity_paths.len(),
+                missing_from_store
+                    .first()
+                    .map(|path| path.to_string())
+                    .unwrap_or_default(),
+            );
+        }
         return None;
     }
 
-    *last_applied = Some(row_id);
+    *pending = None;
+    last_applied.insert(recording.store_id().clone(), row_id);
 
     // `Item::DataResult` rather than `Item::InstancePath`: only the former gets the
     // full-strength `SelectionHighlight::Selection` in `highlights_for_view`, so selecting by
@@ -1157,9 +1222,12 @@ fn take_new_focus_command(
         .collect::<Vec<_>>();
 
     // An empty collection clears the selection, which is what an empty command asks for.
-    command_sender.send_system(SystemCommand::set_selection(
-        ItemCollection::from_items_and_context(items),
+    // `SelectionSource::ExternalCommand` keeps the panels from scrolling to the item and
+    // stealing keyboard focus, which at command rate would make the viewer unusable.
+    command_sender.send_system(SystemCommand::SetSelection(
+        re_viewer_context::SetSelection::new(ItemCollection::from_items_and_context(items))
+            .with_source(re_viewer_context::SelectionSource::ExternalCommand),
     ));
 
-    Some(command)
+    Some((row_id, command))
 }

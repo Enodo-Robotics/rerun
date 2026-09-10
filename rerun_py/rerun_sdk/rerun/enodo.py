@@ -71,14 +71,20 @@ def focus_entities(
     ```
 
     """
+    import pyarrow as pa
+
     from ._log import log
 
+    # Explicitly typed arrays, rather than letting `AnyValues` infer. Inference drops an empty
+    # list outright when it has not yet seen a value of that type, which would leave `paths`
+    # unlogged — and because static data is never cleared, the viewer would then read the
+    # *previous* command's paths and re-frame those instead of clearing the selection.
     log(
         FOCUS_COMMAND_ENTITY_PATH,
         AnyValues(
-            paths=[str(path) for path in paths],
-            do_pan=bool(do_pan),
-            do_rotate=bool(do_rotate),
+            paths=pa.array([str(path) for path in paths], type=pa.string()),
+            do_pan=pa.array([bool(do_pan)], type=pa.bool_()),
+            do_rotate=pa.array([bool(do_rotate)], type=pa.bool_()),
         ),
         # Static, so the command is timeline-independent: the viewer reads whichever was logged
         # last, no matter where the time cursor happens to sit.

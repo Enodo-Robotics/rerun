@@ -693,6 +693,13 @@ pub fn framing_pose(request: FramingRequest) -> (Vec3, Vec3) {
         current_pos
     };
 
+    // Never hand a non-finite pose to the blueprint: it would be persisted there and the view
+    // would stay broken until someone reset the camera by hand. Callers filter non-finite
+    // boxes, but `radius` and `forward` arithmetic can still produce one.
+    if !pos.is_finite() || !center.is_finite() {
+        return (current_pos, current_pos + current_forward);
+    }
+
     (pos, center)
 }
 

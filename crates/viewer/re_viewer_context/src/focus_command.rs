@@ -5,7 +5,7 @@
 //! fit them. The viewer has no idea what sent a command or why: all policy (what a list element
 //! maps to, debounce, when to ask for a zoom-out) belongs to the driver.
 
-use arrow::array::{Array as _, ArrayRef, BooleanArray, LargeStringArray, StringArray};
+use arrow::array::{Array as _, ArrayRef, BooleanArray, StringArray};
 
 use re_chunk_store::{LatestAtQuery, RowId};
 use re_entity_db::EntityDb;
@@ -68,37 +68,38 @@ impl FocusCommand {
             [paths_component, do_pan_component, do_rotate_component],
         );
 
-        if results.is_empty() {
+        // A latest-at query resolves each component independently, and static data is never
+        // cleared — so a component omitted from a later command would keep its old value and
+        // silently mix into a newer one. Treat the `paths` row as the command's identity, and
+        // require every field to come from that same row, which makes a command atomic.
+        //
+        // Practical consequence: a command must always log `paths`, even when empty. The
+        // `rerun.enodo.focus_entities` helper does so explicitly.
+        let row_id = results.component_row_id(paths_component)?;
+
+        let paths_array = results.component_batch_raw(paths_component)?;
+        let Some(paths) = strings_from_arrow(&paths_array) else {
+            // Present but unreadable. Rejecting is important: falling back to "no paths" would
+            // turn a malformed command into "deselect everything and reframe the scene", which
+            // is the most destructive thing this API can do.
             return None;
-        }
+        };
+        let entity_paths = paths.into_iter().map(EntityPath::from).collect();
 
-        let (_time, row_id) = results.max_index();
-
-        // A command that clears the selection may legitimately carry no paths at all, so a
-        // missing or empty `paths` component is an empty selection rather than a parse failure.
-        let entity_paths = results
-            .component_batch_raw(paths_component)
-            .map(|array| strings_from_arrow(&array))
-            .unwrap_or_default()
-            .into_iter()
-            .map(EntityPath::from)
-            .collect();
-
-        let do_pan = results
-            .component_batch_raw(do_pan_component)
-            .and_then(|array| bool_from_arrow(&array))
-            .unwrap_or(true);
-        let do_rotate = results
-            .component_batch_raw(do_rotate_component)
-            .and_then(|array| bool_from_arrow(&array))
-            .unwrap_or(false);
+        let flag = |component: ComponentIdentifier| -> Option<bool> {
+            if results.component_row_id(component) != Some(row_id) {
+                return None; // Left over from an earlier command.
+            }
+            let array = results.component_batch_raw(component)?;
+            bool_from_arrow(&array)
+        };
 
         Some((
             row_id,
             Self {
                 entity_paths,
-                do_pan,
-                do_rotate,
+                do_pan: flag(do_pan_component).unwrap_or(true),
+                do_rotate: flag(do_rotate_component).unwrap_or(false),
             },
         ))
     }
@@ -112,65 +113,75 @@ impl FocusCommand {
 /// Pull strings out of an arrow array, tolerating the several string layouts a client may send.
 ///
 /// Commands arrive from arbitrary SDK code — `pyarrow` picks the layout — so this accepts each of
-/// the utf8 variants rather than assuming one.
-fn strings_from_arrow(array: &ArrayRef) -> Vec<String> {
-    if let Some(array) = array.as_any().downcast_ref::<StringArray>() {
-        return (0..array.len())
-            .filter(|&i| array.is_valid(i))
-            .map(|i| array.value(i).to_owned())
-            .collect();
-    }
-    if let Some(array) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return (0..array.len())
-            .filter(|&i| array.is_valid(i))
-            .map(|i| array.value(i).to_owned())
-            .collect();
-    }
-    if let Some(array) = array
-        .as_any()
-        .downcast_ref::<arrow::array::StringViewArray>()
-    {
-        return (0..array.len())
-            .filter(|&i| array.is_valid(i))
-            .map(|i| array.value(i).to_owned())
-            .collect();
+/// the utf8 variants. Returns `None` for anything that is not a string array at all: the caller
+/// rejects such a command rather than treating it as an empty selection.
+fn strings_from_arrow(array: &ArrayRef) -> Option<Vec<String>> {
+    use arrow::datatypes::DataType;
+
+    // An allowlist rather than a blind `cast`, because arrow will happily render numbers as
+    // strings, and a numeric `paths` almost certainly means the driver has a bug.
+    if !matches!(
+        array.data_type(),
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+    ) {
+        re_log::warn_once!(
+            "Ignoring focus command: `{COMPONENT_PATHS}` should be a string array, but it is {:?}.",
+            array.data_type()
+        );
+        return None;
     }
 
-    re_log::warn_once!(
-        "Focus command: expected a string array for `{COMPONENT_PATHS}`, got {:?}",
-        array.data_type()
-    );
-    Vec::new()
+    let array = if array.data_type() == &DataType::Utf8 {
+        ArrayRef::clone(array)
+    } else {
+        arrow::compute::cast(array, &DataType::Utf8).ok()?
+    };
+    let array = array.as_any().downcast_ref::<StringArray>()?;
+
+    Some(
+        (0..array.len())
+            .filter(|&i| array.is_valid(i))
+            .map(|i| array.value(i).to_owned())
+            .collect(),
+    )
 }
 
 /// Pull a single flag out of an arrow array.
 ///
-/// Accepts a boolean array, and also a numeric one, since a client may well send `1`/`0`.
+/// Accepts a boolean array, and any numeric one, since a client may well send `1`/`0` — or have
+/// its booleans widened to some integer type on the way through `pyarrow`/`numpy`.
 fn bool_from_arrow(array: &ArrayRef) -> Option<bool> {
-    if let Some(array) = array.as_any().downcast_ref::<BooleanArray>() {
-        return (!array.is_empty() && array.is_valid(0)).then(|| array.value(0));
+    use arrow::datatypes::DataType;
+
+    if !matches!(
+        array.data_type(),
+        DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float32
+            | DataType::Float64
+    ) {
+        re_log::warn_once!(
+            "Focus command: expected a boolean flag, got {:?}. Using the default.",
+            array.data_type()
+        );
+        return None;
     }
 
-    use arrow::array::AsArray as _;
-    use arrow::datatypes::DataType;
-    match array.data_type() {
-        DataType::Int64 => {
-            let array = array.as_primitive::<arrow::datatypes::Int64Type>();
-            (!array.is_empty() && array.is_valid(0)).then(|| array.value(0) != 0)
-        }
-        DataType::UInt64 => {
-            let array = array.as_primitive::<arrow::datatypes::UInt64Type>();
-            (!array.is_empty() && array.is_valid(0)).then(|| array.value(0) != 0)
-        }
-        DataType::Int32 => {
-            let array = array.as_primitive::<arrow::datatypes::Int32Type>();
-            (!array.is_empty() && array.is_valid(0)).then(|| array.value(0) != 0)
-        }
-        other => {
-            re_log::warn_once!("Focus command: expected a boolean flag, got {other:?}");
-            None
-        }
-    }
+    let array = if array.data_type() == &DataType::Boolean {
+        ArrayRef::clone(array)
+    } else {
+        arrow::compute::cast(array, &DataType::Boolean).ok()?
+    };
+    let array = array.as_any().downcast_ref::<BooleanArray>()?;
+
+    (!array.is_empty() && array.is_valid(0)).then(|| array.value(0))
 }
 
 #[cfg(test)]
@@ -186,9 +197,12 @@ mod tests {
 
     use super::{FOCUS_COMMAND_ENTITY_PATH, FocusCommand};
 
-    /// Build a store holding one command, logged statically the way the SDK helper does.
-    fn db_with_command(components: Vec<(&str, ArrayRef)>) -> (EntityDb, RowId) {
-        let mut db = EntityDb::new(StoreId::random(StoreKind::Recording, "test_app".to_owned()));
+    fn empty_db() -> EntityDb {
+        EntityDb::new(StoreId::random(StoreKind::Recording, "test_app".to_owned()))
+    }
+
+    /// Add one command row, logged statically the way the SDK helper does.
+    fn add_command(db: &mut EntityDb, components: Vec<(&str, ArrayRef)>) -> RowId {
         let row_id = RowId::new();
         let chunk =
             Chunk::builder_with_id(ChunkId::new(), EntityPath::from(FOCUS_COMMAND_ENTITY_PATH))
@@ -201,8 +215,13 @@ mod tests {
                 )
                 .build()
                 .expect("chunk should build");
-
         db.add_chunk(&Arc::new(chunk)).expect("chunk should ingest");
+        row_id
+    }
+
+    fn db_with_command(components: Vec<(&str, ArrayRef)>) -> (EntityDb, RowId) {
+        let mut db = empty_db();
+        let row_id = add_command(&mut db, components);
         (db, row_id)
     }
 
@@ -234,8 +253,7 @@ mod tests {
 
     #[test]
     fn an_empty_store_has_no_command() {
-        let db = EntityDb::new(StoreId::random(StoreKind::Recording, "test_app".to_owned()));
-        assert!(FocusCommand::latest_from_db(&db).is_none());
+        assert!(FocusCommand::latest_from_db(&empty_db()).is_none());
     }
 
     #[test]
@@ -260,6 +278,47 @@ mod tests {
     }
 
     #[test]
+    fn a_command_without_paths_is_not_a_command() {
+        // `paths` is the command's identity. Accepting a flags-only row would mean taking
+        // `paths` from an older row — re-framing the previous subgroup instead of the new one.
+        let (db, _) = db_with_command(vec![("do_pan", Arc::new(BooleanArray::from(vec![true])))]);
+        assert!(FocusCommand::latest_from_db(&db).is_none());
+    }
+
+    #[test]
+    fn stale_flags_from_an_earlier_row_are_not_mixed_in() {
+        // Static data is never cleared, so an earlier command's `do_rotate` is still the latest
+        // value of that component. It must not leak into a later command that omitted it.
+        let mut db = empty_db();
+        add_command(
+            &mut db,
+            vec![
+                ("paths", strings(&["/first"])),
+                ("do_rotate", Arc::new(BooleanArray::from(vec![true]))),
+            ],
+        );
+        add_command(&mut db, vec![("paths", strings(&["/second"]))]);
+
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(command.entity_paths, vec![EntityPath::from("/second")]);
+        assert!(
+            !command.do_rotate,
+            "do_rotate leaked from the earlier command"
+        );
+    }
+
+    #[test]
+    fn a_malformed_paths_component_is_rejected_not_treated_as_empty() {
+        // Falling back to "no paths" would turn a driver bug into "deselect everything and
+        // reframe the scene" — the most destructive thing this API can do.
+        let (db, _) = db_with_command(vec![(
+            "paths",
+            Arc::new(Int64Array::from(vec![1_i64, 2])) as ArrayRef,
+        )]);
+        assert!(FocusCommand::latest_from_db(&db).is_none());
+    }
+
+    #[test]
     fn tolerates_the_string_layouts_a_client_may_send() {
         // pyarrow picks the layout, so we cannot assume plain utf8.
         let (db, _) = db_with_command(vec![(
@@ -272,7 +331,7 @@ mod tests {
 
     #[test]
     fn tolerates_numeric_flags() {
-        // A client may well send 1/0 rather than true/false.
+        // A client may well send 1/0 rather than true/false, or have its booleans widened.
         let (db, _) = db_with_command(vec![
             ("paths", strings(&["/world/robot"])),
             ("do_pan", Arc::new(Int64Array::from(vec![0_i64]))),
@@ -285,31 +344,14 @@ mod tests {
 
     #[test]
     fn a_later_command_supersedes_an_earlier_one() {
-        let mut db = EntityDb::new(StoreId::random(StoreKind::Recording, "test_app".to_owned()));
-
-        let mut row_ids = Vec::new();
-        for path in ["/first", "/second"] {
-            let row_id = RowId::new();
-            row_ids.push(row_id);
-            let chunk =
-                Chunk::builder_with_id(ChunkId::new(), EntityPath::from(FOCUS_COMMAND_ENTITY_PATH))
-                    .with_row(
-                        row_id,
-                        TimePoint::default(),
-                        [(
-                            ComponentDescriptor::partial("paths"),
-                            strings(&[path]) as ArrayRef,
-                        )],
-                    )
-                    .build()
-                    .expect("chunk should build");
-            db.add_chunk(&Arc::new(chunk)).expect("chunk should ingest");
-        }
+        let mut db = empty_db();
+        add_command(&mut db, vec![("paths", strings(&["/first"]))]);
+        let second = add_command(&mut db, vec![("paths", strings(&["/second"]))]);
 
         let (row_id, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
         assert_eq!(command.entity_paths, vec![EntityPath::from("/second")]);
         assert_eq!(
-            row_id, row_ids[1],
+            row_id, second,
             "the row id must change, or the viewer would not re-fire"
         );
     }

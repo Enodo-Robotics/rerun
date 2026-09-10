@@ -128,10 +128,52 @@ selection outline — proving both the full-strength `Selection` highlight and t
 no rejection warning fired. Separately confirmed: a command logged through the fork's sink appears
 in **no** rotated `.rrd`, while the geometry does.
 
-**Tests:** 8 unit tests on the pure `framing_pose` arithmetic, 8 on command parsing (including the
-empty-list unhover case, `LargeString`/numeric tolerance, and that a later command changes the
-row id so it re-fires). `re_view_spatial`'s two `test_help_view` snapshot tests fail here for lack
-of `git-lfs`, as predicted, and are unrelated.
+**Tests:** 8 on the pure `framing_pose` arithmetic, 11 on command parsing. `framing_pose` ended up
+with no `fov_y` parameter (the distance is 1.5x the bounding sphere, which ignores the field of
+view), so the `fov_y = None` case listed under *Testing* above does not exist.
+`re_view_spatial`'s two `test_help_view` snapshot tests fail here for lack of `git-lfs`, as
+predicted, and are unrelated.
+
+### Second round: independent review (2026-09-10)
+
+An adversarial review of the committed code found several real defects, all now fixed:
+
+- **A command was not atomic.** A latest-at query resolves each component independently and static
+  data is never cleared, so a command that omitted a field would silently pick that field up from
+  an *older* row. Worst case, `focus_entities([])` re-framed the previous subgroup instead of
+  clearing — because `AnyValues` drops an empty list entirely when its type registry is cold
+  (`any_batch_value.py:255-262`). Fixed on both sides: the Python helper now sends explicitly typed
+  arrays, and the parser treats the `paths` row as the command's identity and ignores any field
+  logged in a different row.
+- **A malformed payload did the most destructive thing available.** An unreadable `paths` fell back
+  to "no paths", i.e. deselect everything and reframe the scene. Now rejected.
+- **The retry was unbounded**, re-walking every entity in the recording each frame via
+  `all_entities()`, with no `request_repaint`. Now bounded to 3 seconds, with the store walked at
+  most once per command, and a repaint requested while pending.
+- **`last_applied` was global**, so switching between two recordings that both carried a command
+  re-fired the stale one. Now keyed by store id.
+- **Views that were not rendering consumed commands.** A view in a background tab satisfied the
+  resolution check but never framed. The command now outlives its arrival frame and each view
+  applies it at most once, by row id.
+- **Undo was destroyed by hover-rate driving.** Camera writes are blueprint writes, and
+  `BlueprintUndoState` only skips undo points while the *local* pointer is down, so ~1.6s of
+  hovering filled the 100-entry history with camera micro-moves. `update` now takes an
+  `is_externally_driven` flag.
+- **Selection at cursor rate stole keyboard focus**, via the focus-sync path that scrolls panels to
+  the selected item. Fixed with a new `SelectionSource::ExternalCommand`, which the spec's own
+  appendix had prescribed and the first implementation ignored.
+- **A NaN position poisoned the camera permanently.** `BoundingBox::is_nothing` is `max < min`,
+  false for NaN, so a NaN box produced a NaN camera that was written to the blueprint. Now guarded
+  in both the view and `framing_pose`.
+
+One finding did **not** reproduce: the review claimed selection uses the exact path while framing
+uses the subtree, so naming a parent would outline nothing. Tested directly — geometry only at
+`/world/right/inner`, one command naming the parent and one the leaf — and both produce the
+outline. Left as-is, unexplained.
+
+Re-verified after the fixes, three-way: no command (two boxes, default framing, no outline), a
+focus command (subgroup framed and outlined), and an empty command (framing restored, selection
+cleared). The empty/unhover path was not verified in the first round.
 
 **Incidental fix:** `re_test_context` had a non-exhaustive `SystemCommand` match — the fork's
 annotation work added variants without updating it — which broke `--all-features` test builds for

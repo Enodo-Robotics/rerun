@@ -241,8 +241,10 @@ driver. A command naming a path absent from the recording is rejected whole, wit
 that exists but is not yet shown by any view is retried on later frames, so a command that arrives
 before layout settles is not lost.
 
-Commands never reach a saved `.rrd`: `classify` routes anything under
-`re_log_types::VIEWER_COMMAND_ENTITY_PATH_PREFIX` to `MsgRoute::Drop`.
+Commands are kept out of the files this fork's binary writes: `classify` routes anything under
+`re_log_types::VIEWER_COMMAND_ENTITY_PATH_PREFIX` to `MsgRoute::Drop`, so they never reach a
+rotated `.rrd` and never reach S3. They *are* in the viewer's store, so "Save recording" from the
+viewer UI, or `rr.save()` in a driver, would persist them — only the rotating sink filters.
 
 Implementation: `FocusCommand` (`crates/viewer/re_viewer_context/src/focus_command.rs`) parses the
 command; `take_new_focus_command` (`crates/viewer/re_viewer/src/app_state.rs`) applies the

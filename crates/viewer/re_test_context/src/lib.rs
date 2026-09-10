@@ -65,7 +65,7 @@ pub struct TestContext {
     pub focused_item: Mutex<Option<re_viewer_context::FocusTarget>>,
 
     /// Externally-driven framing command, as if one had arrived this frame.
-    pub focus_command: Mutex<Option<re_viewer_context::FocusCommand>>,
+    pub focus_command: Mutex<Option<(re_chunk::RowId, re_viewer_context::FocusCommand)>>,
 
     // RwLock so we can have `handle_system_commands` take an immutable reference to self.
     pub time_ctrl: RwLock<TimeControl>,
