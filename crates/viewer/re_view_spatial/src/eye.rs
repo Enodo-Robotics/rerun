@@ -624,6 +624,78 @@ pub fn find_camera(cameras: &[PinholeWrapper], needle: &EntityPath) -> Option<Ey
     found_camera.and_then(Eye::from_camera)
 }
 
+/// Inputs to [`framing_pose`].
+#[derive(Clone, Copy, Debug)]
+pub struct FramingRequest {
+    /// The box to frame, in world space.
+    pub target_bbox: macaw::BoundingBox,
+
+    /// Where the camera is now.
+    pub current_pos: Vec3,
+
+    /// Which way the camera is looking now, normalized.
+    pub current_forward: Vec3,
+
+    /// Distance to back off by when `target_bbox` has no meaningful extent.
+    pub fallback_radius: f32,
+
+    /// Move the camera to a distance that fits the box.
+    pub do_pan: bool,
+
+    /// Re-aim the camera at the box from where it currently stands.
+    pub do_rotate: bool,
+}
+
+/// Where should the camera sit and look, to frame a box?
+///
+/// Pure, so the arithmetic can be tested without a viewer: no blueprint, no context, no state.
+///
+/// The two flags are independent and compose:
+/// - `do_rotate` alone: stay put, aim at the box. It may end up small in frame — that is the
+///   point of a rotation that happens about the camera rather than about a pivot.
+/// - `do_pan` alone: keep looking the same way, translate so the box is centred and fills the
+///   frame. The camera slides rather than swinging round.
+/// - both: aim at the box, then dolly straight in along that new line of sight, which preserves
+///   the angle you are viewing the box from.
+pub fn framing_pose(request: FramingRequest) -> (Vec3, Vec3) {
+    let FramingRequest {
+        target_bbox,
+        current_pos,
+        current_forward,
+        fallback_radius,
+        do_pan,
+        do_rotate,
+    } = request;
+
+    let center = target_bbox.center();
+
+    // Matches `focus_entity`: 1.5x the bounding sphere, so command framing and double-click
+    // framing land in the same place.
+    let radius = target_bbox.centered_bounding_sphere_radius() * 1.5;
+    let radius = if radius < 0.0001 {
+        fallback_radius
+    } else {
+        radius
+    };
+    let radius = radius.at_least(EyeController::MIN_ORBIT_DISTANCE);
+
+    let forward = if do_rotate {
+        (center - current_pos)
+            .try_normalize()
+            .unwrap_or(current_forward)
+    } else {
+        current_forward
+    };
+
+    let pos = if do_pan {
+        center - forward * radius
+    } else {
+        current_pos
+    };
+
+    (pos, center)
+}
+
 fn ease_out(t: f32) -> f32 {
     1. - (1. - t) * (1. - t)
 }
@@ -922,6 +994,75 @@ impl EyeState {
         Ok(())
     }
 
+    /// Move the camera so that `target_bbox` is framed, per an external framing command.
+    ///
+    /// The command's `do_rotate` re-aims the camera at the box from wherever it currently stands
+    /// — i.e. the rotation happens about the camera position, not about the orbit pivot — while
+    /// `do_pan` moves the camera to a distance that fits the box. See [`framing_pose`] for the
+    /// arithmetic.
+    pub fn frame_bounding_box(
+        &self,
+        ctx: &ViewContext<'_>,
+        bounding_boxes: &SceneBoundingBoxes,
+        eye_property: &ViewProperty,
+        target_bbox: macaw::BoundingBox,
+        command: &re_viewer_context::FocusCommand,
+    ) -> Result<(), ViewPropertyQueryError> {
+        if !command.moves_camera() {
+            return Ok(());
+        }
+
+        let mut eye_controller = EyeController::from_blueprint(ctx, eye_property, self.fov_y)?;
+        eye_controller.did_interact = true;
+        let EyeController {
+            pos: old_pos,
+            look_target: old_look_target,
+            eye_up: old_eye_up,
+            ..
+        } = eye_controller;
+
+        // Same fallback as `focus_entity` for a box with no extent: back off by the whole
+        // scene's radius instead, so a single point doesn't put the camera inside it.
+        let fallback_radius = (bounding_boxes
+            .region_of_interest_current
+            .centered_bounding_sphere_radius()
+            * 1.5)
+            .at_least(0.02);
+
+        let current_pos = self.last_eye.map_or(old_pos, |eye| eye.pos_in_world());
+        let current_forward = self.last_eye.map_or_else(
+            || Vec3::splat(f32::sqrt(1.0 / 3.0)),
+            |eye| eye.forward_in_world(),
+        );
+
+        let (pos, look_target) = framing_pose(FramingRequest {
+            target_bbox,
+            current_pos,
+            current_forward,
+            fallback_radius,
+            do_pan: command.do_pan,
+            do_rotate: command.do_rotate,
+        });
+
+        eye_controller.pos = pos;
+        eye_controller.look_target = look_target;
+
+        eye_controller.save_to_blueprint(
+            ctx.viewer_ctx,
+            eye_property,
+            old_pos,
+            old_look_target,
+            old_eye_up,
+        );
+
+        // A framing command is an explicit request to look somewhere, which overrides any
+        // entity the eye was following.
+        eye_property
+            .clear_blueprint_component(ctx.viewer_ctx, EyeControls3D::descriptor_tracking_entity());
+
+        Ok(())
+    }
+
     pub fn focus_entity(
         &self,
         ctx: &ViewContext<'_>,
@@ -1100,5 +1241,119 @@ impl EyeState {
         self.last_eye = Some(eye);
 
         Ok(eye)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glam::Vec3;
+    use macaw::BoundingBox;
+
+    use super::{EyeController, FramingRequest, framing_pose};
+
+    fn request(target_bbox: BoundingBox, do_pan: bool, do_rotate: bool) -> FramingRequest {
+        FramingRequest {
+            target_bbox,
+            current_pos: Vec3::new(0.0, 0.0, 10.0),
+            current_forward: -Vec3::Z,
+            fallback_radius: 5.0,
+            do_pan,
+            do_rotate,
+        }
+    }
+
+    fn box_at(center: Vec3, half_size: f32) -> BoundingBox {
+        BoundingBox::from_center_size(center, Vec3::splat(half_size * 2.0))
+    }
+
+    #[test]
+    fn rotate_only_never_moves_the_camera() {
+        // The whole point of rotating about the camera rather than a pivot.
+        let req = request(box_at(Vec3::new(5.0, 0.0, 0.0), 1.0), false, true);
+        let (pos, look_target) = framing_pose(req);
+        assert_eq!(pos, req.current_pos, "rotate-only must not translate");
+        assert_eq!(look_target, Vec3::new(5.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn pan_only_preserves_the_view_direction() {
+        // Camera slides rather than swinging round: it ends up on the -forward side of the
+        // box, so its orientation is unchanged.
+        let target = box_at(Vec3::new(5.0, 0.0, 0.0), 2.0);
+        let (pos, look_target) = framing_pose(request(target, true, false));
+
+        assert_eq!(look_target, target.center());
+        let new_forward = (look_target - pos).normalize();
+        assert!(
+            (new_forward - -Vec3::Z).length() < 1e-5,
+            "view direction changed: {new_forward:?}"
+        );
+    }
+
+    #[test]
+    fn pan_and_rotate_dollies_along_the_line_of_sight() {
+        // Aim at the box from where we stand, then move straight in: the angle we view the
+        // box from is preserved, which is what makes it read as approaching it.
+        let target = box_at(Vec3::new(6.0, 0.0, 0.0), 1.0);
+        let req = request(target, true, true);
+        let (pos, look_target) = framing_pose(req);
+
+        assert_eq!(look_target, target.center());
+
+        let old_dir = (target.center() - req.current_pos).normalize();
+        let new_dir = (target.center() - pos).normalize();
+        assert!(
+            (old_dir - new_dir).length() < 1e-5,
+            "viewing angle changed: {old_dir:?} -> {new_dir:?}"
+        );
+        assert!(
+            pos.distance(target.center()) < req.current_pos.distance(target.center()),
+            "should have moved closer"
+        );
+    }
+
+    #[test]
+    fn distance_is_one_and_a_half_bounding_spheres() {
+        // Must match `focus_entity`, so commands and double-click land in the same place.
+        let target = box_at(Vec3::ZERO, 2.0);
+        let (pos, _) = framing_pose(request(target, true, true));
+        let expected = target.centered_bounding_sphere_radius() * 1.5;
+        assert!((pos.distance(Vec3::ZERO) - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn zero_extent_box_falls_back_instead_of_putting_us_inside_it() {
+        let target = box_at(Vec3::new(1.0, 2.0, 3.0), 0.0);
+        let (pos, look_target) = framing_pose(request(target, true, true));
+        assert_eq!(look_target, Vec3::new(1.0, 2.0, 3.0));
+        assert!(
+            (pos.distance(look_target) - 5.0).abs() < 1e-4,
+            "expected the fallback radius, got {}",
+            pos.distance(look_target)
+        );
+    }
+
+    #[test]
+    fn distance_is_clamped_to_the_minimum_orbit_distance() {
+        let target = box_at(Vec3::ZERO, 0.0);
+        let mut req = request(target, true, true);
+        req.fallback_radius = 0.0; // Degenerate: both the box and the fallback are empty.
+        let (pos, _) = framing_pose(req);
+        assert!(pos.distance(Vec3::ZERO) >= EyeController::MIN_ORBIT_DISTANCE);
+    }
+
+    #[test]
+    fn neither_flag_is_a_no_op() {
+        let req = request(box_at(Vec3::new(5.0, 0.0, 0.0), 1.0), false, false);
+        let (pos, _) = framing_pose(req);
+        assert_eq!(pos, req.current_pos);
+    }
+
+    #[test]
+    fn camera_already_at_the_box_center_keeps_its_forward() {
+        // `(center - current_pos)` is zero here, so normalizing it would produce NaN.
+        let target = box_at(Vec3::new(0.0, 0.0, 10.0), 1.0);
+        let (pos, _) = framing_pose(request(target, true, true));
+        assert!(pos.is_finite(), "produced a non-finite pose: {pos:?}");
     }
 }

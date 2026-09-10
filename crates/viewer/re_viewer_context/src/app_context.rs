@@ -76,6 +76,11 @@ pub struct AppContext<'a> {
     /// that last several frames.
     pub focused_item: &'a Option<FocusTarget>,
 
+    /// An externally-driven framing command that arrived this frame, if any.
+    ///
+    /// Cleared every frame; views read this to move their camera.
+    pub focus_command: &'a Option<crate::FocusCommand>,
+
     /// Helper object to manage drag-and-drop operations.
     pub drag_and_drop_manager: &'a DragAndDropManager,
 
@@ -185,6 +190,11 @@ impl AppContext<'_> {
     /// Item that got focused on the last frame if any.
     pub fn focused_item(&self) -> Option<&FocusTarget> {
         self.focused_item.as_ref()
+    }
+
+    /// An externally-driven framing command that arrived this frame, if any.
+    pub fn focus_command(&self) -> Option<&crate::FocusCommand> {
+        self.focus_command.as_ref()
     }
 
     /// Helper object to manage drag-and-drop operations.

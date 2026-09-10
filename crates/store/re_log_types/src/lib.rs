@@ -891,6 +891,13 @@ impl TableMsg {
 
 // ---
 
+/// Reserved entity path for viewer commands driven by an external application.
+///
+/// Data logged here is a *request to the viewer* (select these entities, frame the camera on
+/// them), not part of the recording's content. The fork's rotating file sink drops it, so
+/// commands never reach a saved `.rrd` — see `classify` in `rerun/src/commands/entrypoint.rs`.
+pub const VIEWER_COMMAND_ENTITY_PATH_PREFIX: &str = "viewer/_command";
+
 /// Build a ([`Timeline`], [`TimeInt`]) tuple from `log_time` suitable for inserting in a [`TimePoint`].
 #[inline]
 pub fn build_log_time(log_time: Timestamp) -> (Timeline, TimeInt) {

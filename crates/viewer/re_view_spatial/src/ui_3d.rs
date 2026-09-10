@@ -361,6 +361,54 @@ impl SpatialView3D {
             ui.request_repaint();
         }
 
+        // Act on an externally-driven framing command, if one arrived this frame.
+        if let Some(command) = ctx.focus_command()
+            && command.moves_camera()
+        {
+            let target_bbox = if command.entity_paths.is_empty() {
+                // An empty command means "back to normal": frame the whole scene, the same box
+                // the view is framed by on load.
+                Some(state.bounding_boxes.region_of_interest_current)
+            } else {
+                // Each requested path contributes its whole subtree, so naming `/robot` frames
+                // the meshes logged at `/robot/link_3`. Views holding none of the requested
+                // entities are left alone.
+                let query_result = ctx.lookup_query_result(query.view_id);
+                let mut bbox = macaw::BoundingBox::nothing();
+                for data_result in query_result.tree.iter_data_results() {
+                    if !command
+                        .entity_paths
+                        .iter()
+                        .any(|path| data_result.entity_path.starts_with(path))
+                    {
+                        continue;
+                    }
+                    let hash = data_result.entity_path.hash();
+                    if let Some(entity_bbox) = state
+                        .bounding_boxes
+                        .region_of_interest_per_entity
+                        .get(&hash)
+                        .or_else(|| state.bounding_boxes.per_entity.get(&hash))
+                    {
+                        bbox = bbox.union(*entity_bbox);
+                    }
+                }
+                (!bbox.is_nothing()).then_some(bbox)
+            };
+
+            if let Some(target_bbox) = target_bbox {
+                state.state_3d.eye_state.start_interpolation();
+                state.state_3d.eye_state.frame_bounding_box(
+                    &self.view_context(ctx, query.view_id, state, query.space_origin),
+                    &state.bounding_boxes,
+                    &eye_property,
+                    target_bbox,
+                    command,
+                )?;
+                ui.request_repaint();
+            }
+        }
+
         // Allow to restore the camera state with escape if a camera was tracked before.
         if response.hovered() && ui.input(|i| i.key_pressed(TRACKED_OBJECT_RESTORE_KEY)) {
             eye_property

@@ -6,9 +6,10 @@ use egui::text_edit::TextEditState;
 use egui::text_selection::LabelSelectionState;
 use re_chunk::TimelineName;
 use re_chunk_store::LatestAtQuery;
+use re_chunk_store::RowId;
 use re_entity_db::EntityDb;
 use re_log_channel::{LogReceiverSet, LogSource, RecordingOpenBehavior};
-use re_log_types::{AbsoluteTimeRangeF, StoreId, TableId, TimelinePoint};
+use re_log_types::{AbsoluteTimeRangeF, EntityPath, StoreId, TableId, TimelinePoint};
 use re_redap_browser::RedapServers;
 use re_redap_client::ConnectionRegistryHandle;
 use re_sdk_types::blueprint::components::{PanelState, PlayState};
@@ -17,10 +18,10 @@ use re_viewer_context::open_url::{self, ViewerOpenUrl};
 use re_viewer_context::{
     ActiveStoreContext, AppBlueprintCtx, AppContext, AppOptions, ApplicationSelectionState,
     AsyncRuntimeHandle, AuthContext, BlueprintContext, BlueprintUndoState, CommandSender,
-    ComponentUiRegistry, DragAndDropManager, FallbackProviderRegistry, FocusTarget, Item, Route,
-    SelectionChange, StorageContext, StoreHub, StoreViewContext, SystemCommand,
-    SystemCommandSender as _, TableStore, TimeControl, TimeControlCommand, ViewClassRegistry,
-    ViewStates, ViewerContext, blueprint_timeline,
+    ComponentUiRegistry, DragAndDropManager, FallbackProviderRegistry, FocusCommand, FocusTarget,
+    Item, ItemCollection, Route, SelectionChange, StorageContext, StoreHub, StoreViewContext,
+    SystemCommand, SystemCommandSender as _, TableStore, TimeControl, TimeControlCommand,
+    ViewClassRegistry, ViewId, ViewStates, ViewerContext, blueprint_timeline,
 };
 use re_viewport::ViewportUi;
 use re_viewport_blueprint::ViewportBlueprint;
@@ -119,6 +120,17 @@ pub struct AppState {
     #[serde(skip)]
     pub(crate) focused_item: Option<FocusTarget>,
 
+    /// Externally-driven framing command that arrived this frame, if any.
+    ///
+    /// Cleared every frame, like [`Self::focused_item`]: the selection is applied centrally, but
+    /// the camera move has to happen inside each view, where the eye and the scene bounds live.
+    #[serde(skip)]
+    pub(crate) focus_command: Option<FocusCommand>,
+
+    /// Row of the last framing command we acted on, so each command is applied exactly once.
+    #[serde(skip)]
+    pub(crate) last_applied_focus_command: Option<RowId>,
+
     /// Are we logged in?
     #[serde(skip)]
     pub(crate) auth_state: Option<AuthContext>,
@@ -147,6 +159,8 @@ impl Default for AppState {
             view_states: Default::default(),
             selection_state: Default::default(),
             focused_item: Default::default(),
+            focus_command: Default::default(),
+            last_applied_focus_command: Default::default(),
             auth_state: Default::default(),
 
             #[cfg(feature = "testing")]
@@ -307,6 +321,8 @@ impl AppState {
                     view_states,
                     selection_state,
                     focused_item,
+                    focus_command,
+                    last_applied_focus_command,
                     auth_state,
                     ..
                 } = self;
@@ -432,6 +448,15 @@ impl AppState {
                         .collect::<_>()
                 };
 
+                // Detect an externally-driven framing command before building the context, so
+                // that views can act on it during this same frame.
+                *focus_command = take_new_focus_command(
+                    recording,
+                    &query_results,
+                    command_sender,
+                    last_applied_focus_command,
+                );
+
                 let egui_ctx = ui.ctx().clone();
                 let ctx = ViewerContext {
                     app_ctx: AppContext {
@@ -455,6 +480,7 @@ impl AppState {
                         route,
                         selection_state,
                         focused_item,
+                        focus_command,
                         drag_and_drop_manager: &drag_and_drop_manager,
                         active_time_ctrl: Some(time_ctrl),
                         connected_receivers: rx_log,
@@ -835,6 +861,9 @@ impl AppState {
 
         // Reset the focused item.
         self.focused_item = None;
+
+        // Reset the framing command; views have had their frame to react to it.
+        self.focus_command = None;
     }
 
     pub fn time_control(&self, rec_id: &StoreId) -> Option<&TimeControl> {
@@ -1026,4 +1055,111 @@ impl re_byte_size::MemUsageTreeCapture for AppState {
         tree.add("view_states", self.view_states.total_size_bytes());
         tree.into_tree()
     }
+}
+
+/// Pick up a newly-arrived framing command and apply the half of it that is view-independent.
+///
+/// The selection is applied here, centrally, because sending it from inside each view would send
+/// it once per view. The camera move cannot be: it needs the eye and scene bounds that only exist
+/// inside a view's frame, so the command is handed to the views via
+/// [`re_viewer_context::ViewerContext::focus_command`] instead.
+///
+/// Returns `None` when there is no command, when the newest one has already been applied, or when
+/// it is rejected — so a command is acted on exactly once.
+fn take_new_focus_command(
+    recording: &re_entity_db::EntityDb,
+    query_results: &ahash::HashMap<ViewId, re_viewer_context::DataQueryResult>,
+    command_sender: &re_viewer_context::CommandSender,
+    last_applied: &mut Option<RowId>,
+) -> Option<FocusCommand> {
+    let (row_id, command) = FocusCommand::latest_from_db(recording)?;
+
+    if *last_applied == Some(row_id) {
+        return None;
+    }
+
+    // Which views can show something for each requested path? A path contributes its whole
+    // subtree, so `/robot` counts as present when only `/robot/link_3` carries data.
+    let mut views_per_path: Vec<(&EntityPath, Vec<ViewId>)> = Vec::new();
+    for path in &command.entity_paths {
+        let views = query_results
+            .iter()
+            .filter(|(_, result)| {
+                result
+                    .tree
+                    .iter_data_results()
+                    .any(|data_result| data_result.entity_path.starts_with(path))
+            })
+            .map(|(view_id, _)| *view_id)
+            .collect();
+        views_per_path.push((path, views));
+    }
+
+    let unresolved: Vec<&EntityPath> = views_per_path
+        .iter()
+        .filter(|(_, views)| views.is_empty())
+        .map(|(path, _)| *path)
+        .collect();
+
+    if !unresolved.is_empty() {
+        // A path no view shows is not necessarily a bad path: a command can arrive before the
+        // entities it names are logged, or before auto-layout has created a view to show them
+        // in. Distinguish the two by asking the store, and leave `last_applied` alone in the
+        // not-yet case so the command is retried on later frames rather than lost.
+        let known_to_store = recording.storage_engine().store().all_entities();
+        let missing_from_store: Vec<&EntityPath> = unresolved
+            .iter()
+            .copied()
+            .filter(|path| !known_to_store.iter().any(|known| known.starts_with(path)))
+            .collect();
+
+        if missing_from_store.is_empty() {
+            // Present in the store, not yet visible in any view. Try again next frame.
+            return None;
+        }
+
+        // Reject the whole command: a partly applied framing is more confusing than none —
+        // and silence would look like the feature is broken, hence the warning.
+        re_log::warn_once!(
+            "Ignoring focus command: {} of {} entity path(s) do not exist in this recording, \
+             starting with {:?}. The whole command is ignored so that the framing cannot be \
+             misleading.",
+            missing_from_store.len(),
+            command.entity_paths.len(),
+            missing_from_store
+                .first()
+                .map(|path| path.to_string())
+                .unwrap_or_default(),
+        );
+        *last_applied = Some(row_id);
+        return None;
+    }
+
+    *last_applied = Some(row_id);
+
+    // `Item::DataResult` rather than `Item::InstancePath`: only the former gets the
+    // full-strength `SelectionHighlight::Selection` in `highlights_for_view`, so selecting by
+    // instance path would highlight more faintly than an ordinary click does.
+    let items = views_per_path
+        .into_iter()
+        .flat_map(|(path, views)| {
+            views.into_iter().map(move |view_id| {
+                (
+                    Item::DataResult(re_viewer_context::DataResultInteractionAddress {
+                        view_id,
+                        instance_path: re_entity_db::InstancePath::entity_all(path.clone()),
+                        visualizer: None,
+                    }),
+                    None,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+
+    // An empty collection clears the selection, which is what an empty command asks for.
+    command_sender.send_system(SystemCommand::set_selection(
+        ItemCollection::from_items_and_context(items),
+    ));
+
+    Some(command)
 }

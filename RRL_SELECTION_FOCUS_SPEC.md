@@ -1,6 +1,6 @@
 # Build sheet: SDK-driven selection + camera framing
 
-**Status:** Decided, ready to build · **Target:** `Enodo-Robotics/rerun` fork (at `RRL-v3.0.4`)
+**Status:** Implemented on `oscar-v3.1.0`; verified in a live viewer · **Target:** `Enodo-Robotics/rerun` fork (at `RRL-v3.0.4`)
 **Date:** 2026-09-10 · Rationale and rejected options are in the appendices.
 
 ## What we are building
@@ -103,6 +103,39 @@ components the viewer already writes on every drag frame.
 - Manual: a probe script logging entities plus commands, driven at cursor rate.
 - `egui_kittest` snapshots would suit the outline change, but `git-lfs` is not installed here — CI
   only, or install it first.
+
+## Implementation notes (2026-09-10)
+
+All six work items are built. What testing changed:
+
+**A timing bug the screenshot test caught.** A command is in the store the moment a recording
+loads, but auto-layout has not created any view yet — so "no view shows this path" was true, the
+command was marked applied, and it was lost forever. The first end-to-end run reproduced this
+exactly, with the rejection warning explaining itself. Fixed by distinguishing the two cases:
+absent from the *store* is a bad command (reject once, warn), while present-but-not-yet-in-a-view
+is retried on later frames. Without this, any command arriving before its entities were logged, or
+before layout settled, would silently do nothing.
+
+**Framing is tighter than "everything visible".** With the agreed 1.5× bounding-sphere distance, a
+2×2×2 box slightly overflowed the frame in the live test — its bounding sphere has radius √3, and
+1.5√3 ≈ 2.6 is closer than a geometric fit needs. This is faithful to double-click focus, which
+has the same behaviour, so it was left alone. If "maximize % coverage" should mean "nothing
+clipped", the fix is the one already noted in work item 2: `r / sin(fov_y/2)`.
+
+**Verified in a real viewer** (headless via `xvfb-run`, screenshot compared against a
+no-command control): the camera framed the requested subtree, the box carried a thick white
+selection outline — proving both the full-strength `Selection` highlight and the 3× emphasis — and
+no rejection warning fired. Separately confirmed: a command logged through the fork's sink appears
+in **no** rotated `.rrd`, while the geometry does.
+
+**Tests:** 8 unit tests on the pure `framing_pose` arithmetic, 8 on command parsing (including the
+empty-list unhover case, `LargeString`/numeric tolerance, and that a later command changes the
+row id so it re-fires). `re_view_spatial`'s two `test_help_view` snapshot tests fail here for lack
+of `git-lfs`, as predicted, and are unrelated.
+
+**Incidental fix:** `re_test_context` had a non-exhaustive `SystemCommand` match — the fork's
+annotation work added variants without updating it — which broke `--all-features` test builds for
+every viewer crate.
 
 ## Open
 

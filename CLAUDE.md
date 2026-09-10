@@ -219,3 +219,39 @@ rerun --serve-grpc \
 ```
 
 Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `Sinks`, `classify`, `rewrite_application_id`, `span_path`, `partial_path`, `finalize_segment`). Unit tests for the path builders are in the `tests` module at the bottom of that file. Static vs temporal classification is done by parsing each `ArrowMsg` into a `re_chunk::Chunk` and calling `is_static()`.
+
+### Externally-driven selection and camera framing
+
+An application outside the viewer can ask it to select entities and frame the camera on them, by
+logging a command to the reserved entity path `viewer/_command/focus`:
+
+```python
+rerun.enodo.focus_entities(["/world/robot/arm"], do_pan=True, do_rotate=False)
+rerun.enodo.focus_entities([])  # clear the selection, reframe the whole scene
+```
+
+Cheap enough to drive from a hover handler. Every 3D view containing at least one named entity
+reframes; each path contributes its whole subtree, so `/robot` frames the meshes at
+`/robot/link_3`. `do_rotate` re-aims the camera from where it stands (rotation about the camera,
+not the orbit pivot); `do_pan` moves it to fit. The move is an eased glide re-based from the live
+pose on each command, so a rapid sweep reads as pursuit.
+
+The viewer knows nothing about what sent a command — debounce and hover policy belong to the
+driver. A command naming a path absent from the recording is rejected whole, with a warning; a path
+that exists but is not yet shown by any view is retried on later frames, so a command that arrives
+before layout settles is not lost.
+
+Commands never reach a saved `.rrd`: `classify` routes anything under
+`re_log_types::VIEWER_COMMAND_ENTITY_PATH_PREFIX` to `MsgRoute::Drop`.
+
+Implementation: `FocusCommand` (`crates/viewer/re_viewer_context/src/focus_command.rs`) parses the
+command; `take_new_focus_command` (`crates/viewer/re_viewer/src/app_state.rs`) applies the
+selection once per command and hands it to views via `ViewerContext::focus_command`;
+`EyeState::frame_bounding_box` and the pure `framing_pose` (`re_view_spatial/src/eye.rs`) do the
+camera arithmetic. Selection uses `Item::DataResult`, not `Item::InstancePath`, because only the
+former gets the full-strength highlight. Design notes and rejected alternatives:
+`RRL_SELECTION_FOCUS_SPEC.md`.
+
+Selection outlines are drawn `OUTLINE_EMPHASIS` (3x) thicker than the egui theme asks for
+(`crates/viewer/re_view/src/outlines.rs`), since theme widths are tuned for 2D widget strokes and
+are too subtle to pick an entity out of a dense 3D scene.

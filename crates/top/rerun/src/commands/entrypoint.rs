@@ -1617,10 +1617,15 @@ fn parse_size(size: &str) -> anyhow::Result<[f32; 2]> {
 enum MsgRoute {
     /// Goes to the temporal sink only (or nowhere if no temporal sink).
     Temporal,
+
     /// Goes to the static sink only (or falls back to the temporal sink if no static sink).
     Static,
+
     /// Duplicated to both sinks (e.g. `SetStoreInfo` so each file is independently loadable).
     Both,
+
+    /// Goes nowhere: this is a live instruction to the viewer, not recording content.
+    Drop,
 }
 
 fn classify(msg: &re_log_types::LogMsg) -> MsgRoute {
@@ -1629,6 +1634,18 @@ fn classify(msg: &re_log_types::LogMsg) -> MsgRoute {
         re_log_types::LogMsg::BlueprintActivationCommand(_) => MsgRoute::Static,
         re_log_types::LogMsg::ArrowMsg(_, arrow_msg) => {
             match re_chunk::Chunk::from_arrow_msg(arrow_msg) {
+                Ok(chunk)
+                    if chunk
+                        .entity_path()
+                        .starts_with(&re_log_types::EntityPath::from(
+                            re_log_types::VIEWER_COMMAND_ENTITY_PATH_PREFIX,
+                        )) =>
+                {
+                    // Commands from a driving application steer the live viewer. Persisting
+                    // them would replay someone's UI interactions on every later read of the
+                    // file, and would bloat every rotated segment we upload.
+                    MsgRoute::Drop
+                }
                 Ok(chunk) if chunk.is_static() => MsgRoute::Static,
                 _ => MsgRoute::Temporal,
             }
@@ -1685,6 +1702,7 @@ impl Sinks {
                     s.append(msg)?;
                 }
             }
+            MsgRoute::Drop => {}
             MsgRoute::Both => {
                 if let Some(t) = self.temporal.as_mut() {
                     t.append(msg)?;

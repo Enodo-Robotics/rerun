@@ -229,6 +229,13 @@ impl<'a> ViewerContext<'a> {
         self.app_ctx.focused_item()
     }
 
+    /// An externally-driven framing command that arrived this frame, if any.
+    ///
+    /// Views read this to move their camera; the selection half is applied centrally.
+    pub fn focus_command(&self) -> Option<&crate::FocusCommand> {
+        self.app_ctx.focus_command()
+    }
+
     /// Helper object to manage drag-and-drop operations.
     pub fn drag_and_drop_manager(&self) -> &DragAndDropManager {
         self.app_ctx.drag_and_drop_manager()

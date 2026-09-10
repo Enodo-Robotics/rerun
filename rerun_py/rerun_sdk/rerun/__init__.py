@@ -26,6 +26,7 @@ import rerun_bindings as bindings
 from . import (
     blueprint as blueprint,
     catalog as catalog,
+    enodo as enodo,
     experimental as experimental,
     recording as recording,
     server as server,

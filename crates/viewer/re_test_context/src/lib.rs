@@ -64,6 +64,9 @@ pub struct TestContext {
     pub selection_state: Mutex<ApplicationSelectionState>,
     pub focused_item: Mutex<Option<re_viewer_context::FocusTarget>>,
 
+    /// Externally-driven framing command, as if one had arrived this frame.
+    pub focus_command: Mutex<Option<re_viewer_context::FocusCommand>>,
+
     // RwLock so we can have `handle_system_commands` take an immutable reference to self.
     pub time_ctrl: RwLock<TimeControl>,
     pub view_states: Mutex<ViewStates>,
@@ -298,6 +301,7 @@ impl TestContext {
             view_class_registry: Default::default(),
             selection_state: Default::default(),
             focused_item: Default::default(),
+            focus_command: Default::default(),
             time_ctrl: RwLock::new(time_ctrl),
             view_states: Default::default(),
             blueprint_query,
@@ -656,6 +660,7 @@ impl TestContext {
 
         let mut selection_state = self.selection_state.lock();
         let mut focused_item = self.focused_item.lock();
+        let focus_command = self.focus_command.lock();
 
         let ctx = ViewerContext {
             app_ctx: AppContext {
@@ -685,6 +690,7 @@ impl TestContext {
 
                 selection_state: &selection_state,
                 focused_item: &focused_item,
+                focus_command: &focus_command,
                 drag_and_drop_manager: &drag_and_drop_manager,
                 active_time_ctrl: Some(&self.time_ctrl.read()),
                 connected_receivers: &Default::default(),
@@ -940,7 +946,13 @@ impl TestContext {
                 | SystemCommand::Logout
                 | SystemCommand::SaveScreenshot { .. }
                 | SystemCommand::ShowNotification { .. }
-                | SystemCommand::ReadbackAndSaveTexture(_) => handled = false,
+                | SystemCommand::ReadbackAndSaveTexture(_)
+                // Fork-added commands (annotations, framing). The test context has no viewer
+                // to apply them to, so they are ignored like the rest.
+                | SystemCommand::AddAnnotation { .. }
+                | SystemCommand::ClearAnnotation { .. }
+                | SystemCommand::UpdateRecording(..)
+                | SystemCommand::ExportAnnotations { .. } => handled = false,
 
                 #[cfg(debug_assertions)]
                 SystemCommand::EnableInspectBlueprintTimeline(_) => handled = false,
