@@ -33,7 +33,8 @@ pub use instance_hash_conversions::{
     instance_path_hash_from_picking_layer_id, picking_layer_id_from_instance_path_hash,
 };
 pub use outlines::{
-    SIZE_BOOST_IN_POINTS_FOR_LINE_OUTLINES, SIZE_BOOST_IN_POINTS_FOR_POINT_OUTLINES, outline_config,
+    SELECTION_OUTLINE_COLOR, SIZE_BOOST_IN_POINTS_FOR_LINE_OUTLINES,
+    SIZE_BOOST_IN_POINTS_FOR_POINT_OUTLINES, outline_config, outline_config_with_selection_color,
 };
 pub use query::{
     DataResultQuery, latest_at_with_blueprint_resolved_data, range_with_blueprint_resolved_data,

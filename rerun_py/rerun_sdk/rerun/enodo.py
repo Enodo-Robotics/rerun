@@ -28,6 +28,7 @@ def focus_entities(
     *,
     do_pan: bool = True,
     do_rotate: bool = False,
+    color: Sequence[int] | None = None,
     recording: RecordingStream | None = None,
 ) -> None:
     """
@@ -56,6 +57,10 @@ def focus_entities(
         Re-aim the camera at the entities from wherever it currently stands. The rotation happens
         about the camera position rather than about the orbit pivot, so with `do_pan=False` the
         camera turns in place and the entities may stay small in frame.
+    color:
+        Optional highlight colour for this command, as 3 or 4 values in `0..=255` (RGB or RGBA),
+        letting you colour-code what is being pointed at. Defaults to the viewer's high-visibility
+        selection colour. The colour applies to everything this command selected, not per entity.
     recording:
         Specifies the [`rerun.RecordingStream`][] to use. If left unspecified, defaults to the
         current active data recording, if there is one.
@@ -65,6 +70,9 @@ def focus_entities(
     ```python
     # Hovering a list element:
     rerun.enodo.focus_entities(["/world/robot/arm", "/world/robot/gripper"])
+
+    # Colour-coded by category:
+    rerun.enodo.focus_entities(["/world/robot/arm"], color=(255, 140, 0))
 
     # Pointer left the list — back to the whole scene:
     rerun.enodo.focus_entities([])
@@ -85,6 +93,7 @@ def focus_entities(
             paths=pa.array([str(path) for path in paths], type=pa.string()),
             do_pan=pa.array([bool(do_pan)], type=pa.bool_()),
             do_rotate=pa.array([bool(do_rotate)], type=pa.bool_()),
+            color=(pa.array([int(channel) for channel in color], type=pa.int64()) if color is not None else None),
         ),
         # Static, so the command is timeline-independent: the viewer reads whichever was logged
         # last, no matter where the time cursor happens to sit.

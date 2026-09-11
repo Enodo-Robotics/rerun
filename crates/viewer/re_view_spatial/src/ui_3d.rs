@@ -280,10 +280,15 @@ impl SpatialView3D {
 
             pixels_per_point: ui.pixels_per_point(),
 
-            outline_config: query
-                .highlights
-                .any_outlines()
-                .then(|| re_view::outline_config(ui.ctx())),
+            outline_config: query.highlights.any_outlines().then(|| {
+                // A framing command may carry its own highlight colour, so a driver can
+                // colour-code what it is pointing at.
+                re_view::outline_config_with_selection_color(
+                    ui.ctx(),
+                    ctx.focus_command()
+                        .and_then(|(_, command)| command.outline_color),
+                )
+            }),
             blend_with_background: false,
             picking_config,
         };

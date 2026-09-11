@@ -27,6 +27,9 @@ const COMPONENT_DO_PAN: &str = "do_pan";
 /// Component holding the `do_rotate` flag.
 const COMPONENT_DO_ROTATE: &str = "do_rotate";
 
+/// Component holding an optional highlight colour, as 3 or 4 numbers in `0..=255`.
+const COMPONENT_COLOR: &str = "color";
+
 /// A request to select some entities and frame the camera on them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FocusCommand {
@@ -43,6 +46,12 @@ pub struct FocusCommand {
 
     /// Re-aim the camera at the entities from wherever it currently stands.
     pub do_rotate: bool,
+
+    /// Colour for the selection outline, if the driver chose one.
+    ///
+    /// Lets a driver colour-code what it is pointing at. `None` uses the viewer's default.
+    /// Applies per view rather than per entity, so everything this command selected shares it.
+    pub outline_color: Option<egui::Color32>,
 }
 
 impl FocusCommand {
@@ -61,11 +70,18 @@ impl FocusCommand {
         let do_pan_component = ComponentIdentifier::from(COMPONENT_DO_PAN);
         let do_rotate_component = ComponentIdentifier::from(COMPONENT_DO_ROTATE);
 
+        let color_component = ComponentIdentifier::from(COMPONENT_COLOR);
+
         let query = LatestAtQuery::latest(TimelineName::log_time());
         let results = entity_db.latest_at(
             &query,
             &entity_path,
-            [paths_component, do_pan_component, do_rotate_component],
+            [
+                paths_component,
+                do_pan_component,
+                do_rotate_component,
+                color_component,
+            ],
         );
 
         // A latest-at query resolves each component independently, and static data is never
@@ -94,12 +110,20 @@ impl FocusCommand {
             bool_from_arrow(&array)
         };
 
+        // Same same-row rule as the flags: a colour left over from an earlier command must not
+        // bleed into this one.
+        let outline_color = (results.component_row_id(color_component) == Some(row_id))
+            .then(|| results.component_batch_raw(color_component))
+            .flatten()
+            .and_then(|array| color_from_arrow(&array));
+
         Some((
             row_id,
             Self {
                 entity_paths,
                 do_pan: flag(do_pan_component).unwrap_or(true),
                 do_rotate: flag(do_rotate_component).unwrap_or(false),
+                outline_color,
             },
         ))
     }
@@ -357,11 +381,82 @@ mod tests {
     }
 
     #[test]
+    fn reads_an_optional_highlight_colour() {
+        let (db, _) = db_with_command(vec![
+            ("paths", strings(&["/world/robot"])),
+            ("color", Arc::new(Int64Array::from(vec![255_i64, 140, 0]))),
+        ]);
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(
+            command.outline_color,
+            Some(egui::Color32::from_rgb(255, 140, 0))
+        );
+    }
+
+    #[test]
+    fn a_colour_with_alpha_is_read_too() {
+        let (db, _) = db_with_command(vec![
+            ("paths", strings(&["/world/robot"])),
+            (
+                "color",
+                Arc::new(Int64Array::from(vec![10_i64, 20, 30, 128])),
+            ),
+        ]);
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(
+            command.outline_color,
+            Some(egui::Color32::from_rgba_unmultiplied(10, 20, 30, 128))
+        );
+    }
+
+    #[test]
+    fn no_colour_means_the_viewer_default() {
+        let (db, _) = db_with_command(vec![("paths", strings(&["/world/robot"]))]);
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(command.outline_color, None);
+    }
+
+    #[test]
+    fn a_stale_colour_does_not_bleed_into_a_later_command() {
+        // Static data is never cleared, so a colour set by an earlier command is still the
+        // latest value of that component.
+        let mut db = empty_db();
+        add_command(
+            &mut db,
+            vec![
+                ("paths", strings(&["/first"])),
+                ("color", Arc::new(Int64Array::from(vec![255_i64, 0, 0]))),
+            ],
+        );
+        add_command(&mut db, vec![("paths", strings(&["/second"]))]);
+
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(
+            command.outline_color, None,
+            "colour leaked from the earlier command"
+        );
+    }
+
+    #[test]
+    fn a_malformed_colour_falls_back_to_the_default() {
+        // Unlike `paths`, a bad colour is cosmetic — worth a warning, not worth dropping the
+        // whole command over.
+        let (db, _) = db_with_command(vec![
+            ("paths", strings(&["/world/robot"])),
+            ("color", Arc::new(Int64Array::from(vec![1_i64, 2]))), // Too few channels.
+        ]);
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(command.outline_color, None);
+        assert_eq!(command.entity_paths, vec![EntityPath::from("/world/robot")]);
+    }
+
+    #[test]
     fn moves_camera_reflects_the_flags() {
         let command = FocusCommand {
             entity_paths: vec![],
             do_pan: false,
             do_rotate: false,
+            outline_color: None,
         };
         assert!(!command.moves_camera());
         assert!(
@@ -379,4 +474,50 @@ mod tests {
             .moves_camera()
         );
     }
+}
+
+/// Read a colour from an arrow array of 3 or 4 numbers in `0..=255` (RGB or RGBA).
+fn color_from_arrow(array: &ArrayRef) -> Option<egui::Color32> {
+    use arrow::datatypes::DataType;
+
+    if !matches!(
+        array.data_type(),
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        re_log::warn_once!(
+            "Focus command: `{COMPONENT_COLOR}` should be 3 or 4 numbers in 0..=255, but it is {:?}.",
+            array.data_type()
+        );
+        return None;
+    }
+
+    let array = arrow::compute::cast(array, &DataType::Int64).ok()?;
+    let array = array.as_any().downcast_ref::<arrow::array::Int64Array>()?;
+
+    if array.len() != 3 && array.len() != 4 {
+        re_log::warn_once!(
+            "Focus command: `{COMPONENT_COLOR}` should have 3 or 4 values, got {}.",
+            array.len()
+        );
+        return None;
+    }
+
+    let channel = |i: usize| array.value(i).clamp(0, 255) as u8;
+
+    // Not a hard-coded colour: this one comes from the driving application, so there is no
+    // design token to declare.
+    #[expect(clippy::disallowed_methods)]
+    Some(egui::Color32::from_rgba_unmultiplied(
+        channel(0),
+        channel(1),
+        channel(2),
+        if array.len() == 4 { channel(3) } else { 255 },
+    ))
 }

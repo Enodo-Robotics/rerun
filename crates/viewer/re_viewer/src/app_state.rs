@@ -899,8 +899,10 @@ impl AppState {
         // Reset the focused item.
         self.focused_item = None;
 
-        // Reset the framing command; views have had their frame to react to it.
-        self.focus_command = None;
+        // NOTE: `focus_command` is deliberately *not* cleared here. Unlike `focused_item`, it has
+        // to outlive its arrival frame: the selection it triggers is applied by a system command,
+        // so outlines are not drawn until the frame after, and a view in a background tab may not
+        // render for many frames. Views apply each command at most once by row id instead.
     }
 
     pub fn time_control(&self, rec_id: &StoreId) -> Option<&TimeControl> {
@@ -1123,26 +1125,30 @@ fn take_new_focus_command(
         return None;
     }
 
-    // Which views can show something for each requested path? A path contributes its whole
-    // subtree, so `/robot` counts as present when only `/robot/link_3` carries data.
-    let mut views_per_path: Vec<(&EntityPath, Vec<ViewId>)> = Vec::new();
+    // Which data results does each requested path cover? A path contributes its whole subtree,
+    // so `/robot` matches the entity that actually carries geometry at `/robot/link_3`.
+    //
+    // The matched entities — not the requested path — are what gets selected. Highlights are
+    // keyed by entity, so selecting the bare `/robot` would frame the arm correctly and then
+    // highlight nothing at all.
+    let mut matches_per_path: Vec<(&EntityPath, Vec<(ViewId, EntityPath)>)> = Vec::new();
     for path in &command.entity_paths {
-        let views = query_results
+        let matches = query_results
             .iter()
-            .filter(|(_, result)| {
+            .flat_map(|(view_id, result)| {
                 result
                     .tree
                     .iter_data_results()
-                    .any(|data_result| data_result.entity_path.starts_with(path))
+                    .filter(|data_result| data_result.entity_path.starts_with(path))
+                    .map(move |data_result| (*view_id, data_result.entity_path.clone()))
             })
-            .map(|(view_id, _)| *view_id)
             .collect();
-        views_per_path.push((path, views));
+        matches_per_path.push((path, matches));
     }
 
-    let unresolved: Vec<&EntityPath> = views_per_path
+    let unresolved: Vec<&EntityPath> = matches_per_path
         .iter()
-        .filter(|(_, views)| views.is_empty())
+        .filter(|(_, matches)| matches.is_empty())
         .map(|(path, _)| *path)
         .collect();
 
@@ -1205,19 +1211,18 @@ fn take_new_focus_command(
     // `Item::DataResult` rather than `Item::InstancePath`: only the former gets the
     // full-strength `SelectionHighlight::Selection` in `highlights_for_view`, so selecting by
     // instance path would highlight more faintly than an ordinary click does.
-    let items = views_per_path
+    let items = matches_per_path
         .into_iter()
-        .flat_map(|(path, views)| {
-            views.into_iter().map(move |view_id| {
-                (
-                    Item::DataResult(re_viewer_context::DataResultInteractionAddress {
-                        view_id,
-                        instance_path: re_entity_db::InstancePath::entity_all(path.clone()),
-                        visualizer: None,
-                    }),
-                    None,
-                )
-            })
+        .flat_map(|(_, matches)| matches)
+        .map(|(view_id, entity_path)| {
+            (
+                Item::DataResult(re_viewer_context::DataResultInteractionAddress {
+                    view_id,
+                    instance_path: re_entity_db::InstancePath::entity_all(entity_path),
+                    visualizer: None,
+                }),
+                None,
+            )
         })
         .collect::<Vec<_>>();
 

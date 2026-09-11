@@ -166,10 +166,12 @@ An adversarial review of the committed code found several real defects, all now 
   false for NaN, so a NaN box produced a NaN camera that was written to the blueprint. Now guarded
   in both the view and `framing_pose`.
 
-One finding did **not** reproduce: the review claimed selection uses the exact path while framing
-uses the subtree, so naming a parent would outline nothing. Tested directly — geometry only at
-`/world/right/inner`, one command naming the parent and one the leaf — and both produce the
-outline. Left as-is, unexplained.
+The review also claimed selection used the exact path while framing used the subtree, so naming a
+parent would outline nothing. That was **dismissed in error**: the test "disproving" it was
+screenshotted headlessly, where the X server parks the pointer at screen centre — on the framed
+box — so the white outline being read as *selection* was actually *hover*. Once the selection
+colour became orange and distinguishable, the finding reproduced immediately. Selection now
+resolves each requested path to the data results beneath it, matching the framing semantics.
 
 Re-verified after the fixes, three-way: no command (two boxes, default framing, no outline), a
 focus command (subgroup framed and outlined), and an empty command (framing restored, selection
