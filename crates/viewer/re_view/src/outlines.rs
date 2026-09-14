@@ -48,20 +48,43 @@ pub fn outline_config(gui_ctx: &egui::Context) -> re_renderer::OutlineConfig {
     }
 }
 
-/// As [`outline_config`], but with the selection outline in a caller-chosen colour.
+/// Bounds on the per-command outline width multiplier.
 ///
-/// Used to let an externally-driven framing command pick its own highlight colour, so a driver can
-/// colour-code what it is pointing at. `None` keeps [`SELECTION_OUTLINE_COLOR`].
+/// A driver sends these, so they need a floor that stays visible and a ceiling that cannot fill
+/// the viewport with halo.
+pub const OUTLINE_WIDTH_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.25..=8.0;
+
+/// As [`outline_config`], but with the selection outline overridden by a caller.
 ///
-/// The colour is per view, not per entity — [`re_renderer::OutlineConfig`] has one colour per
-/// outline layer — so everything selected in a view shares it.
-pub fn outline_config_with_selection_color(
+/// Lets an externally-driven framing command pick its own highlight colour and thickness, so a
+/// driver can colour-code or emphasise what it is pointing at. `None` keeps the defaults.
+///
+/// Two caveats, both from [`re_renderer::OutlineConfig`]'s shape:
+/// - The colour is per view, not per entity — there is one colour per outline layer — so
+///   everything selected in a view shares it.
+/// - The width is a single value shared by *both* layers, so scaling it thickens the hover
+///   outline in that view too. Separating them would mean carrying two radii through the
+///   renderer's jump-flood pass.
+pub fn outline_config_with_overrides(
     gui_ctx: &egui::Context,
     selection_color: Option<egui::Color32>,
+    width_scale: Option<f32>,
 ) -> re_renderer::OutlineConfig {
     let mut config = outline_config(gui_ctx);
+
     if let Some(color) = selection_color {
         config.color_layer_b = re_renderer::Rgba::from(color);
     }
+
+    if let Some(scale) = width_scale {
+        // A multiplier rather than a pixel count, so it scales with DPI and survives any later
+        // change to `OUTLINE_EMPHASIS`.
+        let scale = scale.clamp(
+            *OUTLINE_WIDTH_SCALE_RANGE.start(),
+            *OUTLINE_WIDTH_SCALE_RANGE.end(),
+        );
+        config.outline_radius_pixel = (config.outline_radius_pixel * scale).at_least(0.5);
+    }
+
     config
 }

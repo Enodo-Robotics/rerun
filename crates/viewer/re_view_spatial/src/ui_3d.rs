@@ -283,10 +283,11 @@ impl SpatialView3D {
             outline_config: query.highlights.any_outlines().then(|| {
                 // A framing command may carry its own highlight colour, so a driver can
                 // colour-code what it is pointing at.
-                re_view::outline_config_with_selection_color(
+                let command = ctx.focus_command().map(|(_, command)| command);
+                re_view::outline_config_with_overrides(
                     ui.ctx(),
-                    ctx.focus_command()
-                        .and_then(|(_, command)| command.outline_color),
+                    command.and_then(|command| command.outline_color),
+                    command.and_then(|command| command.outline_width_scale),
                 )
             }),
             blend_with_background: false,

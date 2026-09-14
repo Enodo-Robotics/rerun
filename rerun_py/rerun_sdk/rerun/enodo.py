@@ -29,6 +29,7 @@ def focus_entities(
     do_pan: bool = True,
     do_rotate: bool = False,
     color: Sequence[int] | None = None,
+    width: float | None = None,
     recording: RecordingStream | None = None,
 ) -> None:
     """
@@ -61,6 +62,10 @@ def focus_entities(
         Optional highlight colour for this command, as 3 or 4 values in `0..=255` (RGB or RGBA),
         letting you colour-code what is being pointed at. Defaults to the viewer's high-visibility
         selection colour. The colour applies to everything this command selected, not per entity.
+    width:
+        Optional multiplier on the outline thickness, e.g. `2.0` for twice the viewer's default
+        emphasis. Clamped by the viewer to a sane range. Unlike the colour, this also thickens the
+        hover outline in the same view, because the renderer keeps one radius for both layers.
     recording:
         Specifies the [`rerun.RecordingStream`][] to use. If left unspecified, defaults to the
         current active data recording, if there is one.
@@ -71,8 +76,8 @@ def focus_entities(
     # Hovering a list element:
     rerun.enodo.focus_entities(["/world/robot/arm", "/world/robot/gripper"])
 
-    # Colour-coded by category:
-    rerun.enodo.focus_entities(["/world/robot/arm"], color=(255, 140, 0))
+    # Colour-coded by category, with a fatter outline:
+    rerun.enodo.focus_entities(["/world/robot/arm"], color=(255, 140, 0), width=2.0)
 
     # Pointer left the list — back to the whole scene:
     rerun.enodo.focus_entities([])
@@ -94,6 +99,7 @@ def focus_entities(
             do_pan=pa.array([bool(do_pan)], type=pa.bool_()),
             do_rotate=pa.array([bool(do_rotate)], type=pa.bool_()),
             color=(pa.array([int(channel) for channel in color], type=pa.int64()) if color is not None else None),
+            width=(pa.array([float(width)], type=pa.float64()) if width is not None else None),
         ),
         # Static, so the command is timeline-independent: the viewer reads whichever was logged
         # last, no matter where the time cursor happens to sit.

@@ -30,8 +30,11 @@ const COMPONENT_DO_ROTATE: &str = "do_rotate";
 /// Component holding an optional highlight colour, as 3 or 4 numbers in `0..=255`.
 const COMPONENT_COLOR: &str = "color";
 
+/// Component holding an optional outline width multiplier.
+const COMPONENT_WIDTH: &str = "width";
+
 /// A request to select some entities and frame the camera on them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FocusCommand {
     /// Entities to select and frame.
     ///
@@ -52,6 +55,13 @@ pub struct FocusCommand {
     /// Lets a driver colour-code what it is pointing at. `None` uses the viewer's default.
     /// Applies per view rather than per entity, so everything this command selected shares it.
     pub outline_color: Option<egui::Color32>,
+
+    /// Multiplier on the outline thickness, if the driver chose one.
+    ///
+    /// `None` uses the viewer's default emphasis. Clamped by the viewer, and — unlike the colour
+    /// — it thickens the hover outline in the same view too, because the renderer keeps one
+    /// radius for both outline layers.
+    pub outline_width_scale: Option<f32>,
 }
 
 impl FocusCommand {
@@ -71,6 +81,7 @@ impl FocusCommand {
         let do_rotate_component = ComponentIdentifier::from(COMPONENT_DO_ROTATE);
 
         let color_component = ComponentIdentifier::from(COMPONENT_COLOR);
+        let width_component = ComponentIdentifier::from(COMPONENT_WIDTH);
 
         let query = LatestAtQuery::latest(TimelineName::log_time());
         let results = entity_db.latest_at(
@@ -81,6 +92,7 @@ impl FocusCommand {
                 do_pan_component,
                 do_rotate_component,
                 color_component,
+                width_component,
             ],
         );
 
@@ -117,6 +129,11 @@ impl FocusCommand {
             .flatten()
             .and_then(|array| color_from_arrow(&array));
 
+        let outline_width_scale = (results.component_row_id(width_component) == Some(row_id))
+            .then(|| results.component_batch_raw(width_component))
+            .flatten()
+            .and_then(|array| f32_from_arrow(&array));
+
         Some((
             row_id,
             Self {
@@ -124,6 +141,7 @@ impl FocusCommand {
                 do_pan: flag(do_pan_component).unwrap_or(true),
                 do_rotate: flag(do_rotate_component).unwrap_or(false),
                 outline_color,
+                outline_width_scale,
             },
         ))
     }
@@ -212,7 +230,9 @@ fn bool_from_arrow(array: &ArrayRef) -> Option<bool> {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, BooleanArray, Int64Array, LargeStringArray, StringArray};
+    use arrow::array::{
+        ArrayRef, BooleanArray, Float64Array, Int64Array, LargeStringArray, StringArray,
+    };
 
     use re_chunk::{Chunk, ChunkId, RowId, TimePoint};
     use re_entity_db::EntityDb;
@@ -451,12 +471,49 @@ mod tests {
     }
 
     #[test]
+    fn reads_an_optional_width_multiplier() {
+        let (db, _) = db_with_command(vec![
+            ("paths", strings(&["/world/robot"])),
+            ("width", Arc::new(Float64Array::from(vec![2.5_f64]))),
+        ]);
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(command.outline_width_scale, Some(2.5));
+    }
+
+    #[test]
+    fn an_integer_width_is_accepted_too() {
+        let (db, _) = db_with_command(vec![
+            ("paths", strings(&["/world/robot"])),
+            ("width", Arc::new(Int64Array::from(vec![3_i64]))),
+        ]);
+        let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+        assert_eq!(command.outline_width_scale, Some(3.0));
+    }
+
+    #[test]
+    fn a_nonsensical_width_falls_back_to_the_default() {
+        // Zero or negative would make the outline vanish; NaN would poison the radius.
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY] {
+            let (db, _) = db_with_command(vec![
+                ("paths", strings(&["/world/robot"])),
+                ("width", Arc::new(Float64Array::from(vec![bad]))),
+            ]);
+            let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
+            assert_eq!(
+                command.outline_width_scale, None,
+                "accepted a width of {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn moves_camera_reflects_the_flags() {
         let command = FocusCommand {
             entity_paths: vec![],
             do_pan: false,
             do_rotate: false,
             outline_color: None,
+            outline_width_scale: None,
         };
         assert!(!command.moves_camera());
         assert!(
@@ -520,4 +577,42 @@ fn color_from_arrow(array: &ArrayRef) -> Option<egui::Color32> {
         channel(2),
         if array.len() == 4 { channel(3) } else { 255 },
     ))
+}
+
+/// Read a single finite, positive number from an arrow array.
+fn f32_from_arrow(array: &ArrayRef) -> Option<f32> {
+    use arrow::datatypes::DataType;
+
+    if !matches!(
+        array.data_type(),
+        DataType::Float32
+            | DataType::Float64
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        re_log::warn_once!(
+            "Focus command: `{COMPONENT_WIDTH}` should be a number, but it is {:?}.",
+            array.data_type()
+        );
+        return None;
+    }
+
+    let array = arrow::compute::cast(array, &DataType::Float64).ok()?;
+    let array = array
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()?;
+    if array.is_empty() || !array.is_valid(0) {
+        return None;
+    }
+
+    let value = array.value(0) as f32;
+    // A NaN or non-positive multiplier would make the outline vanish or the radius meaningless;
+    // fall back to the default rather than honour it.
+    (value.is_finite() && value > 0.0).then_some(value)
 }
