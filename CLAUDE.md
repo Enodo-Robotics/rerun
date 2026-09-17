@@ -257,3 +257,29 @@ former gets the full-strength highlight. Design notes and rejected alternatives:
 Selection outlines are drawn `OUTLINE_EMPHASIS` (3x) thicker than the egui theme asks for
 (`crates/viewer/re_view/src/outlines.rs`), since theme widths are tuned for 2D widget strokes and
 are too subtle to pick an entity out of a dense 3D scene.
+
+### Event markers
+
+`rr.mark_event(name, duration=None)` earmarks the rotated `.rrd` files covering that moment, so a
+bucket can be indexed by event without opening any file:
+
+```
+log_1789653004101__1789653007122_event_hard-stop.rrd
+```
+
+The span stays first in the name, so a consumer parsing `start`/`end` does not have to care whether
+an event suffix is present; the suffix only appears when an event fired. Names are folded to
+`[a-z0-9-]` and truncated (`"Hard Stop!"` → `hard-stop`), since `_` is the field separator. Several
+events in one window are all named, joined with `-`, truncated only at the 255-byte filename limit.
+
+A marker defines a time span — an instant unless `duration` is given — and earmarks every rotated
+file it overlaps, so an incident longer than one rotation interval is not reduced to an arbitrary
+slice of itself. The event's time is the marker's own `log_time`, so a driver whose detection lags
+can `rr.set_time(…)` to mark a moment that has already passed. A span lying entirely before the
+open file cannot be honoured (that file is named and possibly uploaded) and warns instead.
+
+Markers are ordinary temporal data logged to `_event/<name>` and are **kept** in the recording —
+unlike focus commands, which are dropped — so the Text Log view shows on the timeline why a file
+was flagged. Implementation: `EventSpan`, `event_span_from_chunk`, `events_covering` and
+`sanitize_event_name` in `entrypoint.rs`; `MsgRoute::EventMarker` routes a marker to the temporal
+sink while the rotation loop collects it for the filename.

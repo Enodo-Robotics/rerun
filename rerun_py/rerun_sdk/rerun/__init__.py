@@ -92,6 +92,9 @@ from .any_batch_value import (
     AnyBatchValue as AnyBatchValue,
     ComponentValueLike as ComponentValueLike,
 )
+from .enodo import (
+    mark_event as mark_event,
+)
 from .any_value import (
     AnyValues as AnyValues,
 )

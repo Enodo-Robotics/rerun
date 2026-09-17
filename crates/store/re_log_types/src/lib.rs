@@ -898,6 +898,19 @@ impl TableMsg {
 /// commands never reach a saved `.rrd` — see `classify` in `rerun/src/commands/entrypoint.rs`.
 pub const VIEWER_COMMAND_ENTITY_PATH_PREFIX: &str = "viewer/_command";
 
+/// Reserved entity path prefix for event markers.
+///
+/// Logging to `_event/<name>` earmarks the rotated `.rrd` files covering that moment, so a bucket
+/// can be indexed by event without opening any file. The marker itself is ordinary temporal data
+/// and is kept in the recording, so a reviewer can see on the timeline why a file was flagged.
+pub const EVENT_MARKER_ENTITY_PATH_PREFIX: &str = "_event";
+
+/// Component on an event marker giving how long the event lasts, in seconds.
+///
+/// Absent means an instant. A duration earmarks every rotated file the span overlaps, so an
+/// incident longer than one rotation interval is not reduced to an arbitrary slice of itself.
+pub const EVENT_MARKER_DURATION_COMPONENT: &str = "duration";
+
 /// Build a ([`Timeline`], [`TimeInt`]) tuple from `log_time` suitable for inserting in a [`TimePoint`].
 #[inline]
 pub fn build_log_time(log_time: Timestamp) -> (Timeline, TimeInt) {

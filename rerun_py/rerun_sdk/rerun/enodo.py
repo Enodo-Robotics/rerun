@@ -16,11 +16,14 @@ if TYPE_CHECKING:
 
     from .recording_stream import RecordingStream
 
-__all__ = ["FOCUS_COMMAND_ENTITY_PATH", "focus_entities"]
+__all__ = ["EVENT_MARKER_ENTITY_PATH_PREFIX", "FOCUS_COMMAND_ENTITY_PATH", "focus_entities", "mark_event"]
 
 # Kept in sync with `VIEWER_COMMAND_ENTITY_PATH_PREFIX` in `re_log_types` and
 # `FOCUS_COMMAND_ENTITY_PATH` in `re_viewer_context`.
 FOCUS_COMMAND_ENTITY_PATH = "viewer/_command/focus"
+
+# Kept in sync with `EVENT_MARKER_ENTITY_PATH_PREFIX` in `re_log_types`.
+EVENT_MARKER_ENTITY_PATH_PREFIX = "_event"
 
 
 def focus_entities(
@@ -104,5 +107,77 @@ def focus_entities(
         # Static, so the command is timeline-independent: the viewer reads whichever was logged
         # last, no matter where the time cursor happens to sit.
         static=True,
+        recording=recording,
+    )
+
+
+def mark_event(
+    name: str,
+    *,
+    duration: float | None = None,
+    recording: RecordingStream | None = None,
+) -> None:
+    """
+    Earmark the rotated `.rrd` files covering this moment with an event name.
+
+    The name is added to the filename of every rotated file the event overlaps, so a bucket can be
+    indexed by event — "give me every recording where a hard stop happened" — without opening a
+    single file. Only affects the `rerun` binary's rotating sink (`--save --save-interval`);
+    elsewhere the marker is just a log entry.
+
+    The marker itself stays in the recording and shows up in the Text Log view, so a reviewer can
+    see on the timeline why a file was flagged.
+
+    The event's time is the marker's own timestamp, so to mark a moment that has already passed —
+    a detector that takes a second to decide — set the time explicitly before calling:
+
+    ```python
+    rr.set_time("log_time", timestamp=when_it_happened)
+    rr.mark_event("hard_stop")
+    ```
+
+    A file that has already been closed cannot be earmarked; the viewer warns rather than
+    mis-filing the event on a later file.
+
+    Parameters
+    ----------
+    name:
+        Event name. Folded to lowercase `a-z0-9-` and truncated for the filename, so
+        `"Hard Stop!"` earmarks files as `…_event_hard-stop.rrd`. The unmodified name is what
+        appears in the recording.
+    duration:
+        How long the event lasts, in seconds. Every rotated file the span overlaps is earmarked,
+        so an incident longer than one rotation interval is not reduced to an arbitrary slice of
+        itself. Omit for an instant.
+    recording:
+        Specifies the [`rerun.RecordingStream`][] to use. If left unspecified, defaults to the
+        current active data recording, if there is one.
+
+    Examples
+    --------
+    ```python
+    rerun.mark_event("hard_stop")
+    rerun.mark_event("operator_takeover", duration=30.0)
+    ```
+
+    """
+    import pyarrow as pa
+
+    from ._log import escape_entity_path_part, log
+    from .archetypes import TextLog
+
+    if not name:
+        raise ValueError("Event name must not be empty")
+
+    extra = AnyValues(duration=pa.array([float(duration)], type=pa.float64())) if duration is not None else AnyValues()
+
+    # The name travels in the entity path, so the sink reads it without decoding any component,
+    # and `TextLog` makes the marker visible on the viewer's timeline.
+    # Escaped, so a name with spaces or slashes does not produce a warning or split the path.
+    # The sink unescapes it again on the way out.
+    log(
+        f"{EVENT_MARKER_ENTITY_PATH_PREFIX}/{escape_entity_path_part(name)}",
+        TextLog(name),
+        extra,
         recording=recording,
     )

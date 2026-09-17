@@ -1626,6 +1626,76 @@ enum MsgRoute {
 
     /// Goes nowhere: this is a live instruction to the viewer, not recording content.
     Drop,
+
+    /// An event marker: earmarks the files it covers, *and* is kept as ordinary temporal data
+    /// so the recording shows on its own timeline why it was flagged.
+    EventMarker(EventSpan),
+}
+
+/// A window of time that an event covers, and the name it earmarks files with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EventSpan {
+    /// The event's name, taken from the entity path (`_event/<name>`).
+    name: String,
+
+    /// Nanoseconds since the Unix epoch, from the marker's own `log_time`.
+    ///
+    /// Taking the time from the marker rather than from its arrival means a driver can mark a
+    /// moment that has already passed with an ordinary `rr.set_time(…)`.
+    start_ns: i64,
+
+    /// End of the covered window; equal to `start_ns` for an instant.
+    end_ns: i64,
+}
+
+/// Read an event marker out of a chunk logged under `_event/<name>`.
+///
+/// Returns `None` for a marker we cannot make sense of, which is then treated as ordinary data —
+/// better to keep unexplained data than to drop it.
+fn event_span_from_chunk(chunk: &re_chunk::Chunk) -> Option<EventSpan> {
+    let name = chunk
+        .entity_path()
+        .iter()
+        .next_back()
+        .map(|part| part.unescaped_str().to_owned())?;
+    if name.is_empty() {
+        return None;
+    }
+
+    // The marker's own `log_time`, so `rr.set_time(…)` lets a driver mark a moment that has
+    // already passed rather than the moment the message happened to arrive.
+    let time_range = chunk
+        .timelines()
+        .get(&re_log_types::TimelineName::log_time())?
+        .time_range();
+    let start_ns = time_range.min().as_i64();
+
+    let duration_seconds = chunk
+        .components()
+        .0
+        .get(&re_chunk::ComponentIdentifier::from(
+            re_log_types::EVENT_MARKER_DURATION_COMPONENT,
+        ))
+        .and_then(|column| {
+            use arrow::array::Array as _;
+            let values = arrow::compute::cast(
+                column.list_array.values(),
+                &arrow::datatypes::DataType::Float64,
+            )
+            .ok()?;
+            let values = values
+                .as_any()
+                .downcast_ref::<arrow::array::Float64Array>()?;
+            (!values.is_empty() && values.is_valid(0)).then(|| values.value(0))
+        })
+        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+        .unwrap_or(0.0);
+
+    Some(EventSpan {
+        name,
+        start_ns,
+        end_ns: start_ns.saturating_add((duration_seconds * 1e9) as i64),
+    })
 }
 
 fn classify(msg: &re_log_types::LogMsg) -> MsgRoute {
@@ -1645,6 +1715,15 @@ fn classify(msg: &re_log_types::LogMsg) -> MsgRoute {
                     // them would replay someone's UI interactions on every later read of the
                     // file, and would bloat every rotated segment we upload.
                     MsgRoute::Drop
+                }
+                Ok(chunk)
+                    if chunk
+                        .entity_path()
+                        .starts_with(&re_log_types::EntityPath::from(
+                            re_log_types::EVENT_MARKER_ENTITY_PATH_PREFIX,
+                        )) =>
+                {
+                    event_span_from_chunk(&chunk).map_or(MsgRoute::Temporal, MsgRoute::EventMarker)
                 }
                 Ok(chunk) if chunk.is_static() => MsgRoute::Static,
                 _ => MsgRoute::Temporal,
@@ -1687,13 +1766,16 @@ struct Sinks {
 }
 
 impl Sinks {
-    fn write(&mut self, msg: &re_log_types::LogMsg) -> Result<(), re_log_encoding::FileSinkError> {
-        match classify(msg) {
-            MsgRoute::Temporal => {
-                if let Some(t) = self.temporal.as_mut() {
-                    t.append(msg)?;
-                }
-            }
+    /// Write a message that has already been classified.
+    ///
+    /// The route is passed in rather than recomputed because classification parses the chunk, and
+    /// the caller needs the result too.
+    fn write(
+        &mut self,
+        msg: &re_log_types::LogMsg,
+        route: &MsgRoute,
+    ) -> Result<(), re_log_encoding::FileSinkError> {
+        match route {
             MsgRoute::Static => {
                 // Fall back to temporal if there's no static sink, so behavior is unchanged
                 // when the user hasn't opted into --save-static.
@@ -1703,6 +1785,13 @@ impl Sinks {
                 }
             }
             MsgRoute::Drop => {}
+            // Kept alongside ordinary temporal data; its effect on the filename is handled by
+            // the caller, which owns the set of spans for the current window.
+            MsgRoute::Temporal | MsgRoute::EventMarker(_) => {
+                if let Some(t) = self.temporal.as_mut() {
+                    t.append(msg)?;
+                }
+            }
             MsgRoute::Both => {
                 if let Some(t) = self.temporal.as_mut() {
                     t.append(msg)?;
@@ -1753,7 +1842,10 @@ fn stream_to_rrd_on_disk(
                         if let Some(app_id) = application_id {
                             rewrite_application_id(&mut log_msg, app_id);
                         }
-                        sinks.write(&log_msg)?;
+                        // No rotation here, so an event marker has no filename to earmark; it
+                        // is simply kept as data.
+                        let route = classify(&log_msg);
+                        sinks.write(&log_msg, &route)?;
                     }
                     unsupported => {
                         re_log::error_once!(
@@ -1800,6 +1892,10 @@ fn stream_to_rrd_rotating(
     let mut store_info_preludes: HashMap<re_log_types::StoreId, re_log_types::LogMsg> =
         HashMap::new();
 
+    // Event spans that may still earmark a file. An entry is dropped once it ends before the
+    // window currently being written, so a long-running process does not accumulate them.
+    let mut event_spans: Vec<EventSpan> = Vec::new();
+
     warn_about_stale_partials(base_path);
 
     // A segment is written under a name that deliberately does *not* match `<stem>_*.rrd`,
@@ -1833,8 +1929,18 @@ fn stream_to_rrd_rotating(
             // finished segment its final name and open the next one.
             sinks.temporal.take();
             let t_close = SystemTime::now();
-            let final_path = finalize_segment(&open_path, base_path, t_open, t_close)?;
+            let final_path = finalize_segment(
+                &open_path,
+                base_path,
+                t_open,
+                t_close,
+                &events_covering(&event_spans, t_open, t_close),
+            )?;
             re_log::info!(?final_path, "Rotated file");
+
+            // Anything that ended before the window we are about to open can never apply again.
+            let next_open_ns = epoch_ns(t_close);
+            event_spans.retain(|span| span.end_ns >= next_open_ns);
 
             counter += 1;
             // Tile exactly: the next segment starts where this one ended, so a gap between
@@ -1866,7 +1972,25 @@ fn stream_to_rrd_rotating(
                             store_info_preludes
                                 .insert(set_store_info.info.store_id.clone(), log_msg.clone());
                         }
-                        sinks.write(&log_msg)?;
+
+                        let route = classify(&log_msg);
+                        if let MsgRoute::EventMarker(span) = &route {
+                            // A marker for a window that has already been written cannot be
+                            // honoured — that file is named and possibly uploaded. Say so rather
+                            // than silently mis-filing it.
+                            if span.end_ns < epoch_ns(t_open) {
+                                re_log::warn!(
+                                    "Event {:?} refers to {:.1}s before the current file started, \
+                                     which is already closed. It will not earmark anything. Mark \
+                                     events promptly, or give the marker a duration.",
+                                    span.name,
+                                    (epoch_ns(t_open) - span.end_ns) as f64 / 1e9,
+                                );
+                            } else if !event_spans.contains(span) {
+                                event_spans.push(span.clone());
+                            }
+                        }
+                        sinks.write(&log_msg, &route)?;
                     }
                     unsupported => {
                         re_log::error_once!(
@@ -1889,7 +2013,14 @@ fn stream_to_rrd_rotating(
     // Final (short) segment: flush it and name it just like a rotated one, otherwise it
     // would be left behind under its `.partial` name.
     sinks.temporal.take();
-    let final_path = finalize_segment(&open_path, base_path, t_open, SystemTime::now())?;
+    let t_close = SystemTime::now();
+    let final_path = finalize_segment(
+        &open_path,
+        base_path,
+        t_open,
+        t_close,
+        &events_covering(&event_spans, t_open, t_close),
+    )?;
     re_log::info!(?final_path, "Flushed final file");
 
     drop(sinks);
@@ -1952,6 +2083,7 @@ fn finalize_segment(
     base_path: &std::path::Path,
     t_open: std::time::SystemTime,
     t_close: std::time::SystemTime,
+    events: &[String],
 ) -> anyhow::Result<std::path::PathBuf> {
     use anyhow::Context as _;
 
@@ -1963,7 +2095,7 @@ fn finalize_segment(
         .and_then(|file| file.sync_all())
         .with_context(|| format!("Failed to fsync {open_path:?}"))?;
 
-    let final_path = span_path(base_path, t_open, t_close);
+    let final_path = span_path(base_path, t_open, t_close, events);
     std::fs::rename(open_path, &final_path)
         .with_context(|| format!("Failed to rename {open_path:?} to {final_path:?}"))?;
 
@@ -2032,6 +2164,7 @@ fn span_path(
     base: &std::path::Path,
     t_open: std::time::SystemTime,
     t_close: std::time::SystemTime,
+    events: &[String],
 ) -> std::path::PathBuf {
     let start_ms = epoch_ms(t_open);
     let raw_end_ms = epoch_ms(t_close);
@@ -2050,9 +2183,90 @@ fn span_path(
     };
 
     let mut s = strip_rrd_extension(base).into_os_string();
-    // 13 digits covers every timestamp until the year 2286.
-    s.push(format!("_{start_ms:013}__{end_ms:013}.rrd"));
+    // 13 digits covers every timestamp until the year 2286. The span stays first so that a
+    // consumer parsing it does not have to care whether an event suffix is present.
+    s.push(format!("_{start_ms:013}__{end_ms:013}"));
+
+    if !events.is_empty() {
+        let suffix = format!("_event_{}", events.join("-"));
+
+        // Every event is named, but a filename still cannot exceed what the filesystem accepts,
+        // so a pathological run is truncated rather than failing to write at all.
+        let stem_len = std::path::Path::new(&s)
+            .file_name()
+            .map_or(0, |name| name.as_encoded_bytes().len());
+        const MAX_FILE_NAME_BYTES: usize = 255;
+        let budget = MAX_FILE_NAME_BYTES.saturating_sub(stem_len + ".rrd".len());
+
+        if suffix.len() <= budget {
+            s.push(suffix);
+        } else {
+            re_log::warn_once!(
+                "Too many events in one file to name them all; truncating. \
+                 Consider shorter event names."
+            );
+            let mut truncated = suffix;
+            truncated.truncate(budget);
+            s.push(truncated.trim_end_matches('-'));
+        }
+    }
+
+    s.push(".rrd");
     std::path::PathBuf::from(s)
+}
+
+/// Which events cover the window `[t_open, t_close]`?
+///
+/// Sorted and de-duplicated, so the same event fired repeatedly within one window contributes one
+/// name, and two runs with the same events produce the same filename.
+fn events_covering(
+    spans: &[EventSpan],
+    t_open: std::time::SystemTime,
+    t_close: std::time::SystemTime,
+) -> Vec<String> {
+    let window_start = epoch_ns(t_open);
+    let window_end = epoch_ns(t_close);
+
+    let mut names: Vec<String> = spans
+        .iter()
+        .filter(|span| span.start_ns <= window_end && span.end_ns >= window_start)
+        .map(|span| sanitize_event_name(&span.name))
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Reduce an event name to something safe to put in a filename and an S3 key.
+///
+/// `_` is the field separator in the filename grammar, so it cannot survive in a name.
+fn sanitize_event_name(name: &str) -> String {
+    /// Long enough to stay readable, short enough that several events still fit in a filename.
+    const MAX_LEN: usize = 24;
+
+    let mut out = String::with_capacity(name.len().min(MAX_LEN));
+    let mut last_was_dash = false;
+    for ch in name.chars() {
+        let ch = ch.to_ascii_lowercase();
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+        if out.len() >= MAX_LEN {
+            break;
+        }
+    }
+    out.trim_end_matches('-').to_owned()
+}
+
+fn epoch_ns(t: std::time::SystemTime) -> i64 {
+    t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as i64
 }
 
 fn epoch_ms(t: std::time::SystemTime) -> u64 {
@@ -2375,7 +2589,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
-    use super::{epoch_ms, partial_path, span_path};
+    use super::{
+        EventSpan, epoch_ms, events_covering, partial_path, sanitize_event_name, span_path,
+    };
 
     fn at_ms(ms: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
@@ -2429,30 +2645,124 @@ mod tests {
             span_path(
                 Path::new("/x/run"),
                 at_ms(1_755_764_400_000),
-                at_ms(1_755_764_412_000)
+                at_ms(1_755_764_412_000),
+                &[]
             ),
             PathBuf::from("/x/run_1755764400000__1755764412000.rrd")
         );
 
         // Narrow timestamps are padded so that lexical order stays chronological.
         assert_eq!(
-            span_path(Path::new("/x/run"), at_ms(1), at_ms(2)),
+            span_path(Path::new("/x/run"), at_ms(1), at_ms(2), &[]),
             PathBuf::from("/x/run_0000000000001__0000000000002.rrd")
         );
 
-        let early = span_path(Path::new("/x/run"), at_ms(1), at_ms(2));
+        let early = span_path(Path::new("/x/run"), at_ms(1), at_ms(2), &[]);
         let late = span_path(
             Path::new("/x/run"),
             at_ms(1_755_764_400_000),
             at_ms(1_755_764_412_000),
+            &[],
         );
         assert!(early < late, "lexical order must match chronological order");
+    }
+
+    fn span(name: &str, start_ms: i64, duration_ms: i64) -> EventSpan {
+        EventSpan {
+            name: name.to_owned(),
+            start_ns: start_ms * 1_000_000,
+            end_ns: (start_ms + duration_ms) * 1_000_000,
+        }
+    }
+
+    #[test]
+    fn event_names_land_after_the_span_so_parsers_keep_working() {
+        let path = span_path(
+            Path::new("/x/run"),
+            at_ms(1_755_764_400_000),
+            at_ms(1_755_764_412_000),
+            &["hard-stop".to_owned()],
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("/x/run_1755764400000__1755764412000_event_hard-stop.rrd")
+        );
+    }
+
+    #[test]
+    fn several_events_are_all_named() {
+        let path = span_path(
+            Path::new("/x/run"),
+            at_ms(1_000),
+            at_ms(2_000),
+            &["a".to_owned(), "b".to_owned()],
+        );
+        assert!(
+            path.to_str().unwrap().ends_with("_event_a-b.rrd"),
+            "got {path:?}"
+        );
+    }
+
+    #[test]
+    fn a_filename_never_exceeds_what_the_filesystem_accepts() {
+        // "No cap" on the number of events still has to stop at the filesystem limit, or the
+        // file could not be written at all.
+        let events: Vec<String> = (0..100).map(|i| format!("event-number-{i}")).collect();
+        let path = span_path(Path::new("/x/run"), at_ms(1_000), at_ms(2_000), &events);
+        let name_len = path.file_name().unwrap().as_encoded_bytes().len();
+        assert!(name_len <= 255, "filename was {name_len} bytes");
+        assert!(path.to_str().unwrap().ends_with(".rrd"));
+    }
+
+    #[test]
+    fn an_instant_event_covers_the_window_containing_it() {
+        let spans = vec![span("stop", 1_500, 0)];
+        assert_eq!(
+            events_covering(&spans, at_ms(1_000), at_ms(2_000)),
+            vec!["stop".to_owned()]
+        );
+        assert!(events_covering(&spans, at_ms(2_000), at_ms(3_000)).is_empty());
+    }
+
+    #[test]
+    fn a_duration_covers_every_window_it_overlaps() {
+        // The point of durations: an incident longer than one rotation interval should not be
+        // reduced to an arbitrary slice of itself.
+        let spans = vec![span("takeover", 1_500, 25_000)];
+        for (start, end) in [(1_000, 13_000), (13_000, 25_000), (25_000, 37_000)] {
+            assert_eq!(
+                events_covering(&spans, at_ms(start), at_ms(end)),
+                vec!["takeover".to_owned()],
+                "window {start}..{end} should be earmarked"
+            );
+        }
+        assert!(events_covering(&spans, at_ms(37_000), at_ms(49_000)).is_empty());
+    }
+
+    #[test]
+    fn the_same_event_twice_in_one_window_names_it_once() {
+        let spans = vec![span("stop", 1_100, 0), span("stop", 1_900, 0)];
+        assert_eq!(
+            events_covering(&spans, at_ms(1_000), at_ms(2_000)),
+            vec!["stop".to_owned()]
+        );
+    }
+
+    #[test]
+    fn event_names_are_reduced_to_something_filename_safe() {
+        assert_eq!(sanitize_event_name("Hard Stop!"), "hard-stop");
+        assert_eq!(sanitize_event_name("a//b__c"), "a-b-c");
+        assert_eq!(sanitize_event_name("  leading"), "leading");
+        assert_eq!(sanitize_event_name("!!!"), "");
+        assert_eq!(sanitize_event_name(&"x".repeat(100)).len(), 24);
+        // `_` is the field separator in the filename grammar, so it must not survive.
+        assert!(!sanitize_event_name("a_b").contains('_'));
     }
 
     #[test]
     fn span_path_strips_rrd_extension() {
         assert_eq!(
-            span_path(Path::new("/x/run.rrd"), at_ms(1_000), at_ms(2_000)),
+            span_path(Path::new("/x/run.rrd"), at_ms(1_000), at_ms(2_000), &[]),
             PathBuf::from("/x/run_0000000001000__0000000002000.rrd")
         );
     }
@@ -2461,7 +2771,7 @@ mod tests {
     fn span_path_clamps_a_zero_length_window() {
         // Two segments must never collide on one name.
         assert_eq!(
-            span_path(Path::new("/x/run"), at_ms(5_000), at_ms(5_000)),
+            span_path(Path::new("/x/run"), at_ms(5_000), at_ms(5_000), &[]),
             PathBuf::from("/x/run_0000000005000__0000000005001.rrd")
         );
     }
@@ -2470,7 +2780,7 @@ mod tests {
     fn span_path_clamps_a_backwards_clock_step() {
         // An NTP step between open and close must not produce `end < start`.
         assert_eq!(
-            span_path(Path::new("/x/run"), at_ms(9_000), at_ms(4_000)),
+            span_path(Path::new("/x/run"), at_ms(9_000), at_ms(4_000), &[]),
             PathBuf::from("/x/run_0000000009000__0000000009001.rrd")
         );
     }
@@ -2479,8 +2789,8 @@ mod tests {
     fn consecutive_segments_tile_exactly() {
         // `t_open(N+1) == t_close(N)` in the rotation loop, so the names must join up.
         let close = at_ms(1_755_764_412_000);
-        let first = span_path(Path::new("/x/run"), at_ms(1_755_764_400_000), close);
-        let second = span_path(Path::new("/x/run"), close, at_ms(1_755_764_424_000));
+        let first = span_path(Path::new("/x/run"), at_ms(1_755_764_400_000), close, &[]);
+        let second = span_path(Path::new("/x/run"), close, at_ms(1_755_764_424_000), &[]);
 
         let end_of_first = first
             .file_name()
