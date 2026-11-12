@@ -76,6 +76,13 @@ pub struct AppContext<'a> {
     /// that last several frames.
     pub focused_item: &'a Option<FocusTarget>,
 
+    /// The current externally-driven framing command, if any, and the row it came from.
+    ///
+    /// Views read this to move their camera, and use the row id to act on each command at most
+    /// once — a command outlives the frame it arrived on, so that a view which was not rendering
+    /// then (a background tab, say) still acts on it when it next renders.
+    pub focus_command: &'a Option<(re_chunk_store::RowId, crate::FocusCommand)>,
+
     /// Helper object to manage drag-and-drop operations.
     pub drag_and_drop_manager: &'a DragAndDropManager,
 
@@ -185,6 +192,11 @@ impl AppContext<'_> {
     /// Item that got focused on the last frame if any.
     pub fn focused_item(&self) -> Option<&FocusTarget> {
         self.focused_item.as_ref()
+    }
+
+    /// The current externally-driven framing command, if any, with the row it came from.
+    pub fn focus_command(&self) -> Option<&(re_chunk_store::RowId, crate::FocusCommand)> {
+        self.focus_command.as_ref()
     }
 
     /// Helper object to manage drag-and-drop operations.

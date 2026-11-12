@@ -7,7 +7,9 @@ use re_format::format_uint;
 use re_renderer::WgpuResourcePoolStatistics;
 use re_sorbet::TimestampLocation;
 use re_ui::{ContextExt as _, UICommand, UiExt as _, icons};
-use re_viewer_context::{ActiveStoreContext, Route, StoreHub, SystemCommand, SystemCommandSender as _};
+use re_viewer_context::{
+    ActiveStoreContext, Route, StoreHub, SystemCommand, SystemCommandSender as _,
+};
 
 use crate::App;
 use crate::app_blueprint::AppBlueprint;

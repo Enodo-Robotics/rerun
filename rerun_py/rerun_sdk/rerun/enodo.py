@@ -1,0 +1,183 @@
+"""
+Enodo Robotics fork extensions.
+
+These are not part of upstream Rerun. They let an application outside the viewer drive what the
+viewer is looking at — see `RRL_SELECTION_FOCUS_SPEC.md` in the repository root.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from .any_value import AnyValues
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from .recording_stream import RecordingStream
+
+__all__ = ["EVENT_MARKER_ENTITY_PATH_PREFIX", "FOCUS_COMMAND_ENTITY_PATH", "focus_entities", "mark_event"]
+
+# Kept in sync with `VIEWER_COMMAND_ENTITY_PATH_PREFIX` in `re_log_types` and
+# `FOCUS_COMMAND_ENTITY_PATH` in `re_viewer_context`.
+FOCUS_COMMAND_ENTITY_PATH = "viewer/_command/focus"
+
+# Kept in sync with `EVENT_MARKER_ENTITY_PATH_PREFIX` in `re_log_types`.
+EVENT_MARKER_ENTITY_PATH_PREFIX = "_event"
+
+
+def focus_entities(
+    paths: Sequence[str],
+    *,
+    do_pan: bool = True,
+    do_rotate: bool = False,
+    color: Sequence[int] | None = None,
+    width: float | None = None,
+    recording: RecordingStream | None = None,
+) -> None:
+    """
+    Ask the viewer to select some entities and frame its camera on them.
+
+    Intended to be driven by your own UI — hovering an element in a list, for example — so it is
+    cheap enough to call at cursor rate. Each call supersedes the previous one, and the viewer
+    glides rather than jumping, so a fast sweep reads as the camera pursuing the cursor.
+
+    Commands are logged to a reserved entity path that the Enodo `rerun` binary drops from its
+    rotated `.rrd` files, so driving the viewer does not pollute recordings.
+
+    Every 3D view containing at least one of the named entities is reframed. If any path names
+    something no view can show, the whole command is ignored and the viewer logs a warning —
+    a partially applied framing would be misleading.
+
+    Parameters
+    ----------
+    paths:
+        Entity paths to select and frame. Each contributes its whole subtree, so `"/robot"` frames
+        the meshes logged at `/robot/link_3`. Pass an empty sequence to clear the selection and —
+        with `do_pan` — return to framing the whole scene.
+    do_pan:
+        Move the camera to a distance that fits the entities.
+    do_rotate:
+        Re-aim the camera at the entities from wherever it currently stands. The rotation happens
+        about the camera position rather than about the orbit pivot, so with `do_pan=False` the
+        camera turns in place and the entities may stay small in frame.
+    color:
+        Optional highlight colour for this command, as 3 or 4 values in `0..=255` (RGB or RGBA),
+        letting you colour-code what is being pointed at. Defaults to the viewer's high-visibility
+        selection colour. The colour applies to everything this command selected, not per entity.
+    width:
+        Optional multiplier on the outline thickness, e.g. `2.0` for twice the viewer's default
+        emphasis. Clamped by the viewer to a sane range. Unlike the colour, this also thickens the
+        hover outline in the same view, because the renderer keeps one radius for both layers.
+    recording:
+        Specifies the [`rerun.RecordingStream`][] to use. If left unspecified, defaults to the
+        current active data recording, if there is one.
+
+    Examples
+    --------
+    ```python
+    # Hovering a list element:
+    rerun.enodo.focus_entities(["/world/robot/arm", "/world/robot/gripper"])
+
+    # Colour-coded by category, with a fatter outline:
+    rerun.enodo.focus_entities(["/world/robot/arm"], color=(255, 140, 0), width=2.0)
+
+    # Pointer left the list — back to the whole scene:
+    rerun.enodo.focus_entities([])
+    ```
+
+    """
+    import pyarrow as pa
+
+    from ._log import log
+
+    # Explicitly typed arrays, rather than letting `AnyValues` infer. Inference drops an empty
+    # list outright when it has not yet seen a value of that type, which would leave `paths`
+    # unlogged — and because static data is never cleared, the viewer would then read the
+    # *previous* command's paths and re-frame those instead of clearing the selection.
+    log(
+        FOCUS_COMMAND_ENTITY_PATH,
+        AnyValues(
+            paths=pa.array([str(path) for path in paths], type=pa.string()),
+            do_pan=pa.array([bool(do_pan)], type=pa.bool_()),
+            do_rotate=pa.array([bool(do_rotate)], type=pa.bool_()),
+            color=(pa.array([int(channel) for channel in color], type=pa.int64()) if color is not None else None),
+            width=(pa.array([float(width)], type=pa.float64()) if width is not None else None),
+        ),
+        # Static, so the command is timeline-independent: the viewer reads whichever was logged
+        # last, no matter where the time cursor happens to sit.
+        static=True,
+        recording=recording,
+    )
+
+
+def mark_event(
+    name: str,
+    *,
+    duration: float | None = None,
+    recording: RecordingStream | None = None,
+) -> None:
+    """
+    Earmark the rotated `.rrd` files covering this moment with an event name.
+
+    The name is added to the filename of every rotated file the event overlaps, so a bucket can be
+    indexed by event — "give me every recording where a hard stop happened" — without opening a
+    single file. Only affects the `rerun` binary's rotating sink (`--save --save-interval`);
+    elsewhere the marker is just a log entry.
+
+    The marker itself stays in the recording and shows up in the Text Log view, so a reviewer can
+    see on the timeline why a file was flagged.
+
+    The event's time is the marker's own timestamp, so to mark a moment that has already passed —
+    a detector that takes a second to decide — set the time explicitly before calling:
+
+    ```python
+    rr.set_time("log_time", timestamp=when_it_happened)
+    rr.mark_event("hard_stop")
+    ```
+
+    A file that has already been closed cannot be earmarked; the viewer warns rather than
+    mis-filing the event on a later file.
+
+    Parameters
+    ----------
+    name:
+        Event name. Folded to lowercase `a-z0-9-` and truncated for the filename, so
+        `"Hard Stop!"` earmarks files as `…_event_hard-stop.rrd`. The unmodified name is what
+        appears in the recording.
+    duration:
+        How long the event lasts, in seconds. Every rotated file the span overlaps is earmarked,
+        so an incident longer than one rotation interval is not reduced to an arbitrary slice of
+        itself. Omit for an instant.
+    recording:
+        Specifies the [`rerun.RecordingStream`][] to use. If left unspecified, defaults to the
+        current active data recording, if there is one.
+
+    Examples
+    --------
+    ```python
+    rerun.mark_event("hard_stop")
+    rerun.mark_event("operator_takeover", duration=30.0)
+    ```
+
+    """
+    import pyarrow as pa
+
+    from ._log import escape_entity_path_part, log
+    from .archetypes import TextLog
+
+    if not name:
+        raise ValueError("Event name must not be empty")
+
+    extra = AnyValues(duration=pa.array([float(duration)], type=pa.float64())) if duration is not None else AnyValues()
+
+    # The name travels in the entity path, so the sink reads it without decoding any component,
+    # and `TextLog` makes the marker visible on the viewer's timeline.
+    # Escaped, so a name with spaces or slashes does not produce a warning or split the path.
+    # The sink unescapes it again on the way out.
+    log(
+        f"{EVENT_MARKER_ENTITY_PATH_PREFIX}/{escape_entity_path_part(name)}",
+        TextLog(name),
+        extra,
+        recording=recording,
+    )

@@ -37,6 +37,13 @@ use crate::visualizers::{CamerasVisualizerOutput, collect_ui_labels};
 pub struct View3DState {
     pub eye_state: EyeState,
 
+    /// Row of the last framing command this view acted on.
+    ///
+    /// A command outlives the frame it arrived on, so that a view which was not rendering then
+    /// (a background tab, say) still frames when it next renders. This makes sure it does so
+    /// exactly once.
+    pub last_framed_command: Option<re_chunk_store::RowId>,
+
     /// Last known view coordinates.
     /// Used to detect changes in view coordinates, in which case we reset the camera eye.
     pub scene_view_coordinates: Option<ViewCoordinates>,
@@ -52,6 +59,7 @@ impl Default for View3DState {
     fn default() -> Self {
         Self {
             eye_state: Default::default(),
+            last_framed_command: None,
             scene_view_coordinates: None,
             eye_interact_fade_in: false,
             eye_interact_fade_change_time: f64::NEG_INFINITY,
@@ -272,10 +280,16 @@ impl SpatialView3D {
 
             pixels_per_point: ui.pixels_per_point(),
 
-            outline_config: query
-                .highlights
-                .any_outlines()
-                .then(|| re_view::outline_config(ui.ctx())),
+            outline_config: query.highlights.any_outlines().then(|| {
+                // A framing command may carry its own highlight colour, so a driver can
+                // colour-code what it is pointing at.
+                let command = ctx.focus_command().map(|(_, command)| command);
+                re_view::outline_config_with_overrides(
+                    ui.ctx(),
+                    command.and_then(|command| command.outline_color),
+                    command.and_then(|command| command.outline_width_scale),
+                )
+            }),
             blend_with_background: false,
             picking_config,
         };
@@ -359,6 +373,74 @@ impl SpatialView3D {
 
             // Make sure focus consequences happen in the next frames.
             ui.request_repaint();
+        }
+
+        // Act on an externally-driven framing command, if there is one this view has not yet
+        // applied. The command outlives its arrival frame, so a view that was not rendering
+        // then still frames when it next renders.
+        if let Some((row_id, command)) = ctx.focus_command()
+            && state.state_3d.last_framed_command != Some(*row_id)
+            && command.moves_camera()
+        {
+            state.state_3d.last_framed_command = Some(*row_id);
+
+            let target_bbox = if command.entity_paths.is_empty() {
+                // An empty command means "back to normal": frame the whole scene, the same box
+                // the view is framed by on load. Every 3D view does this, which is the point —
+                // it is the counterpart to the hover that framed a subgroup.
+                Some(state.bounding_boxes.region_of_interest_current)
+            } else {
+                // Each requested path contributes its whole subtree, so naming `/robot` frames
+                // the meshes logged at `/robot/link_3`. Views holding none of the requested
+                // entities end up with nothing to frame and are left alone.
+                let query_result = ctx.lookup_query_result(query.view_id);
+                let mut bbox = macaw::BoundingBox::nothing();
+                for data_result in query_result.tree.iter_data_results() {
+                    if !command
+                        .entity_paths
+                        .iter()
+                        .any(|path| data_result.entity_path.starts_with(path))
+                    {
+                        continue;
+                    }
+                    let hash = data_result.entity_path.hash();
+                    if let Some(entity_bbox) = state
+                        .bounding_boxes
+                        .region_of_interest_per_entity
+                        .get(&hash)
+                        .or_else(|| state.bounding_boxes.per_entity.get(&hash))
+                    {
+                        bbox = bbox.union(*entity_bbox);
+                    }
+                }
+                (!bbox.is_nothing()).then_some(bbox)
+            };
+
+            // `is_nothing` is `max < min`, which is false for NaN, so check finiteness
+            // explicitly: a single NaN position anywhere in the subtree would otherwise be
+            // written to the blueprint as a NaN camera and persist there.
+            if let Some(target_bbox) = target_bbox.filter(|bbox| bbox.is_finite()) {
+                state.state_3d.eye_state.start_interpolation();
+
+                // Deliberately not `?`: a framing failure must not abandon the rest of this
+                // view's frame, which would leave it unrendered and log an error every frame
+                // for as long as the command keeps arriving.
+                if let Err(err) = state.state_3d.eye_state.frame_bounding_box(
+                    &self.view_context(ctx, query.view_id, state, query.space_origin),
+                    &state.bounding_boxes,
+                    &eye_property,
+                    target_bbox,
+                    command,
+                ) {
+                    re_log::warn_once!("Failed to apply a focus command to a 3D view: {err}");
+                }
+                ui.request_repaint();
+            } else if target_bbox.is_some() {
+                re_log::warn_once!(
+                    "Ignoring a focus command for a 3D view: the entities' bounding box is not \
+                     finite. Is a logged position NaN or infinite?"
+                );
+            }
         }
 
         // Allow to restore the camera state with escape if a camera was tracked before.

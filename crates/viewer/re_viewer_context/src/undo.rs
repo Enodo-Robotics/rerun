@@ -144,11 +144,20 @@ impl BlueprintUndoState {
     }
 
     // Call each frame
-    pub fn update(&mut self, egui_ctx: &egui::Context, blueprint_db: &EntityDb) {
+    pub fn update(
+        &mut self,
+        egui_ctx: &egui::Context,
+        blueprint_db: &EntityDb,
+        is_externally_driven: bool,
+    ) {
         re_tracing::profile_function!();
 
-        if is_interacting(egui_ctx) {
-            return; // Don't create undo points while we're still interacting.
+        if is_interacting(egui_ctx) || is_externally_driven {
+            // Don't create undo points while we're still interacting — nor while something
+            // outside the viewer is driving the blueprint (a framing command writes camera
+            // components, and at cursor rate that would fill the whole undo history with
+            // camera micro-moves).
+            return;
         }
 
         // NOTE: we may be called several times in each frame (if we do multiple egui passes).
@@ -298,7 +307,7 @@ mod tests {
             ..Default::default()
         };
         let _out = ctx.run_ui(input, |_| {});
-        undo.update(ctx, db);
+        undo.update(ctx, db, false);
     }
 
     /// Simulates an inflection point existing at a `TimeInt` above the current `max_blueprint_time`,

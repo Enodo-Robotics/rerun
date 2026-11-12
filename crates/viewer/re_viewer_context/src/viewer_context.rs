@@ -229,6 +229,14 @@ impl<'a> ViewerContext<'a> {
         self.app_ctx.focused_item()
     }
 
+    /// The current externally-driven framing command, if any, with the row it came from.
+    ///
+    /// Views read this to move their camera; the selection half is applied centrally. Use the
+    /// row id to act on each command at most once.
+    pub fn focus_command(&self) -> Option<&(re_chunk_store::RowId, crate::FocusCommand)> {
+        self.app_ctx.focus_command()
+    }
+
     /// Helper object to manage drag-and-drop operations.
     pub fn drag_and_drop_manager(&self) -> &DragAndDropManager {
         self.app_ctx.drag_and_drop_manager()
@@ -299,10 +307,19 @@ impl<'a> ViewerContext<'a> {
             // receive egui focus.
             // We don't do this if selection happened due to list item navigation to avoid
             // a feedback loop.
-            let selection_changed = self
-                .selection_state()
-                .selection_changed()
-                .is_some_and(|source| source != SelectionSource::ListItemNavigation);
+            let selection_changed =
+                self.selection_state()
+                    .selection_changed()
+                    .is_some_and(|source| {
+                        !matches!(
+                            source,
+                            // Avoids a feedback loop.
+                            SelectionSource::ListItemNavigation
+                            // Arrives at cursor rate from outside the viewer; taking focus that
+                            // often would stop the user typing anywhere in the UI.
+                            | SelectionSource::ExternalCommand
+                        )
+                    });
 
             // If there is a single selected item and nothing is focused, focus that item.
             let nothing_focused = response.ctx.memory(|mem| mem.focused().is_none());

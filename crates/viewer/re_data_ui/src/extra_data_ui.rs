@@ -71,7 +71,7 @@ impl ExtraDataUi {
     ) {
         match self {
             Self::Video(video) => {
-                video.data_ui(ctx, ui, layout);
+                video.data_ui(ctx, ui, layout, entity_path);
             }
             Self::Image(image) => {
                 image.data_ui(ctx, ui, layout, entity_path);

@@ -26,6 +26,7 @@ import rerun_bindings as bindings
 from . import (
     blueprint as blueprint,
     catalog as catalog,
+    enodo as enodo,
     experimental as experimental,
     recording as recording,
     server as server,
@@ -90,6 +91,9 @@ from ._send_dataframe import (
 from .any_batch_value import (
     AnyBatchValue as AnyBatchValue,
     ComponentValueLike as ComponentValueLike,
+)
+from .enodo import (
+    mark_event as mark_event,
 )
 from .any_value import (
     AnyValues as AnyValues,

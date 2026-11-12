@@ -1287,10 +1287,8 @@ fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin
 
     let annotation_marker = "/_annotation";
     // tag label → (color, list of parent entity paths)
-    let mut tag_entities: std::collections::BTreeMap<
-        String,
-        (egui::Color32, Vec<EntityPath>),
-    > = Default::default();
+    let mut tag_entities: std::collections::BTreeMap<String, (egui::Color32, Vec<EntityPath>)> =
+        Default::default();
 
     let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), current_time);
 
@@ -1344,8 +1342,8 @@ fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin
             )
             .map(|(_, l)| l);
 
-        let label = text.0 .0.as_str().to_owned();
-        let level_str = level.map(|l| l.0 .0.as_str().to_owned()).unwrap_or_default();
+        let label = text.0.0.as_str().to_owned();
+        let level_str = level.map(|l| l.0.0.as_str().to_owned()).unwrap_or_default();
         let color = match level_str.as_str() {
             "WARN" => egui::Color32::from_rgb(255, 165, 0),
             "ERROR" => egui::Color32::from_rgb(255, 80, 80),
@@ -1354,7 +1352,11 @@ fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin
         let entry = tag_entities
             .entry(label)
             .or_insert_with(|| (color, Vec::new()));
-        entry.1.push(parent_path);
+        // Dedupe: annotations with the same tag at multiple times on the same
+        // entity all share a parent — count them as one.
+        if !entry.1.contains(&parent_path) {
+            entry.1.push(parent_path);
+        }
     }
 
     if tag_entities.is_empty() {
@@ -1378,9 +1380,10 @@ fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin
                     None,
                 )
             });
-            ctx.command_sender().send_system(SystemCommand::set_selection(
-                re_viewer_context::ItemCollection::from_items_and_context(items),
-            ));
+            ctx.command_sender()
+                .send_system(SystemCommand::set_selection(
+                    re_viewer_context::ItemCollection::from_items_and_context(items),
+                ));
         }
 
         response.on_hover_ui(|ui| {

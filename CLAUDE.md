@@ -197,8 +197,14 @@ Wheels are built on GitHub-hosted runners (`ubuntu-22.04`, `windows-latest`, `ma
 
 ### Custom CLI flags added to the `rerun` binary
 
-- **`--save-interval <seconds>`**: Continuously rotates the save file every N seconds. Requires `--save <path>` to be set; the path is then treated as a prefix, producing `<path>_1.rrd`, `<path>_2.rrd`, etc. Each rotated file gets a copy of the most recent `SetStoreInfo` so it's loadable on its own.
+- **`--save-interval <seconds>`**: Continuously rotates the save file every N seconds. Requires `--save <path>` to be set; the path is then treated as a prefix, and each rotated file is named by its time span (see **Rotated file naming** below). Each rotated file gets a copy of every `SetStoreInfo` seen so far so it's loadable on its own.
 - **`--save-static <path>`**: Streams static chunks (plus `BlueprintActivationCommand`) to a dedicated sidecar file instead of inlining them into the temporal output. Keeps rotated files small and avoids duplicating static data across every rotation. Valid on its own (without `--save`) to capture only static data. `SetStoreInfo` is written to both temporal and static files so each is independently loadable.
+- **Rotated file naming**: With `--save-interval`, each rotated file is named `<path>_<start_ms>__<end_ms>.rrd` (zero-padded epoch milliseconds, UTC) rather than `<path>_N.rrd`. The window is the interval during which the sink held that segment open — not the span of the data inside it, so an idle segment still gets a full, correctly-named window. Consecutive segments tile exactly (`end_ms(N) == start_ms(N+1)`), so a gap between filenames is a real hole in coverage rather than a naming artifact. Both stamps come from the same clock and epoch as `log_time`, so a logged timestamp is directly comparable to a segment's window. This is unconditional: there is no flag, and no counter-based naming mode.
+
+  Each segment is written under `<path>.partial_<start_ms>.rrd`, fsynced, and only then renamed into place (the directory is fsynced after). A consumer globbing `<path>_*.rrd` therefore never picks up a segment that is still being written, nor one whose contents a power loss truncated after its name was published. `rename` preserves mtime, so consumers using mtime as the segment end are unaffected. The partial name is keyed on the segment's start rather than a counter, because a counter restarts at 1 each run and would otherwise let a later run truncate a crashed run's leftover.
+
+  SIGINT and SIGTERM are caught while a rotating sink is active, so a normal service stop finalizes the open segment instead of orphaning it. A hard crash (SIGKILL, power loss) still leaves a `.partial_` file that no glob will match; its start is readable from the name and its end is approximately its mtime, and the next start logs a warning listing them, but it is not recovered automatically.
+
 - **`--application-id <id>`**: Overrides `application_id` on every incoming log message. Useful for centralized ingestion (`--serve-grpc --save …`) so all captured recordings are tagged with a consistent ID regardless of what the logging SDKs sent.
 
 Upstream's `--save <path>` semantics are unchanged — without `--save-interval`, it writes a single file to the exact given path.
@@ -212,4 +218,68 @@ rerun --serve-grpc \
       --application-id my_robot
 ```
 
-Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `Sinks`, `classify`, `rewrite_application_id`, `rotated_path`). Static vs temporal classification is done by parsing each `ArrowMsg` into a `re_chunk::Chunk` and calling `is_static()`.
+Implementation: `crates/top/rerun/src/commands/entrypoint.rs` (search for `stream_to_rrd_rotating`, `Sinks`, `classify`, `rewrite_application_id`, `span_path`, `partial_path`, `finalize_segment`). Unit tests for the path builders are in the `tests` module at the bottom of that file. Static vs temporal classification is done by parsing each `ArrowMsg` into a `re_chunk::Chunk` and calling `is_static()`.
+
+### Externally-driven selection and camera framing
+
+An application outside the viewer can ask it to select entities and frame the camera on them, by
+logging a command to the reserved entity path `viewer/_command/focus`:
+
+```python
+rerun.enodo.focus_entities(["/world/robot/arm"], do_pan=True, do_rotate=False)
+rerun.enodo.focus_entities([])  # clear the selection, reframe the whole scene
+```
+
+Cheap enough to drive from a hover handler. Every 3D view containing at least one named entity
+reframes; each path contributes its whole subtree, so `/robot` frames the meshes at
+`/robot/link_3`. `do_rotate` re-aims the camera from where it stands (rotation about the camera,
+not the orbit pivot); `do_pan` moves it to fit. The move is an eased glide re-based from the live
+pose on each command, so a rapid sweep reads as pursuit.
+
+The viewer knows nothing about what sent a command — debounce and hover policy belong to the
+driver. A command naming a path absent from the recording is rejected whole, with a warning; a path
+that exists but is not yet shown by any view is retried on later frames, so a command that arrives
+before layout settles is not lost.
+
+Commands are kept out of the files this fork's binary writes: `classify` routes anything under
+`re_log_types::VIEWER_COMMAND_ENTITY_PATH_PREFIX` to `MsgRoute::Drop`, so they never reach a
+rotated `.rrd` and never reach S3. They *are* in the viewer's store, so "Save recording" from the
+viewer UI, or `rr.save()` in a driver, would persist them — only the rotating sink filters.
+
+Implementation: `FocusCommand` (`crates/viewer/re_viewer_context/src/focus_command.rs`) parses the
+command; `take_new_focus_command` (`crates/viewer/re_viewer/src/app_state.rs`) applies the
+selection once per command and hands it to views via `ViewerContext::focus_command`;
+`EyeState::frame_bounding_box` and the pure `framing_pose` (`re_view_spatial/src/eye.rs`) do the
+camera arithmetic. Selection uses `Item::DataResult`, not `Item::InstancePath`, because only the
+former gets the full-strength highlight. Design notes and rejected alternatives:
+`RRL_SELECTION_FOCUS_SPEC.md`.
+
+Selection outlines are drawn `OUTLINE_EMPHASIS` (3x) thicker than the egui theme asks for
+(`crates/viewer/re_view/src/outlines.rs`), since theme widths are tuned for 2D widget strokes and
+are too subtle to pick an entity out of a dense 3D scene.
+
+### Event markers
+
+`rr.mark_event(name, duration=None)` earmarks the rotated `.rrd` files covering that moment, so a
+bucket can be indexed by event without opening any file:
+
+```
+log_1789653004101__1789653007122_event_hard-stop.rrd
+```
+
+The span stays first in the name, so a consumer parsing `start`/`end` does not have to care whether
+an event suffix is present; the suffix only appears when an event fired. Names are folded to
+`[a-z0-9-]` and truncated (`"Hard Stop!"` → `hard-stop`), since `_` is the field separator. Several
+events in one window are all named, joined with `-`, truncated only at the 255-byte filename limit.
+
+A marker defines a time span — an instant unless `duration` is given — and earmarks every rotated
+file it overlaps, so an incident longer than one rotation interval is not reduced to an arbitrary
+slice of itself. The event's time is the marker's own `log_time`, so a driver whose detection lags
+can `rr.set_time(…)` to mark a moment that has already passed. A span lying entirely before the
+open file cannot be honoured (that file is named and possibly uploaded) and warns instead.
+
+Markers are ordinary temporal data logged to `_event/<name>` and are **kept** in the recording —
+unlike focus commands, which are dropped — so the Text Log view shows on the timeline why a file
+was flagged. Implementation: `EventSpan`, `event_span_from_chunk`, `events_covering` and
+`sanitize_event_name` in `entrypoint.rs`; `MsgRoute::EventMarker` routes a marker to the temporal
+sink while the rotation loop collects it for the filename.

@@ -349,6 +349,7 @@ fn timestamp_ui(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decoded_frame_ui<'a>(
     ctx: &re_viewer_context::AppContext<'_>,
     ui: &mut egui::Ui,
@@ -357,6 +358,7 @@ fn decoded_frame_ui<'a>(
     video_time: re_video::Time,
     stream_kind: StreamKind,
     get_video_buffer: &dyn Fn(re_log_types::external::re_tuid::Tuid) -> &'a [u8],
+    save_override: Option<&dyn Fn()>,
 ) {
     let player_stream_id = re_video::player::VideoPlayerStreamId(
         ui.id().with(format!("{stream_kind}_player")).value(),
@@ -432,13 +434,19 @@ fn decoded_frame_ui<'a>(
                 &format!("{stream_kind}_preview"),
                 &re_renderer::renderer::ColormappedTexture::from_video_frame(texture.clone()),
                 preview_size,
-                &|| match re_renderer::schedule_read_texture(ctx.render_ctx, &texture.inner.texture)
-                {
-                    Ok(id) => ctx
-                        .command_sender
-                        .send_system(re_viewer_context::SystemCommand::ReadbackAndSaveTexture(id)),
-                    Err(err) => {
-                        re_log::error!("Failed to save {stream_kind} preview: {err}");
+                &|| {
+                    if let Some(save) = save_override {
+                        save();
+                        return;
+                    }
+                    match re_renderer::schedule_read_texture(ctx.render_ctx, &texture.inner.texture)
+                    {
+                        Ok(id) => ctx.command_sender.send_system(
+                            re_viewer_context::SystemCommand::ReadbackAndSaveTexture(id),
+                        ),
+                        Err(err) => {
+                            re_log::error!("Failed to save {stream_kind} preview: {err}");
+                        }
                     }
                 },
             )
@@ -831,7 +839,13 @@ impl VideoUi {
         ))
     }
 
-    pub fn data_ui(&self, ctx: &StoreViewContext<'_>, ui: &mut egui::Ui, ui_layout: UiLayout) {
+    pub fn data_ui(
+        &self,
+        ctx: &StoreViewContext<'_>,
+        ui: &mut egui::Ui,
+        ui_layout: UiLayout,
+        entity_path: &re_log_types::EntityPath,
+    ) {
         match self {
             Self::Stream(video_stream_result, sample_component, stream_kind) => {
                 video_stream_result_ui(ui, ui_layout, video_stream_result, *stream_kind);
@@ -847,9 +861,59 @@ impl VideoUi {
                     Some(buffer)
                 };
 
+                // Save the original encoded bytes (e.g. .jpg) rather than re-encoding the decoded frame as PNG.
+                let save_original_encoded_image = || {
+                    let query = ctx.query();
+                    let Some(((_, _), blob)) = ctx
+                        .db
+                        .latest_at_component::<re_sdk_types::components::Blob>(
+                            entity_path,
+                            &query,
+                            archetypes::EncodedImage::descriptor_blob().component,
+                        )
+                    else {
+                        re_log::error!("Could not find encoded image blob to save");
+                        return;
+                    };
+
+                    let media_type = ctx
+                        .db
+                        .latest_at_component::<MediaType>(
+                            entity_path,
+                            &query,
+                            archetypes::EncodedImage::descriptor_media_type().component,
+                        )
+                        .map(|(_, c)| c)
+                        .or_else(|| MediaType::guess_from_data(&blob));
+
+                    let mut file_name = entity_path
+                        .last()
+                        .map_or("image", |name| name.unescaped_str())
+                        .to_owned();
+                    if let Some(ext) = media_type.as_ref().and_then(|mt| mt.file_extension()) {
+                        file_name.push('.');
+                        file_name.push_str(ext);
+                    }
+
+                    ctx.command_sender.save_file_dialog(
+                        re_capabilities::MainThreadToken::i_promise_i_am_on_the_main_thread(),
+                        &file_name,
+                        "Save image".to_owned(),
+                        blob.to_vec(),
+                    );
+                };
+
                 if let Ok(video) = video_stream_result {
                     let video = video.read();
                     let time = video_stream_time_from_query(&ctx.query());
+                    let is_encoded_image_stream = *stream_kind == StreamKind::Image
+                        && *sample_component
+                            == archetypes::EncodedImage::descriptor_blob().component;
+                    let save_override: Option<&dyn Fn()> = if is_encoded_image_stream {
+                        Some(&save_original_encoded_image)
+                    } else {
+                        None
+                    };
                     decoded_frame_ui(
                         ctx,
                         ui,
@@ -862,6 +926,7 @@ impl VideoUi {
 
                             buffer.map(|b| b.as_slice()).unwrap_or(&[])
                         },
+                        save_override,
                     );
                 }
             }
@@ -898,6 +963,7 @@ impl VideoUi {
                         video_time,
                         StreamKind::Video,
                         &|_| blob,
+                        None,
                     );
                 }
             }

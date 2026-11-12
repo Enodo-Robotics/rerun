@@ -218,6 +218,13 @@ impl SystemCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionSource {
     ListItemNavigation,
+
+    /// Driven from outside the viewer, e.g. by a framing command.
+    ///
+    /// Such selections can arrive many times per second, so they must not scroll panels to the
+    /// item or take keyboard focus — that would fight the user for control of the UI.
+    ExternalCommand,
+
     Other,
 }
 
