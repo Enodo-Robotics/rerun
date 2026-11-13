@@ -1,0 +1,37 @@
+name: Publish
+
+# Releases build on the public fork, Enodo-Robotics/rerun, where GitHub-hosted
+# runners are free and the wheel URLs that enodo_motion and enodo_stream pin
+# keep working. Pushing an RRL-v* tag here (Claude does it on "@claude
+# release") pushes the tagged commit to the public fork's main, and the tag;
+# the tag runs build_wheels_on_tag.yml there, which uploads the wheels to the
+# public release.
+#
+# Pushes over SSH with a deploy key of the public fork that may write
+# (secret PUBLIC_FORK_DEPLOY_KEY). Never forces: if the public main has
+# commits this one lacks, the push fails and says so.
+on:
+  push:
+    tags: ["RRL-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          KEY: ${{ secrets.PUBLIC_FORK_DEPLOY_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/public_fork && chmod 600 ~/.ssh/public_fork
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/public_fork -o IdentitiesOnly=yes"
+          git push git@github.com:Enodo-Robotics/rerun.git "$TAG^{commit}:refs/heads/main" "refs/tags/$TAG"
+          echo "Pushed $TAG to Enodo-Robotics/rerun: https://github.com/Enodo-Robotics/rerun/actions/workflows/build_wheels_on_tag.yml" >> "$GITHUB_STEP_SUMMARY"

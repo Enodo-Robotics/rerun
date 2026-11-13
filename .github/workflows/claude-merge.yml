@@ -1,0 +1,94 @@
+name: Claude merge
+
+# Claude squash-merges a PR it looks after (.github/scripts/is-claude-pr.sh)
+# once a person has approved its current head and CI has passed on it,
+# whichever comes last: an approval merges right away if CI is already green,
+# and a green CI run merges if the head is already approved. Nothing waits in
+# between, which would cost Actions minutes. Claude merges with the Claude
+# GitHub App's token, so the push to main runs CI and claude-sync (a merge
+# with the workflow token would not trigger them).
+on:
+  pull_request_review:
+    types: [submitted]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  actions: read
+  checks: read
+
+jobs:
+  check:
+    if: |
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.review.user.type == 'User') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0])
+    runs-on: ubuntu-24.04
+    outputs:
+      pr: ${{ steps.check.outputs.pr }}
+      sha: ${{ steps.check.outputs.sha }}
+      approver: ${{ steps.check.outputs.approver }}
+      summary: ${{ steps.check.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          set -euo pipefail
+          .github/scripts/is-claude-pr.sh "$PR" || { echo "Claude does not look after PR #$PR"; exit 0; }
+          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          # Each person's latest review, if it approves the current head.
+          approver=$(gh api --paginate "repos/$REPO/pulls/$PR/reviews" \
+            --jq '[.[] | select(.user.type == "User" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED"))]' |
+            jq -s -r --arg sha "$sha" 'add | group_by(.user.login) | map(max_by(.id)) |
+              map(select(.state == "APPROVED" and .commit_id == $sha)) | first | .user.login // ""')
+          [ -n "$approver" ] || { echo "PR #$PR's head $sha is not approved"; exit 0; }
+          # The latest run of each workflow on the head, other than Claude's own.
+          runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&per_page=100" \
+            --jq '[.workflow_runs[] | select(.name | test("^Claude") | not)] | group_by(.name) | map(max_by(.id))')
+          ci=$(jq -r 'map(select(.name == "CI")) | first | .conclusion // "missing"' <<<"$runs")
+          [ "$ci" = success ] || { echo "CI on $sha: $ci"; exit 0; }
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "approver=$approver" >> "$GITHUB_OUTPUT"
+          echo "summary=$(jq -r 'map("\(.name): \(.conclusion // .status)") | join("; ")' <<<"$runs")" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: check
+    if: needs.check.outputs.pr != ''
+    concurrency:
+      group: claude-${{ needs.check.outputs.pr }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      checks: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The CI run that triggers this was usually started by Claude's push.
+          allowed_bots: claude
+          prompt: |
+            Repository: ${{ github.repository }}. @${{ needs.check.outputs.approver }} approved
+            PR #${{ needs.check.outputs.pr }} at ${{ needs.check.outputs.sha }}, and CI passed on it.
+            Its checks, other than the Claude workflows' own, ended as: ${{ needs.check.outputs.summary }}.
+            Follow "Merging an approved PR" in CLAUDE.md.
+          claude_args: |
+            --model claude-sonnet-5-5
+            --max-turns 60
+            --allowedTools "Bash(gh:*),Bash(git:*),Read"

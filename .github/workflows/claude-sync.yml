@@ -1,0 +1,86 @@
+name: Claude sync
+
+# After every push to main, Claude merges main into each open PR it looks
+# after (.github/scripts/is-claude-pr.sh) that now conflicts with it, and
+# resolves the conflicts, so the PR stays mergeable. PRs that are only behind
+# main are left alone. Merges, never rebases or force-pushes.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  behind:
+    runs-on: ubuntu-24.04
+    outputs:
+      prs: ${{ steps.list.outputs.prs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prs='[]'
+          for n in $(gh pr list --repo "$REPO" --state open --json number --jq '.[].number'); do
+            .github/scripts/is-claude-pr.sh "$n" || continue
+            # GitHub works out mergeable in the background; null until it has.
+            for _ in $(seq 1 10); do
+              pull=$(gh api "repos/$REPO/pulls/$n")
+              mergeable=$(jq -r .mergeable <<<"$pull")
+              [ "$mergeable" != null ] && break
+              sleep 6
+            done
+            head=$(jq -r .head.ref <<<"$pull")
+            echo "#$n ($head) mergeable: $mergeable"
+            if [ "$mergeable" = false ]; then
+              prs=$(jq -c --argjson n "$n" --arg b "$head" '. + [{number: $n, branch: $b}]' <<<"$prs")
+            fi
+          done
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+
+  sync:
+    needs: behind
+    if: needs.behind.outputs.prs != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.behind.outputs.prs) }}
+    concurrency:
+      group: claude-${{ matrix.pr.number }}
+      cancel-in-progress: false
+    runs-on: claude
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.pr.branch }}
+          fetch-depth: 0
+      - uses: ./.github/actions/claude-setup
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # main may have moved because Claude merged a PR.
+          allowed_bots: claude
+          prompt: |
+            Repository: ${{ github.repository }}. PR #${{ matrix.pr.number }} (branch
+            `${{ matrix.pr.branch }}`, checked out) conflicts with main. Resolve it by
+            following "Resolving conflicts with main" in CLAUDE.md.
+          claude_args: |
+            --model claude-opus-5-5
+            --max-turns 200
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep"

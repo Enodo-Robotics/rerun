@@ -1456,9 +1456,8 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
         return;
     }
 
-    let timeline = match ctx.time_ctrl.timeline().cloned() {
-        Some(tl) => tl,
-        None => return,
+    let Some(timeline) = ctx.time_ctrl.timeline().copied() else {
+        return;
     };
     let Some(current_time) = ctx.time_ctrl.time_int() else {
         return;
@@ -1500,9 +1499,9 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
         let label = text.0.0.as_str().to_owned();
         let level_str = level.map(|l| l.0.0.as_str().to_owned()).unwrap_or_default();
         let color = match level_str.as_str() {
-            "WARN" => egui::Color32::from_rgb(255, 165, 0),
-            "ERROR" => egui::Color32::from_rgb(255, 80, 80),
-            _ => egui::Color32::from_rgb(100, 180, 255),
+            "WARN" => ctx.tokens().alert_warning.icon,
+            "ERROR" => ctx.tokens().alert_error.icon,
+            _ => ctx.tokens().alert_info.icon,
         };
 
         let info = TagInfo {
@@ -1538,7 +1537,7 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
                     .send_system(SystemCommand::ClearAnnotation {
                         store_id,
                         entity_path: tag.path.clone(),
-                        timeline: timeline.clone(),
+                        timeline,
                         time: current_time,
                     });
             }

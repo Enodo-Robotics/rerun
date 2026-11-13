@@ -1278,7 +1278,7 @@ impl MaximizeAnimationState {
 /// by tag label. Clicking a chip multi-selects all entities with that tag.
 fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin: &EntityPath) {
     let recording = ctx.recording();
-    let Some(timeline) = ctx.time_ctrl.timeline().cloned() else {
+    let Some(timeline) = ctx.time_ctrl.timeline().copied() else {
         return;
     };
     let Some(current_time) = ctx.time_ctrl.time_int() else {
@@ -1345,9 +1345,9 @@ fn annotation_tag_chips(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, space_origin
         let label = text.0.0.as_str().to_owned();
         let level_str = level.map(|l| l.0.0.as_str().to_owned()).unwrap_or_default();
         let color = match level_str.as_str() {
-            "WARN" => egui::Color32::from_rgb(255, 165, 0),
-            "ERROR" => egui::Color32::from_rgb(255, 80, 80),
-            _ => egui::Color32::from_rgb(100, 180, 255),
+            "WARN" => ctx.tokens().alert_warning.icon,
+            "ERROR" => ctx.tokens().alert_error.icon,
+            _ => ctx.tokens().alert_info.icon,
         };
         let entry = tag_entities
             .entry(label)

@@ -12,6 +12,10 @@ permissions:
 jobs:
   build-wheel:
     name: "Build Wheel (${{ matrix.name }})"
+    # Only on the public fork: in the private Enodo-Robotics/rerun-dev these
+    # runners (macOS at 10x) would cost Actions minutes. publish.yml there
+    # pushes release tags here.
+    if: github.repository == 'Enodo-Robotics/rerun'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
 

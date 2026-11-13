@@ -349,7 +349,7 @@ fn timestamp_ui(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn decoded_frame_ui<'a>(
     ctx: &re_viewer_context::AppContext<'_>,
     ui: &mut egui::Ui,

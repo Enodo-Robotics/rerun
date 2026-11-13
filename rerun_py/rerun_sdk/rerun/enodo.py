@@ -169,7 +169,8 @@ def mark_event(
     if not name:
         raise ValueError("Event name must not be empty")
 
-    extra = AnyValues(duration=pa.array([float(duration)], type=pa.float64())) if duration is not None else AnyValues()
+    # Only with a duration: an empty AnyValues makes `log` warn on every marker.
+    extras = [AnyValues(duration=pa.array([float(duration)], type=pa.float64()))] if duration is not None else []
 
     # The name travels in the entity path, so the sink reads it without decoding any component,
     # and `TextLog` makes the marker visible on the viewer's timeline.
@@ -178,6 +179,6 @@ def mark_event(
     log(
         f"{EVENT_MARKER_ENTITY_PATH_PREFIX}/{escape_entity_path_part(name)}",
         TextLog(name),
-        extra,
+        *extras,
         recording=recording,
     )

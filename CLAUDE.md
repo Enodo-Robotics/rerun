@@ -187,13 +187,19 @@ Key things to know:
 
 ## Enodo Robotics fork (RRL) — custom features
 
-This is a fork maintained by Enodo Robotics. Release wheels are built by a single GitHub Actions workflow triggered by tags matching `RRL-v*`:
+This is a fork maintained by Enodo Robotics. Development happens in the private
+`Enodo-Robotics/rerun-dev` (issues, PRs, previews, Claude); releases build on the public
+fork `Enodo-Robotics/rerun`, whose release wheel URLs `enodo_motion` and `enodo_stream` pin.
+A release is a tag matching `RRL-v*` on `main` here:
 
 ```
-git tag RRL-v3.0.0 && git push origin RRL-v3.0.0
+git tag -a RRL-v3.3.0 -m RRL-v3.3.0 origin/main && git push origin RRL-v3.3.0
 ```
 
-Wheels are built on GitHub-hosted runners (`ubuntu-22.04`, `windows-latest`, `macos-latest`) and uploaded to a GitHub release for the tag. Workflow: `.github/workflows/build_wheels_on_tag.yml`.
+`.github/workflows/publish.yml` then pushes the tagged commit to the public fork's `main`
+together with the tag, and the tag runs `.github/workflows/build_wheels_on_tag.yml` there:
+wheels for Linux, Windows and macOS on GitHub-hosted runners, uploaded to the public
+release. (That workflow does nothing in `rerun-dev`.)
 
 ### Custom CLI flags added to the `rerun` binary
 
@@ -283,3 +289,87 @@ unlike focus commands, which are dropped — so the Text Log view shows on the t
 was flagged. Implementation: `EventSpan`, `event_span_from_chunk`, `events_covering` and
 `sanitize_event_name` in `entrypoint.rs`; `MsgRoute::EventMarker` routes a marker to the temporal
 sink while the rotation loop collects it for the filename.
+
+### Checks
+
+These are what CI (`.github/workflows/ci.yml`) runs, so run them before you push. The first
+build after a fresh checkout needs the PyO3 config (`pixi run ensure-pyo3-build-cfg`; on the
+runner, `.github/actions/claude-setup` has made it).
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- --deny warnings
+CLIPPY_CONF_DIR=scripts/clippy_wasm cargo clippy --locked --all-features --target wasm32-unknown-unknown --target-dir target_wasm -p re_viewer -- --deny warnings
+cargo nextest run --locked --all-targets --all-features --no-fail-fast
+cargo test --locked --all-features --doc
+```
+
+While you iterate, run clippy and nextest with `-p <crate>` for the crates you touch, then
+the whole set once at the end. UI changes have egui_kittest snapshot tests (PNG files under
+`snapshots/`, in Git LFS); if a snapshot changes on purpose, update it with
+`UPDATE_SNAPSHOTS=1` and look at the new PNG before you commit it.
+
+### Demo recordings
+
+Every PR gets a live preview on the tailnet: its web viewer, with a recording from each
+script in `enodo_demos/`, made with the PR's own Python SDK (`enodo_demos/README.md`). A
+`Preview: enodo_demos/<name>.py` line in the PR description makes its link open that
+recording.
+
+When a feature is visible, add a small demo script there that shows it off, or extend the
+one for that feature, and check that it runs (`tools/build_preview.sh /tmp/site` builds the SDK and runs
+them all; after that `python enodo_demos/<name>.py /tmp/x.rrd` runs one). Keep demos tiny,
+deterministic and generic: boxes, points, synthetic signals, no real robot data or internal
+names.
+
+## Working from GitHub
+
+Claude also runs in GitHub Actions (`claude*.yml`), in a container on our self-hosted runner
+(`docker/claude-runner`, label `claude`): Rust with the wasm target, binaryen, pixi,
+cargo-nextest, Mesa's software Vulkan for the snapshot tests, and a Python venv on `PATH`
+(`tools/build_preview.sh` builds the SDK into it, along with the web viewer and the demo
+recordings). `CARGO_TARGET_DIR`
+is a cache kept between jobs, so builds are incremental. `gh` is logged in as the Claude
+GitHub App, and its pushes trigger CI and the preview. There is no one to ask while you run,
+so decide sensibly, then say what you decided and why in your reply. Never force-push, rebase
+a pushed branch, approve a PR or push to main, except for a release tag.
+
+Keep fork changes easy to carry onto newer upstream releases: put new code in new files or
+clearly marked blocks where you can, and don't reformat or restructure upstream code you
+don't need to change.
+
+**An issue for you** (mentioning @claude): implement it on a branch from main, following
+everything above (tests, a demo recording when there is something to see, the checks). If
+an open PR already closes the issue, continue on that one. Open the PR with `gh pr create`;
+its description says what changed and why, what you decided that the issue left open, a
+`Preview: enodo_demos/<name>.py` line when there is something to see, and
+`Closes #<issue>`. Reply on the issue with the link. If the issue is a question, or is too
+unclear to start, answer or ask on the issue instead.
+
+**Feedback on a PR** (@claude in a comment or review): read all of it, including inline
+comments and the earlier discussion, then push commits to the PR's branch and reply with
+what changed. The push reruns CI and the preview; `gh pr checks` shows the result.
+
+**Resolving conflicts with main** (claude-sync, or when asked): `git fetch origin` and
+`git merge origin/main`. When both sides add to the same place, keep both. Check that
+`git diff origin/main` only has the PR's own changes, run the checks, and fix what the merge
+broke. Commit as `Merge main into <branch>` and push. If a conflict needs a decision only the
+author can make, push nothing and explain on the PR.
+
+**When CI fails** (claude-ci-fix): read `gh run view <id> --log-failed`, find the cause, fix
+it, run the failing check yourself, and push. If it passes unchanged on a rerun and looks
+flaky, `gh run rerun <id> --failed` and say so on the PR. From the third failed run in a row,
+push nothing: comment on the PR with what fails and what you tried.
+
+**Merging an approved PR** (claude-merge): the workflow runs once a person has approved the
+PR's current head and CI has passed on it, and tells you how its checks ended. If the PR is
+mergeable, run `gh pr merge <n> --squash --delete-branch` with the PR's title and a body
+summing up the PR (keep `Closes #<issue>`). Otherwise don't merge: say on the PR what is
+blocking.
+
+**A release** ("@claude release", optionally with a version): pick the version from what
+merged since the last tag (`git describe --tags --abbrev=0 --match 'RRL-v*'`): minor for
+features, patch for fixes only. Tag main's head (`git tag -a RRL-v<x.y.z> -m RRL-v<x.y.z>
+origin/main`) and push the tag; `publish.yml` pushes it to the public fork, where the wheels
+build. Reply with the version, a short summary of what is in it, and links to the publish
+run and to https://github.com/Enodo-Robotics/rerun/actions/workflows/build_wheels_on_tag.yml.

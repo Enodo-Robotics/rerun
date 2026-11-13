@@ -1,0 +1,107 @@
+name: Preview
+
+# Serves each open PR's web viewer on the tailnet, with a recording from every
+# demo script in enodo_demos/ made with the PR's own Python SDK, and links it in
+# a PR comment. A `Preview: enodo_demos/<name>.py` line in the PR description
+# makes the link open that demo's recording. The site is built on the `claude`
+# runner (tools/build_preview.sh) and served by the runner on the host
+# (tools/preview.sh, label rerun-preview); it is rebuilt on every push and
+# removed when the PR closes.
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, closed]
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  build:
+    # Editing the description only changes the link; no rebuild needed.
+    if: github.event.action != 'closed' && github.event.action != 'edited'
+    runs-on: claude
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: ./.github/actions/claude-setup
+        with:
+          lfs: "false"
+      - run: tools/build_preview.sh "$RUNNER_TEMP/site"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: preview-site
+          path: ${{ runner.temp }}/site
+          retention-days: 1
+
+  up:
+    needs: build
+    if: always() && github.event.action != 'closed' && (needs.build.result == 'success' || github.event.action == 'edited')
+    runs-on: [self-hosted, rerun-preview]
+    steps:
+      - if: github.event.action != 'edited'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          sparse-checkout: tools
+      - if: github.event.action != 'edited'
+        uses: actions/download-artifact@v4
+        with:
+          name: preview-site
+          path: ${{ runner.temp }}/site
+      - id: preview
+        if: github.event.action != 'edited'
+        run: tools/preview.sh up ${{ github.event.pull_request.number }} "$RUNNER_TEMP/site"
+      - uses: actions/github-script@v7
+        env:
+          URL: ${{ steps.preview.outputs.url }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        with:
+          script: |
+            const marker = '<!-- rerun-preview -->';
+            const issue = { ...context.repo, issue_number: context.issue.number };
+            const comments = await github.paginate(github.rest.issues.listComments, issue);
+            const old = comments.find(c => c.body?.startsWith(marker));
+            // On an edit nothing was rebuilt, so keep the running preview's URL.
+            const base = process.env.URL || old?.body.match(/\]\((http[^)?]+?)(?:recordings\.html|\?)/)?.[1];
+            if (!base) return;
+            // `Preview: enodo_demos/foo.py` → its recording; `Preview: private/bar.rrd` → that file.
+            const target = (process.env.PR_BODY || '').match(/^Preview:\s*`?([\w./-]+\.(?:py|rrd))`?\s*$/m)?.[1];
+            let rrd = null;
+            if (target?.endsWith('.py')) rrd = `recordings/${target.split('/').pop().replace(/\.py$/, '.rrd')}`;
+            else if (target) rrd = `recordings/${target}`;
+            // The viewer needs an absolute ?url= (it would read `recordings/…` as a host name).
+            const link = rrd ? `${base}?url=${encodeURIComponent(base + rrd)}` : `${base}recordings.html`;
+            const body = `${marker}\n**Try it:** [${target || 'all demo recordings'}](${link}) ` +
+              `(${process.env.SHA.slice(0, 7)}, on the tailnet)` +
+              (rrd ? ` · [all recordings](${base}recordings.html)` : '') + `\n\n` +
+              `The PR's web viewer, with a recording from each script in \`enodo_demos/\` made by the PR's ` +
+              `Python SDK. Rebuilt on every push.`;
+            if (old) await github.rest.issues.updateComment({ ...context.repo, comment_id: old.id, body });
+            else await github.rest.issues.createComment({ ...issue, body });
+
+  down:
+    if: github.event.action == 'closed'
+    runs-on: [self-hosted, rerun-preview]
+    steps:
+      # The base branch's script: the PR's may be gone or changed.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          sparse-checkout: tools
+      - run: tools/preview.sh down ${{ github.event.pull_request.number }}
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = { ...context.repo, issue_number: context.issue.number };
+            const comments = await github.paginate(github.rest.issues.listComments, issue);
+            const old = comments.find(c => c.body?.startsWith('<!-- rerun-preview -->'));
+            if (old) await github.rest.issues.updateComment({ ...context.repo, comment_id: old.id,
+              body: '<!-- rerun-preview -->\nThe preview stopped when this PR closed.' });

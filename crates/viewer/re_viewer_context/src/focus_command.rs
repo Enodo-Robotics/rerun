@@ -226,6 +226,90 @@ fn bool_from_arrow(array: &ArrayRef) -> Option<bool> {
     (!array.is_empty() && array.is_valid(0)).then(|| array.value(0))
 }
 
+/// Read a colour from an arrow array of 3 or 4 numbers in `0..=255` (RGB or RGBA).
+fn color_from_arrow(array: &ArrayRef) -> Option<egui::Color32> {
+    use arrow::datatypes::DataType;
+
+    if !matches!(
+        array.data_type(),
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        re_log::warn_once!(
+            "Focus command: `{COMPONENT_COLOR}` should be 3 or 4 numbers in 0..=255, but it is {:?}.",
+            array.data_type()
+        );
+        return None;
+    }
+
+    let array = arrow::compute::cast(array, &DataType::Int64).ok()?;
+    let array = array.as_any().downcast_ref::<arrow::array::Int64Array>()?;
+
+    if array.len() != 3 && array.len() != 4 {
+        re_log::warn_once!(
+            "Focus command: `{COMPONENT_COLOR}` should have 3 or 4 values, got {}.",
+            array.len()
+        );
+        return None;
+    }
+
+    let channel = |i: usize| array.value(i).clamp(0, 255) as u8;
+
+    // Not a hard-coded colour: this one comes from the driving application, so there is no
+    // design token to declare.
+    #[expect(clippy::disallowed_methods)]
+    Some(egui::Color32::from_rgba_unmultiplied(
+        channel(0),
+        channel(1),
+        channel(2),
+        if array.len() == 4 { channel(3) } else { 255 },
+    ))
+}
+
+/// Read a single finite, positive number from an arrow array.
+fn f32_from_arrow(array: &ArrayRef) -> Option<f32> {
+    use arrow::datatypes::DataType;
+
+    if !matches!(
+        array.data_type(),
+        DataType::Float32
+            | DataType::Float64
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        re_log::warn_once!(
+            "Focus command: `{COMPONENT_WIDTH}` should be a number, but it is {:?}.",
+            array.data_type()
+        );
+        return None;
+    }
+
+    let array = arrow::compute::cast(array, &DataType::Float64).ok()?;
+    let array = array
+        .as_any()
+        .downcast_ref::<arrow::array::Float64Array>()?;
+    if array.is_empty() || !array.is_valid(0) {
+        return None;
+    }
+
+    let value = array.value(0) as f32;
+    // A NaN or non-positive multiplier would make the outline vanish or the radius meaningless;
+    // fall back to the default rather than honour it.
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -407,10 +491,10 @@ mod tests {
             ("color", Arc::new(Int64Array::from(vec![255_i64, 140, 0]))),
         ]);
         let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
-        assert_eq!(
-            command.outline_color,
-            Some(egui::Color32::from_rgb(255, 140, 0))
-        );
+        // The colour the command carries, not a hard-coded UI colour.
+        #[expect(clippy::disallowed_methods)]
+        let expected = egui::Color32::from_rgb(255, 140, 0);
+        assert_eq!(command.outline_color, Some(expected));
     }
 
     #[test]
@@ -423,10 +507,10 @@ mod tests {
             ),
         ]);
         let (_, command) = FocusCommand::latest_from_db(&db).expect("should find a command");
-        assert_eq!(
-            command.outline_color,
-            Some(egui::Color32::from_rgba_unmultiplied(10, 20, 30, 128))
-        );
+        // The colour the command carries, not a hard-coded UI colour.
+        #[expect(clippy::disallowed_methods)]
+        let expected = egui::Color32::from_rgba_unmultiplied(10, 20, 30, 128);
+        assert_eq!(command.outline_color, Some(expected));
     }
 
     #[test]
@@ -531,88 +615,4 @@ mod tests {
             .moves_camera()
         );
     }
-}
-
-/// Read a colour from an arrow array of 3 or 4 numbers in `0..=255` (RGB or RGBA).
-fn color_from_arrow(array: &ArrayRef) -> Option<egui::Color32> {
-    use arrow::datatypes::DataType;
-
-    if !matches!(
-        array.data_type(),
-        DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-    ) {
-        re_log::warn_once!(
-            "Focus command: `{COMPONENT_COLOR}` should be 3 or 4 numbers in 0..=255, but it is {:?}.",
-            array.data_type()
-        );
-        return None;
-    }
-
-    let array = arrow::compute::cast(array, &DataType::Int64).ok()?;
-    let array = array.as_any().downcast_ref::<arrow::array::Int64Array>()?;
-
-    if array.len() != 3 && array.len() != 4 {
-        re_log::warn_once!(
-            "Focus command: `{COMPONENT_COLOR}` should have 3 or 4 values, got {}.",
-            array.len()
-        );
-        return None;
-    }
-
-    let channel = |i: usize| array.value(i).clamp(0, 255) as u8;
-
-    // Not a hard-coded colour: this one comes from the driving application, so there is no
-    // design token to declare.
-    #[expect(clippy::disallowed_methods)]
-    Some(egui::Color32::from_rgba_unmultiplied(
-        channel(0),
-        channel(1),
-        channel(2),
-        if array.len() == 4 { channel(3) } else { 255 },
-    ))
-}
-
-/// Read a single finite, positive number from an arrow array.
-fn f32_from_arrow(array: &ArrayRef) -> Option<f32> {
-    use arrow::datatypes::DataType;
-
-    if !matches!(
-        array.data_type(),
-        DataType::Float32
-            | DataType::Float64
-            | DataType::Int8
-            | DataType::Int16
-            | DataType::Int32
-            | DataType::Int64
-            | DataType::UInt8
-            | DataType::UInt16
-            | DataType::UInt32
-            | DataType::UInt64
-    ) {
-        re_log::warn_once!(
-            "Focus command: `{COMPONENT_WIDTH}` should be a number, but it is {:?}.",
-            array.data_type()
-        );
-        return None;
-    }
-
-    let array = arrow::compute::cast(array, &DataType::Float64).ok()?;
-    let array = array
-        .as_any()
-        .downcast_ref::<arrow::array::Float64Array>()?;
-    if array.is_empty() || !array.is_valid(0) {
-        return None;
-    }
-
-    let value = array.value(0) as f32;
-    // A NaN or non-positive multiplier would make the outline vanish or the radius meaningless;
-    // fall back to the default rather than honour it.
-    (value.is_finite() && value > 0.0).then_some(value)
 }

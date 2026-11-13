@@ -401,8 +401,7 @@ fn table_ui(
                             .get(&timeline)
                             .map(re_log_types::TimeInt::from)
                             .unwrap_or(re_log_types::TimeInt::STATIC);
-                        let time_response =
-                            item_ui::time_button(ctx, ui, &timeline, row_time);
+                        let time_response = item_ui::time_button(ctx, ui, &timeline, row_time);
 
                         // Clicking the time button also selects the row's entity.
                         // For _annotation paths, select the parent entity instead.

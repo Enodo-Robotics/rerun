@@ -28,9 +28,9 @@ pub fn tag_chip(
 /// Render a non-interactive tag chip label (colored rounded rect with white text).
 pub fn tag_chip_label(ui: &mut egui::Ui, label: &str, bg_color: egui::Color32) {
     let font_id = egui::TextStyle::Small.resolve(ui.style());
-    let galley =
-        ui.painter()
-            .layout_no_wrap(label.to_owned(), font_id, egui::Color32::WHITE);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font_id, egui::Color32::WHITE);
 
     let padding = egui::vec2(6.0, 2.0);
     let desired_size = galley.size() + padding * 2.0;

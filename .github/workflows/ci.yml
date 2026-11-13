@@ -1,0 +1,52 @@
+name: CI
+
+# The Rust checks of upstream's `pixi run rs-check` that matter for our
+# changes (base checks, the wasm viewer, the tests), on the `claude` runner
+# (docker/claude-runner, a warm build cache on our machine) rather than
+# GitHub-hosted runners: this repo is private, and its Actions minutes are
+# few. The full upstream matrix stays upstream's.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: claude
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/claude-setup
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- --deny warnings
+      # After clippy: docs/snippets/src/snippets.rs, which rustfmt needs, is
+      # made by that crate's build script.
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (wasm viewer)
+        env:
+          CLIPPY_CONF_DIR: scripts/clippy_wasm
+        run: |
+          cargo clippy --locked --all-features --target wasm32-unknown-unknown \
+            --target-dir "$HOME/cache/target_wasm" -p re_viewer -- --deny warnings
+      - name: Tests
+        run: cargo nextest run --locked --all-targets --all-features --no-fail-fast
+      - name: Doc tests
+        run: cargo test --locked --all-features --doc
+      - name: Snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-diffs
+          path: "**/snapshots/**/*.{diff,new}.png"
+          retention-days: 7
+          if-no-files-found: ignore
+
