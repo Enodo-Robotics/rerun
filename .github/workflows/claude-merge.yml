@@ -26,7 +26,7 @@ jobs:
     if: |
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.review.user.type == 'User') ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.pull_requests[0])
-    runs-on: ubuntu-24.04
+    runs-on: claude-light
     outputs:
       pr: ${{ steps.check.outputs.pr }}
       sha: ${{ steps.check.outputs.sha }}
@@ -67,7 +67,7 @@ jobs:
     concurrency:
       group: claude-${{ needs.check.outputs.pr }}
       cancel-in-progress: false
-    runs-on: ubuntu-24.04
+    runs-on: claude-light
     timeout-minutes: 30
     permissions:
       contents: write

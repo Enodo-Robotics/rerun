@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   behind:
-    runs-on: ubuntu-24.04
+    runs-on: claude-light
     outputs:
       prs: ${{ steps.list.outputs.prs }}
     steps:

@@ -16,7 +16,7 @@ permissions:
 jobs:
   review:
     if: github.event.pull_request.draft == false
-    runs-on: ubuntu-24.04
+    runs-on: claude-light
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

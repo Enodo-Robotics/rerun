@@ -19,7 +19,8 @@
 #
 # Run install from the main checkout, which the services point to. Needs Docker
 # and `gh` logged in as a repo admin (for registration tokens). The workflows
-# use these runners through the `claude` label.
+# use these runners through the `claude` label, and the short jobs through
+# `claude-light` (one more slot, `light`, that builds nothing).
 #
 # install also registers a plain runner on the host, with the label
 # rerun-preview, for the one job that needs the host: tools/preview.sh, which
@@ -68,6 +69,18 @@ online() {
 run() {
     slot="${1:?usage: $0 run <slot>}"
     name="rerun-claude-runner-$slot"
+    # The `light` slot takes the short jobs (claude-light: 👀, merge checks,
+    # reviews' setup, publishing), so they don't wait behind a build. It
+    # builds nothing, so it needs little memory and no caches.
+    if [[ "$slot" == light ]]; then
+        opts=(--memory 4g -e RUNNER_LABELS=claude-light -v rerun-claude-light-work:/home/runner/work)
+    else
+        opts=(--memory "$memory" -e CARGO_BUILD_JOBS="$jobs"
+            -v rerun-claude-cargo-registry:/opt/cargo/registry
+            -v rerun-claude-cargo-git:/opt/cargo/git
+            -v "rerun-claude-$slot-cache:/home/runner/cache"
+            -v "rerun-claude-$slot-work:/home/runner/work")
+    fi
     make_network
     while true; do
         if reachable; then
@@ -82,14 +95,9 @@ run() {
         fi
         docker run --rm --init --name "$name" --network "$network" \
             --dns 1.1.1.1 --dns 8.8.8.8 \
-            --memory "$memory" --pids-limit 4096 --cap-drop ALL --security-opt no-new-privileges \
-            -e CARGO_BUILD_JOBS="$jobs" \
+            --pids-limit 4096 --cap-drop ALL --security-opt no-new-privileges "${opts[@]}" \
             -e RUNNER_URL="https://github.com/$repo" -e RUNNER_TOKEN="$token" \
             -e RUNNER_NAME="$(hostname)-rerun-$slot" \
-            -v rerun-claude-cargo-registry:/opt/cargo/registry \
-            -v rerun-claude-cargo-git:/opt/cargo/git \
-            -v "rerun-claude-$slot-cache:/home/runner/cache" \
-            -v "rerun-claude-$slot-work:/home/runner/work" \
             "$image" || sleep 30
     done
 }
@@ -155,11 +163,11 @@ install() {
     mkdir -p ~/.config/systemd/user
     runner_unit > ~/.config/systemd/user/rerun-claude-runner@.service
     systemctl --user daemon-reload
-    for slot in $(seq "$slots"); do
+    for slot in $(seq "$slots") light; do
         systemctl --user enable --now "rerun-claude-runner@$slot.service"
     done
     preview_runner
-    echo "Started $slots slots and the preview runner. Logs: journalctl --user -u 'rerun-*' -f"
+    echo "Started $slots slots, the light slot and the preview runner. Logs: journalctl --user -u 'rerun-*' -f"
 }
 
 "${1:?usage: $0 install|build|run <slot>}" "${@:2}"

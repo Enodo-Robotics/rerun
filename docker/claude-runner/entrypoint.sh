@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Registers an ephemeral runner with the `claude` label only (so jobs that ask
-# for `self-hosted` stay on the host runner), runs one job, and exits.
+# Registers an ephemeral runner with the `claude` label only, or RUNNER_LABELS
+# (so jobs that ask for `self-hosted` stay on the host runner), runs one job,
+# and exits.
 set -euo pipefail
 
 # Keeps the build cache under its limit (rerun's target dir grows quickly).
@@ -10,7 +11,7 @@ if [ "$(du -sm "$CARGO_TARGET_DIR" | cut -f1)" -gt "$limit_mb" ]; then
 fi
 
 cd /home/runner/actions-runner
-./config.sh --unattended --ephemeral --replace --no-default-labels --labels claude \
+./config.sh --unattended --ephemeral --replace --no-default-labels --labels "${RUNNER_LABELS:-claude}" \
     --url "$RUNNER_URL" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --work /home/runner/work
 unset RUNNER_TOKEN
 exec ./run.sh

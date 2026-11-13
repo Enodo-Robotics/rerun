@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-24.04
+    runs-on: claude-light
     steps:
       - uses: actions/checkout@v4
         with:

@@ -18,7 +18,7 @@ permissions:
 jobs:
   check:
     if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.pull_requests[0]
-    runs-on: ubuntu-24.04
+    runs-on: claude-light
     outputs:
       pr: ${{ steps.pr.outputs.pr }}
       attempts: ${{ steps.pr.outputs.attempts }}

@@ -3,7 +3,7 @@
 # the wasm target, the system libraries of the Linux wheel build
 # (docker/Dockerfile), protoc, binaryen 121 (apt's 105 breaks the web viewer), pixi for
 # the `pixi run` tasks, cargo-nextest, Mesa's software Vulkan for the snapshot
-# tests, and gh. Started by tools/claude_runner.sh, one container per job.
+# tests, gh, and ssh (publish.yml). Started by tools/claude_runner.sh, one container per job.
 FROM ubuntu:22.04
 
 ARG RUNNER_VERSION=2.338.0
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libatk-bridge2.0-dev libatk1.0-dev libfontconfig-dev libfreetype-dev \
         libgl-dev libglib2.0-dev libgtk-3-dev libpango1.0-dev libssl-dev \
         libvulkan-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-        libxkbcommon-dev libwayland-dev mesa-vulkan-drivers nasm \
+        libxkbcommon-dev libwayland-dev mesa-vulkan-drivers nasm openssh-client \
         python3 python3-pip python3-venv python-is-python3 \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
