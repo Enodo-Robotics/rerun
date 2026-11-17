@@ -4,10 +4,17 @@
 # and exits.
 set -euo pipefail
 
-# Keeps the build cache under its limit (rerun's target dir grows quickly).
+# Keeps the build cache under its limit (rerun's target dir grows quickly, as
+# every change links new test binaries beside the old ones). First drop the
+# linked executables, which are most of it and only cost a relink; wipe the
+# compiled libraries too only if that is not enough.
 limit_mb="${TARGET_LIMIT_MB:-80000}"
-if [ "$(du -sm "$CARGO_TARGET_DIR" | cut -f1)" -gt "$limit_mb" ]; then
-    find "$CARGO_TARGET_DIR" -mindepth 1 -delete
+over() { [ "$(du -sm "$CARGO_TARGET_DIR" | cut -f1)" -gt "$limit_mb" ]; }
+if over; then
+    find "$CARGO_TARGET_DIR"/*/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete 2> /dev/null || true
+    if over; then
+        find "$CARGO_TARGET_DIR" -mindepth 1 -delete
+    fi
 fi
 
 cd /home/runner/actions-runner

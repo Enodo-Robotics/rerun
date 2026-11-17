@@ -1308,9 +1308,9 @@ impl App {
                             store_hub,
                             &self.view_class_registry,
                             &store_id,
-                            Arc::new(chunk),
+                            &Arc::new(chunk),
                         ) {
-                            Ok(_) => re_log::info!("Added annotation: {text}"),
+                            Ok(()) => re_log::info!("Added annotation: {text}"),
                             Err(err) => re_log::error!("Failed to add annotation chunk: {err}"),
                         }
                     }
@@ -1346,7 +1346,7 @@ impl App {
                         store_hub,
                         &self.view_class_registry,
                         &store_id,
-                        Arc::new(chunk),
+                        &Arc::new(chunk),
                     ) {
                         re_log::warn_once!("Failed to update recording: {err}");
                     }
@@ -1355,16 +1355,12 @@ impl App {
 
             #[cfg(not(target_arch = "wasm32"))]
             SystemCommand::ExportAnnotations { store_id } => {
-                if let Some(entity_db) = store_hub.entity_db_mut(&store_id) {
-                    match crate::ui::annotation_panel::prepare_annotation_export(entity_db) {
-                        Ok(Some(file_saver)) => {
-                            if let Err(err) = self.background_tasks.spawn_file_saver(file_saver) {
-                                re_log::error!("Failed to export annotations: {err}");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(err) => re_log::error!("Failed to prepare annotation export: {err}"),
-                    }
+                if let Some(entity_db) = store_hub.entity_db_mut(&store_id)
+                    && let Some(file_saver) =
+                        crate::ui::annotation_panel::prepare_annotation_export(entity_db)
+                    && let Err(err) = self.background_tasks.spawn_file_saver(file_saver)
+                {
+                    re_log::error!("Failed to export annotations: {err}");
                 }
             }
 
@@ -4124,10 +4120,10 @@ fn add_chunk_and_notify_cache(
     store_hub: &mut re_viewer_context::StoreHub,
     view_class_registry: &re_viewer_context::ViewClassRegistry,
     store_id: &re_log_types::StoreId,
-    chunk: Arc<re_chunk::Chunk>,
+    chunk: &Arc<re_chunk::Chunk>,
 ) -> Result<(), re_entity_db::Error> {
     let db = store_hub.entity_db_entry(store_id);
-    let events = db.add_chunk(&chunk)?;
+    let events = db.add_chunk(chunk)?;
 
     if let Some((db, cache)) = store_hub.entity_db_and_cache(store_id, view_class_registry) {
         cache.on_store_events(&events, db);

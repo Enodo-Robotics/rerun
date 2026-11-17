@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 use re_chunk::{Chunk, EntityPath, RowId, Timeline};
@@ -43,9 +44,16 @@ struct CustomTag {
     color: [u8; 3],
 }
 
+/// The annotation panel's colours: tag colours are data persisted with the tags, so they
+/// cannot live in the theme like other viewer colours.
+#[expect(clippy::disallowed_methods)]
+fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
+    egui::Color32::from_rgb(r, g, b)
+}
+
 impl CustomTag {
     fn egui_color(&self) -> egui::Color32 {
-        egui::Color32::from_rgb(self.color[0], self.color[1], self.color[2])
+        rgb(self.color[0], self.color[1], self.color[2])
     }
 }
 
@@ -121,7 +129,7 @@ impl AnnotationPanel {
     #[cfg(not(target_arch = "wasm32"))]
     fn save_now(&mut self, ctx: &ViewerContext<'_>) {
         if self.autosave_path.is_none() {
-            self.autosave_path = compute_autosave_path(ctx.store_context.recording);
+            self.autosave_path = Some(compute_autosave_path(ctx.store_context.recording));
         }
         if let Some(path) = &self.autosave_path {
             // Source from `self.annotations` (the panel's in-memory truth)
@@ -141,10 +149,10 @@ impl AnnotationPanel {
             .first_item()
             .and_then(|item| item.entity_path().cloned());
 
-        if let Some(ref sel) = current_selection {
-            if self.locked_entity.as_ref() != Some(sel) {
-                self.locked_entity = Some(sel.clone());
-            }
+        if let Some(ref sel) = current_selection
+            && self.locked_entity.as_ref() != Some(sel)
+        {
+            self.locked_entity = Some(sel.clone());
         }
     }
 
@@ -158,11 +166,11 @@ impl AnnotationPanel {
         self.update_locked_entity(ctx);
 
         let store_id = ctx.store_context.recording.store_id().clone();
-        let current_timeline = ctx.time_ctrl.timeline().cloned();
+        let current_timeline = ctx.time_ctrl.timeline().copied();
         let current_time = ctx.time_ctrl.time_int();
         let selected_entity = self.locked_entity.clone();
 
-        egui::TopBottomPanel::bottom("annotation_tag_bar")
+        egui::Panel::bottom("annotation_tag_bar")
             .resizable(false)
             .frame(egui::Frame {
                 fill: ui.style().visuals.panel_fill,
@@ -181,19 +189,19 @@ impl AnnotationPanel {
                     let tag_size = base_size * 1.25;
 
                     for (label, level, color) in &tags_snapshot {
-                        if tag_chip(ui, label, *color, Some(tag_size)).clicked() {
-                            if let (Some(time), Some(tl)) = (current_time, &current_timeline) {
-                                self.add_annotation(
-                                    ctx,
-                                    &store_id,
-                                    tl,
-                                    time,
-                                    label.clone(),
-                                    level.clone(),
-                                    *color,
-                                    selected_entity.as_ref(),
-                                );
-                            }
+                        if tag_chip(ui, label, *color, Some(tag_size)).clicked()
+                            && let (Some(time), Some(tl)) = (current_time, &current_timeline)
+                        {
+                            self.add_annotation(
+                                ctx,
+                                &store_id,
+                                tl,
+                                time,
+                                label.clone(),
+                                level.clone(),
+                                *color,
+                                selected_entity.as_ref(),
+                            );
                         }
                     }
 
@@ -233,13 +241,13 @@ impl AnnotationPanel {
             self.tags_loaded_for = Some(recording_id);
         }
 
-        let screen_width = ui.ctx().screen_rect().width();
+        let screen_width = ui.ctx().content_rect().width();
 
-        let panel = egui::SidePanel::right("annotation_panel")
+        let panel = egui::Panel::right("annotation_panel")
             .resizable(true)
-            .min_width(200.0)
-            .default_width(300.0)
-            .max_width((0.45 * screen_width).round())
+            .min_size(200.0)
+            .default_size(300.0)
+            .max_size((0.45 * screen_width).round())
             .frame(egui::Frame {
                 fill: ui.style().visuals.panel_fill,
                 ..Default::default()
@@ -267,7 +275,7 @@ impl AnnotationPanel {
         ui.strong("Annotations");
         ui.add_space(4.0);
 
-        let current_timeline = ctx.time_ctrl.timeline().cloned();
+        let current_timeline = ctx.time_ctrl.timeline().copied();
         let current_time = ctx.time_ctrl.time_int();
 
         if let Some(tl) = &current_timeline {
@@ -289,13 +297,13 @@ impl AnnotationPanel {
         if let Some(ref entity) = selected_entity {
             ui.horizontal(|ui| {
                 ui.label("Target:");
-                ui.colored_label(egui::Color32::from_rgb(130, 200, 130), entity.to_string());
+                ui.colored_label(rgb(130, 200, 130), entity.to_string());
                 if ui.small_button("Clear").clicked() {
                     clear_locked = true;
                 }
             });
             ui.label(
-                egui::RichText::new(format!("Annotations → {}/_annotation/{{tag}}", entity))
+                egui::RichText::new(format!("Annotations → {entity}/_annotation/{{tag}}"))
                     .small()
                     .weak(),
             );
@@ -466,7 +474,7 @@ impl AnnotationPanel {
                         time,
                         text_for_tag.clone(),
                         "INFO".to_owned(),
-                        egui::Color32::from_rgb(180, 180, 180),
+                        rgb(180, 180, 180),
                         selected_entity.as_ref(),
                     );
                 }
@@ -563,7 +571,7 @@ impl AnnotationPanel {
                             .send_system(SystemCommand::ClearAnnotation {
                                 store_id: store_id.clone(),
                                 entity_path: ann.entity_path.clone(),
-                                timeline: ann.timeline.clone(),
+                                timeline: ann.timeline,
                                 time: ann.time,
                             });
                         #[cfg(not(target_arch = "wasm32"))]
@@ -576,38 +584,41 @@ impl AnnotationPanel {
         ui.separator();
         ui.add_space(4.0);
 
-        let has_annotations_in_store = {
-            let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-            ctx.store_context
-                .recording
-                .sorted_entity_paths()
-                .any(|path| {
-                    path.starts_with(&annotation_prefix)
-                        || path.to_string().contains("/_annotation")
-                })
-        };
-
-        let has_annotations = !self.annotations.is_empty() || has_annotations_in_store;
-
         #[cfg(not(target_arch = "wasm32"))]
-        if ui
-            .add_enabled(
-                has_annotations,
-                egui::Button::new("Export annotations to .rrd"),
-            )
-            .on_hover_text(
-                "Save only the annotation entities to a separate .rrd file.\n\
-                 Opens a file dialog to choose where to save.",
-            )
-            .clicked()
         {
-            ctx.command_sender()
-                .send_system(SystemCommand::ExportAnnotations {
-                    store_id: store_id.clone(),
-                });
+            let has_annotations_in_store = {
+                let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
+                ctx.store_context
+                    .recording
+                    .sorted_entity_paths()
+                    .any(|path| {
+                        path.starts_with(&annotation_prefix)
+                            || path.to_string().contains("/_annotation")
+                    })
+            };
+
+            let has_annotations = !self.annotations.is_empty() || has_annotations_in_store;
+
+            if ui
+                .add_enabled(
+                    has_annotations,
+                    egui::Button::new("Export annotations to .rrd"),
+                )
+                .on_hover_text(
+                    "Save only the annotation entities to a separate .rrd file.\n\
+                     Opens a file dialog to choose where to save.",
+                )
+                .clicked()
+            {
+                ctx.command_sender()
+                    .send_system(SystemCommand::ExportAnnotations {
+                        store_id: store_id.clone(),
+                    });
+            }
         }
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn add_annotation(
         &mut self,
         ctx: &ViewerContext<'_>,
@@ -666,7 +677,7 @@ impl AnnotationPanel {
         self.annotations.push(AnnotationEntry {
             text: text.clone(),
             level: level.clone(),
-            timeline: timeline.clone(),
+            timeline: *timeline,
             time: snapped_time,
             entity_path: entity_path.clone(),
             source_entity: selected_entity.cloned(),
@@ -677,7 +688,7 @@ impl AnnotationPanel {
             .send_system(SystemCommand::AddAnnotation {
                 store_id: store_id.clone(),
                 entity_path,
-                timeline: timeline.clone(),
+                timeline: *timeline,
                 time: snapped_time,
                 text,
                 level,
@@ -751,10 +762,7 @@ impl AnnotationPanel {
                         .and_then(|col| {
                             let times = col.times_raw();
                             if row_idx < times.len() {
-                                Some((
-                                    col.timeline().clone(),
-                                    TimeInt::new_temporal(times[row_idx]),
-                                ))
+                                Some((*col.timeline(), TimeInt::new_temporal(times[row_idx])))
                             } else {
                                 None
                             }
@@ -770,9 +778,9 @@ impl AnnotationPanel {
                         });
 
                     let color = match level_str.as_str() {
-                        "WARN" => egui::Color32::from_rgb(255, 165, 0),
-                        "ERROR" => egui::Color32::from_rgb(255, 80, 80),
-                        _ => egui::Color32::from_rgb(180, 180, 180),
+                        "WARN" => rgb(255, 165, 0),
+                        "ERROR" => rgb(255, 80, 80),
+                        _ => rgb(180, 180, 180),
                     };
 
                     let already_exists = self
@@ -818,10 +826,10 @@ impl AnnotationPanel {
             re_sdk_types::archetypes::TextDocument::descriptor_text().component,
         ) {
             let text_str = text.0.0.as_str();
-            if let Ok(tags) = serde_json::from_str::<Vec<CustomTag>>(text_str) {
-                if self.custom_tags.is_empty() {
-                    self.custom_tags = tags;
-                }
+            if let Ok(tags) = serde_json::from_str::<Vec<CustomTag>>(text_str)
+                && self.custom_tags.is_empty()
+            {
+                self.custom_tags = tags;
             }
         }
     }
@@ -850,13 +858,15 @@ pub fn build_annotation_chunk(
     Ok(chunk)
 }
 
+/// Writes the exported annotations, returning the path written to.
+#[cfg(not(target_arch = "wasm32"))]
+pub type AnnotationSaver = Box<dyn FnOnce() -> anyhow::Result<std::path::PathBuf> + Send>;
+
 /// Collect annotation chunks, open a save dialog, and return a closure for the file saver.
 ///
-/// Returns `Ok(None)` if the user cancels or there are no annotations.
+/// Returns `None` if the user cancels or there are no annotations.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn prepare_annotation_export(
-    entity_db: &re_entity_db::EntityDb,
-) -> anyhow::Result<Option<Box<dyn FnOnce() -> anyhow::Result<std::path::PathBuf> + Send>>> {
+pub fn prepare_annotation_export(entity_db: &re_entity_db::EntityDb) -> Option<AnnotationSaver> {
     let rrd_version = entity_db
         .store_info()
         .and_then(|info| info.store_version)
@@ -878,7 +888,7 @@ pub fn prepare_annotation_export(
 
     if annotation_chunks.is_empty() {
         re_log::warn!("No annotation data to export.");
-        return Ok(None);
+        return None;
     }
 
     annotation_chunks.sort_by_key(|chunk| chunk.row_id_range().map(|(min, _)| min));
@@ -923,15 +933,12 @@ pub fn prepare_annotation_export(
         .set_title("Export annotations")
         .save_file();
 
-    let Some(path) = path else {
-        return Ok(None);
-    };
+    let path = path?;
 
-    let path_for_closure = path.clone();
-    Ok(Some(Box::new(move || {
-        crate::saving::encode_to_file(rrd_version, &path_for_closure, messages.into_iter())?;
-        Ok(path_for_closure)
-    })))
+    Some(Box::new(move || {
+        crate::saving::encode_to_file(rrd_version, &path, messages.into_iter())?;
+        Ok(path)
+    }))
 }
 
 /// Compute the autosave path once per session.
@@ -939,7 +946,7 @@ pub fn prepare_annotation_export(
 /// Session ID is derived from the wall clock + process id so reopening the
 /// same recording in a new viewer session doesn't clobber earlier autosaves.
 #[cfg(not(target_arch = "wasm32"))]
-fn compute_autosave_path(entity_db: &re_entity_db::EntityDb) -> Option<std::path::PathBuf> {
+fn compute_autosave_path(entity_db: &re_entity_db::EntityDb) -> std::path::PathBuf {
     let (save_dir, file_stem) = entity_db
         .data_source
         .as_ref()
@@ -970,7 +977,7 @@ fn compute_autosave_path(entity_db: &re_entity_db::EntityDb) -> Option<std::path
             .wrapping_add(std::process::id() as u64 * 6364136223846793005)
     );
 
-    Some(save_dir.join(format!("{file_stem}_{session_id}_annotations.rrd")))
+    save_dir.join(format!("{file_stem}_{session_id}_annotations.rrd"))
 }
 
 /// Write all current annotation chunks to `save_path`. Called after every
@@ -996,13 +1003,13 @@ fn autosave_annotations_to(
     if annotations.is_empty() {
         // Truncate the file so removing the last annotation isn't silently
         // dropped (otherwise a stale save would survive on disk).
-        if save_path.exists() {
-            if let Err(err) = std::fs::remove_file(save_path) {
-                re_log::warn!(
-                    "Failed to remove stale annotation autosave {}: {err}",
-                    save_path.display()
-                );
-            }
+        if save_path.exists()
+            && let Err(err) = std::fs::remove_file(save_path)
+        {
+            re_log::warn!(
+                "Failed to remove stale annotation autosave {}: {err}",
+                save_path.display()
+            );
         }
         return;
     }

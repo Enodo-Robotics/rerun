@@ -1258,6 +1258,7 @@ mod tests {
 
     use super::{EyeController, FramingRequest, framing_pose};
 
+    #[expect(clippy::fn_params_excessive_bools)]
     fn request(target_bbox: BoundingBox, do_pan: bool, do_rotate: bool) -> FramingRequest {
         FramingRequest {
             target_bbox,
@@ -1290,7 +1291,7 @@ mod tests {
         let (pos, look_target) = framing_pose(request(target, true, false));
 
         assert_eq!(look_target, target.center());
-        let new_forward = (look_target - pos).normalize();
+        let new_forward = (look_target - pos).normalize_or_zero();
         assert!(
             (new_forward - -Vec3::Z).length() < 1e-5,
             "view direction changed: {new_forward:?}"
@@ -1307,8 +1308,8 @@ mod tests {
 
         assert_eq!(look_target, target.center());
 
-        let old_dir = (target.center() - req.current_pos).normalize();
-        let new_dir = (target.center() - pos).normalize();
+        let old_dir = (target.center() - req.current_pos).normalize_or_zero();
+        let new_dir = (target.center() - pos).normalize_or_zero();
         assert!(
             (old_dir - new_dir).length() < 1e-5,
             "viewing angle changed: {old_dir:?} -> {new_dir:?}"

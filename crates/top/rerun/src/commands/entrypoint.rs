@@ -1737,13 +1737,14 @@ fn open_encoder(
 ) -> Result<re_log_encoding::Encoder<std::fs::File>, re_log_encoding::FileSinkError> {
     use re_log_encoding::FileSinkError;
 
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|err| FileSinkError::CreateFile {
-                path: parent.to_path_buf(),
-                source: err,
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|err| FileSinkError::CreateFile {
+            path: parent.to_path_buf(),
+            source: err,
+        })?;
     }
     if path.exists() {
         re_log::warn!(?path, "Overwriting existing file");

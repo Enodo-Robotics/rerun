@@ -46,7 +46,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: snapshot-diffs
-          path: "**/snapshots/**/*.{diff,new}.png"
+          path: |
+            **/snapshots/**/*.diff.png
+            **/snapshots/**/*.new.png
           retention-days: 7
           if-no-files-found: ignore
 
