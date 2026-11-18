@@ -33,5 +33,7 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/public_fork && chmod 600 ~/.ssh/public_fork
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/public_fork -o IdentitiesOnly=yes"
-          git push git@github.com:Enodo-Robotics/rerun.git "$TAG^{commit}:refs/heads/main" "refs/tags/$TAG"
+          # --no-verify skips the Git LFS pre-push hook: the checkout has no LFS files, and the
+          # public fork's wheel build doesn't need the test snapshots.
+          git push --no-verify git@github.com:Enodo-Robotics/rerun.git "$TAG^{commit}:refs/heads/main" "refs/tags/$TAG"
           echo "Pushed $TAG to Enodo-Robotics/rerun: https://github.com/Enodo-Robotics/rerun/actions/workflows/build_wheels_on_tag.yml" >> "$GITHUB_STEP_SUMMARY"
