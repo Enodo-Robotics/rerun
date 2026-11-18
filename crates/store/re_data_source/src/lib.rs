@@ -19,6 +19,10 @@ pub use self::data_source::{
     AuthErrorHandler, FromUriOptions, LogDataSource, LogDataSourceAnalytics,
 };
 
+// Enodo fork: auto-reconnect for `rerun+http://…/proxy` sources.
+#[cfg(not(target_arch = "wasm32"))]
+pub use re_grpc_client::set_reconnect_interval;
+
 // ----------------------------------------------------------------------------
 
 /// The contents of a file.

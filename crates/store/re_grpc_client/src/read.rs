@@ -14,8 +14,15 @@ pub fn stream(uri: re_uri::ProxyUri) -> re_log_channel::LogReceiver {
     let (tx, rx) =
         re_log_channel::log_channel(re_log_channel::LogSource::MessageProxy(uri.clone()));
 
+    // Enodo fork: optionally survive the server going away (see `reconnect.rs`).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(interval) = crate::reconnect::reconnect_interval() {
+        crate::spawn_future(crate::reconnect::stream_reconnecting(uri, tx, interval));
+        return rx;
+    }
+
     crate::spawn_future(async move {
-        if let Err(err) = stream_async(uri, &tx).await {
+        if let Err(err) = stream_async(uri, &tx, None, &mut |_| true).await {
             tx.quit(Some(Box::new(err))).ok();
         }
     });
@@ -23,10 +30,25 @@ pub fn stream(uri: re_uri::ProxyUri) -> re_log_channel::LogReceiver {
     rx
 }
 
-async fn stream_async(
+/// How a single connection ended without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamEnd {
+    /// The server closed the stream.
+    ServerClosed,
+
+    /// Nobody is listening on the viewer side anymore.
+    ReceiverGone,
+}
+
+/// Streams from one connection; `admit` decides which messages are forwarded.
+pub(crate) async fn stream_async(
     uri: re_uri::ProxyUri,
     tx: &re_log_channel::LogSender,
-) -> Result<(), StreamError> {
+    #[cfg_attr(target_arch = "wasm32", expect(unused_variables))] keep_alive: Option<
+        std::time::Duration,
+    >,
+    admit: &mut (dyn FnMut(&re_log_types::LogMsg) -> bool + Send),
+) -> Result<StreamEnd, StreamError> {
     let mut client = {
         let url = uri.origin.as_url();
 
@@ -40,10 +62,16 @@ async fn stream_async(
 
         #[cfg(not(target_arch = "wasm32"))]
         let tonic_client = {
-            tonic::transport::Endpoint::new(url)?
-                .http2_adaptive_window(true) // Optimize for throughput
-                .connect()
-                .await?
+            let mut endpoint = tonic::transport::Endpoint::new(url)?.http2_adaptive_window(true); // Optimize for throughput
+            if let Some(keep_alive) = keep_alive {
+                // Enodo fork: notice a silently dropped connection, so reconnect mode can retry it.
+                endpoint = endpoint
+                    .connect_timeout(keep_alive)
+                    .http2_keep_alive_interval(keep_alive)
+                    .keep_alive_timeout(keep_alive)
+                    .keep_alive_while_idle(true);
+            }
+            endpoint.connect().await?
         };
 
         MessageProxyServiceClient::new(tonic_client)
@@ -66,6 +94,10 @@ async fn stream_async(
             })) => {
                 let mut log_msg = log_msg_proto.to_application((&mut app_id_cache, None))?;
 
+                if !admit(&log_msg) {
+                    continue;
+                }
+
                 if let Some(metadata_key) = re_sorbet::TimestampLocation::IPCDecode.metadata_key() {
                     // Insert the timestamp metadata into the Arrow message for accurate e2e latency measurements:
                     log_msg.insert_arrow_record_batch_metadata(
@@ -76,7 +108,7 @@ async fn stream_async(
 
                 if tx.send(log_msg.into()).is_err() {
                     re_log::debug!("gRPC stream smart channel closed");
-                    break;
+                    return Ok(StreamEnd::ReceiverGone);
                 }
             }
 
@@ -87,7 +119,7 @@ async fn stream_async(
             // Stream closed
             Ok(None) => {
                 re_log::debug!("gRPC stream disconnected");
-                break;
+                return Ok(StreamEnd::ServerClosed);
             }
 
             Err(err) => {
@@ -95,6 +127,4 @@ async fn stream_async(
             }
         }
     }
-
-    Ok(())
 }

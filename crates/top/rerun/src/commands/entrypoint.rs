@@ -250,6 +250,16 @@ When persisted, the state will be stored at the following locations:
     #[clap(long, value_name = "PATH")]
     save_static: Option<String>,
 
+    /// Keep `rerun+http://…/proxy` connections alive: retry every N seconds.
+    ///
+    /// Without it, the viewer stops listening as soon as the connection ends. With it,
+    /// a server that is not up yet, restarts, or drops off the network is retried
+    /// until it is back, and the stream resumes where it left off. Data the server
+    /// replays is not shown twice, and a blueprint re-sent for an application that
+    /// was already connected is ignored, so the layout you have arranged stays.
+    #[clap(long, value_name = "SECONDS")]
+    reconnect_interval: Option<f64>,
+
     /// Take a screenshot of the app and quit.
     /// We use this to generate screenshots of our examples.
     /// Useful together with `--window-size`.
@@ -902,6 +912,16 @@ fn run_impl(
             anyhow::bail!("expected `/proxy` endpoint: {err}");
         }
         url_or_paths.push(url);
+    }
+
+    if let Some(seconds) = args.reconnect_interval {
+        let interval = std::time::Duration::try_from_secs_f64(seconds)
+            .ok()
+            .filter(|interval| !interval.is_zero())
+            .ok_or_else(|| {
+                anyhow::anyhow!("--reconnect-interval must be a positive number of seconds")
+            })?;
+        re_data_source::set_reconnect_interval(Some(interval));
     }
 
     if args.save_interval.is_some() && args.save.is_none() {
@@ -2515,6 +2535,7 @@ fn record_cli_command_analytics(args: &Args) {
         save_interval: _,
         application_id: _,
         save_static: _,
+        reconnect_interval: _,
     } = args;
 
     let (command, subcommand) = match command {

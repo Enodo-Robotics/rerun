@@ -3,6 +3,12 @@
 pub mod read;
 pub use read::stream;
 
+// Enodo fork: auto-reconnect for proxy streams.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod reconnect;
+#[cfg(not(target_arch = "wasm32"))]
+pub use reconnect::set_reconnect_interval;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod write;
 
