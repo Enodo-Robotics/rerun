@@ -33,7 +33,17 @@ jobs:
           printf '%s\n' "$KEY" > ~/.ssh/public_fork && chmod 600 ~/.ssh/public_fork
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/public_fork -o IdentitiesOnly=yes"
-          # --no-verify skips the Git LFS pre-push hook: the checkout has no LFS files, and the
-          # public fork's wheel build doesn't need the test snapshots.
-          git push --no-verify git@github.com:Enodo-Robotics/rerun.git "$TAG^{commit}:refs/heads/main" "refs/tags/$TAG"
+          git remote add public git@github.com:Enodo-Robotics/rerun.git
+          git fetch public main
+          # GitHub rejects a push that references LFS objects the public fork doesn't store
+          # (GH008), so upload the ones the new commits add first. The checkout has no LFS
+          # files and the full set is ~700 MB, so fetch only the paths changed since the public
+          # main. That fetch also asks for older versions of those paths, which the public fork
+          # already has and this repo's LFS store may lack, hence `|| true`; `git lfs push`
+          # still fails if an object it needs is missing.
+          paths=$(git log --name-only --format= public/main.."$TAG" | sort -u | paste -sd, -)
+          git lfs fetch origin $(git rev-list public/main.."$TAG") --include="$paths" || true
+          git lfs push public "$TAG"
+          # The objects are uploaded; --no-verify skips the pre-push hook doing it again.
+          git push --no-verify public "$TAG^{commit}:refs/heads/main" "refs/tags/$TAG"
           echo "Pushed $TAG to Enodo-Robotics/rerun: https://github.com/Enodo-Robotics/rerun/actions/workflows/build_wheels_on_tag.yml" >> "$GITHUB_STEP_SUMMARY"
