@@ -92,7 +92,9 @@ docs/snippets/**/*.rrd
 
 /meilisearch
 
-.claude
+.claude/*
+# Enodo fork: shared Claude Code settings, also read by claude-code-action in CI.
+!.claude/settings.json
 .pixi/*
 justfile
 
