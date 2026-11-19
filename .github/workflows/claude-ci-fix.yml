@@ -17,7 +17,8 @@ permissions:
 
 jobs:
   check:
-    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.pull_requests[0]
+    # Not on the public fork Enodo-Robotics/rerun, which only builds release wheels.
+    if: github.repository == 'Enodo-Robotics/rerun-dev' && github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.pull_requests[0]
     runs-on: claude-light
     outputs:
       pr: ${{ steps.pr.outputs.pr }}

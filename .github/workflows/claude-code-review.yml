@@ -15,7 +15,8 @@ permissions:
 
 jobs:
   review:
-    if: github.event.pull_request.draft == false
+    # Not on the public fork Enodo-Robotics/rerun, which only builds release wheels.
+    if: github.repository == 'Enodo-Robotics/rerun-dev' && github.event.pull_request.draft == false
     runs-on: claude-light
     timeout-minutes: 60
     steps:

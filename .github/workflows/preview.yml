@@ -23,7 +23,8 @@ permissions:
 jobs:
   build:
     # Editing the description only changes the link; no rebuild needed.
-    if: github.event.action != 'closed' && github.event.action != 'edited'
+    # Not on the public fork Enodo-Robotics/rerun, which only builds release wheels.
+    if: github.repository == 'Enodo-Robotics/rerun-dev' && github.event.action != 'closed' && github.event.action != 'edited'
     runs-on: claude
     timeout-minutes: 120
     steps:
@@ -42,7 +43,7 @@ jobs:
 
   up:
     needs: build
-    if: always() && github.event.action != 'closed' && (needs.build.result == 'success' || github.event.action == 'edited')
+    if: always() && github.repository == 'Enodo-Robotics/rerun-dev' && github.event.action != 'closed' && (needs.build.result == 'success' || github.event.action == 'edited')
     runs-on: [self-hosted, rerun-preview]
     steps:
       - if: github.event.action != 'edited'
@@ -88,7 +89,7 @@ jobs:
             else await github.rest.issues.createComment({ ...issue, body });
 
   down:
-    if: github.event.action == 'closed'
+    if: github.repository == 'Enodo-Robotics/rerun-dev' && github.event.action == 'closed'
     runs-on: [self-hosted, rerun-preview]
     steps:
       # The base branch's script: the PR's may be gone or changed.

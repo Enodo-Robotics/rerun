@@ -199,7 +199,9 @@ git tag -a RRL-v3.3.0 -m RRL-v3.3.0 origin/main && git push origin RRL-v3.3.0
 `.github/workflows/publish.yml` then pushes the tagged commit to the public fork's `main`
 together with the tag, and the tag runs `.github/workflows/build_wheels_on_tag.yml` there:
 wheels for Linux, Windows and macOS on GitHub-hosted runners, uploaded to the public
-release. (That workflow does nothing in `rerun-dev`.)
+release. (That workflow does nothing in `rerun-dev`; every other workflow has an
+`if: github.repository == 'Enodo-Robotics/rerun-dev'` guard and does nothing on the public fork,
+whose Actions runs only the wheel build. Keep that guard on new workflows.)
 
 ### Custom CLI flags added to the `rerun` binary
 

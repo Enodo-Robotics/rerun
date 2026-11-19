@@ -19,6 +19,8 @@ permissions:
 
 jobs:
   publish:
+    # Not on the public fork Enodo-Robotics/rerun, which only builds release wheels.
+    if: github.repository == 'Enodo-Robotics/rerun-dev'
     runs-on: claude-light
     steps:
       - uses: actions/checkout@v4

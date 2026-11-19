@@ -29,8 +29,9 @@ jobs:
   # turn or sets up.
   seen:
     # Claude's own comments can quote "@claude"; they never trigger it.
+    # Not on the public fork Enodo-Robotics/rerun, which only builds release wheels.
     if: |
-      github.actor != 'claude[bot]' && (
+      github.repository == 'Enodo-Robotics/rerun-dev' && github.actor != 'claude[bot]' && (
       (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))) ||
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
