@@ -1294,14 +1294,12 @@ impl App {
                 timeline,
                 time,
                 text,
-                level,
             } => {
                 match crate::ui::annotation_panel::build_annotation_chunk(
                     &entity_path,
                     &timeline,
                     time,
                     &text,
-                    &level,
                 ) {
                     Ok(chunk) => {
                         match add_chunk_and_notify_cache(

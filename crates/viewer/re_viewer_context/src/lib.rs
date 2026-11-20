@@ -26,6 +26,7 @@ mod component_fallbacks;
 mod component_ui_registry;
 mod contents;
 mod drag_and_drop;
+pub mod event_labels; // RRL fork
 mod file_dialog;
 mod focus_command;
 mod focus_target;

@@ -380,16 +380,6 @@ fn panel_buttons_r2l(
         }
     }
 
-    // annotation quick-tag bar (horizontal bar above timeline)
-    if matches!(route, Route::LocalRecording { .. })
-        && ui
-            .selectable_label(app.state.annotation_panel.tag_bar_visible, "Qt.Ann")
-            .on_hover_text("Toggle quick-tag annotation bar above timeline")
-            .clicked()
-    {
-        app.state.annotation_panel.toggle_tag_bar();
-    }
-
     // annotation editor panel (side panel)
     if matches!(route, Route::LocalRecording { .. })
         && ui

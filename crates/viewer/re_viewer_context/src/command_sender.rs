@@ -141,14 +141,13 @@ pub enum SystemCommand {
     /// Just like selection highlighting, the exact behavior of focusing is up to the receiving views.
     SetFocus(crate::FocusTarget),
 
-    /// Add a text annotation to the active recording at the given time.
+    /// Add a label to the active recording at the given time.
     AddAnnotation {
         store_id: StoreId,
         entity_path: EntityPath,
         timeline: Timeline,
         time: TimeInt,
         text: String,
-        level: String,
     },
 
     /// Clear (remove) an annotation at the given entity path and time.

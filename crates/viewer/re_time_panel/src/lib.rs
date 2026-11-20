@@ -6,6 +6,7 @@
 #![warn(clippy::iter_over_hash_type)] //  TODO(#6198): enable everywhere
 
 mod data_density_graph;
+mod event_markers; // RRL fork
 mod paint_ticks;
 mod recursive_chunks_per_timeline_subscriber;
 mod streams_tree_data;

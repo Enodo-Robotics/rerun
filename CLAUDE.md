@@ -294,6 +294,24 @@ was flagged. Implementation: `EventSpan`, `event_span_from_chunk`, `events_cover
 `sanitize_event_name` in `entrypoint.rs`; `MsgRoute::EventMarker` routes a marker to the temporal
 sink while the rotation loop collects it for the filename.
 
+### Labelling
+
+In a local recording, press `E` to place a label at the time cursor: a picker lists the defined
+labels, and typing narrows it until one is left, which is placed at once (`cor` for "correct"
+next to "comma"; Enter takes the exact or first match). `N` opens the same picker for a new
+label. The keys do nothing while a text field has focus. The "Ed.Ann" side panel lists the
+labels, the ones placed in this recording, and exports them.
+
+A label is a `TextLog` at `annotations/<label>/<time>`, or `<entity>/_annotation/<label>/<time>`
+when an entity is selected. Labels have no level; the colour follows from the name
+(`event_label_color`), the same everywhere. Each label shows on the timeline as a pennant on the
+time ruler, and each `rr.mark_event` as a diamond, with a faint line through the streams;
+clicking one jumps to it.
+
+Implementation: `crates/viewer/re_viewer/src/ui/annotation_panel.rs` (`match_label`, the
+picker); path rules and colours in `re_viewer_context/src/event_labels.rs`; the timeline in
+`re_time_panel/src/event_markers.rs`.
+
 ### Checks
 
 These are what CI (`.github/workflows/ci.yml`) runs, so run them before you push. The first
@@ -341,6 +359,14 @@ a pushed branch, approve a PR or push to main, except for a release tag.
 Keep fork changes easy to carry onto newer upstream releases: put new code in new files or
 clearly marked blocks where you can, and don't reformat or restructure upstream code you
 don't need to change.
+
+**Never end a run with work only in the container.** Each run starts in a fresh container, so
+anything not pushed is lost. Once the first change builds, commit, push and open a **draft**
+PR (`gh pr create --draft`), then commit and push after every step that works; mark the PR
+ready (`gh pr ready`) when the checks pass. Run long builds and tests in the foreground:
+nothing wakes you up after a background command finishes, so ending your turn to wait for
+one ends the run. Before your last reply, `git status` must be clean and the branch pushed;
+if something is unfinished, say what in the PR and the reply rather than holding it back.
 
 **An issue for you** (mentioning @claude): implement it on a branch from main, following
 everything above (tests, a demo recording when there is something to see, the checks). If

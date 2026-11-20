@@ -147,6 +147,10 @@ pub struct TimePanel {
     /// If we're hovering a specific event - what time is it?
     #[serde(skip)]
     hovered_event_time: Option<TimeInt>,
+
+    /// RRL fork: labels and event markers shown on the timeline.
+    #[serde(skip)]
+    event_markers: crate::event_markers::EventMarkers,
 }
 
 impl Default for TimePanel {
@@ -166,6 +170,7 @@ impl Default for TimePanel {
             scroll_to_me_item: None,
             time_edit_string: None,
             hovered_event_time: None,
+            event_markers: Default::default(),
         }
     }
 }
@@ -693,6 +698,17 @@ impl TimePanel {
             );
             ui.draw_shadow_line(rect, egui::Direction::LeftToRight);
         }
+
+        // RRL fork: labels and events, under the time cursor.
+        self.event_markers.ui(
+            store_ctx,
+            ui,
+            &self.time_ranges_ui,
+            &time_area_painter,
+            &timeline_rect,
+            streams_rect.y_range(),
+            time_commands,
+        );
 
         // Put time-marker on top and last, so that you can always drag it
         self.time_marker_ui(

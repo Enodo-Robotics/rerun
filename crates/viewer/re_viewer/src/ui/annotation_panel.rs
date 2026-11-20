@@ -5,72 +5,131 @@ use re_chunk::{Chunk, EntityPath, RowId, Timeline};
 use re_log_types::{TimeInt, TimePoint, TimeReal};
 use re_sdk_types::archetypes::TextLog;
 use re_ui::annotation_chips::tag_chip;
+use re_viewer_context::event_labels::{
+    LABELS_CONFIG_PART, LABELS_ENTITY_BASE, event_label_color, event_label_for_path, label_slug,
+    labelled_entity_for_path,
+};
 use re_viewer_context::{
     SystemCommand, SystemCommandSender as _, TimeControlCommand, ViewerContext,
 };
 
 // ---------------------------------------------------------------------------
 
-/// Default quick-tag labels, used to seed `custom_tags` on first run.
-/// Once seeded, deletions persist across restarts.
-const DEFAULT_QUICK_TAGS: &[(&str, &str, [u8; 3])] = &[
-    ("Anomaly", "WARN", [255, 165, 0]),
-    ("Interesting", "INFO", [100, 180, 255]),
-    ("Bug", "ERROR", [255, 80, 80]),
-    ("Note", "INFO", [180, 180, 180]),
-];
+/// Labels offered on first run. Once seeded, deletions persist across restarts.
+const DEFAULT_LABELS: &[&str] = &["Anomaly", "Interesting", "Bug", "Note"];
 
-/// Base entity path under which all annotations are stored.
-const ANNOTATIONS_ENTITY_BASE: &str = "annotations";
+/// Opens the picker for an existing label.
+const PICK_LABEL_KEY: egui::Key = egui::Key::E;
 
-/// In-memory record of an annotation that has been logged.
+/// Opens the picker for a new label.
+const NEW_LABEL_KEY: egui::Key = egui::Key::N;
+
+/// In-memory record of a label that has been placed on the timeline.
 #[derive(Clone, Debug)]
 struct AnnotationEntry {
     text: String,
-    level: String,
     timeline: Timeline,
     time: TimeInt,
     entity_path: EntityPath,
-    /// The entity that was selected when this annotation was created.
+
+    /// The entity that was selected when this label was placed.
     source_entity: Option<EntityPath>,
-    color: egui::Color32,
 }
 
-/// A user-defined quick tag.
+/// A label the user can place. Its colour follows from its name.
+///
+/// State saved by older versions also has `level` and `color`; serde ignores them.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 struct CustomTag {
     label: String,
-    level: String,
-    color: [u8; 3],
 }
 
-/// The annotation panel's colours: tag colours are data persisted with the tags, so they
-/// cannot live in the theme like other viewer colours.
+/// What the label picker is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickerMode {
+    /// `E`: pick a defined label by typing until only one matches.
+    Existing,
+
+    /// `N`: type the name of a new label.
+    New,
+}
+
+#[derive(Clone, Debug)]
+struct Picker {
+    mode: PickerMode,
+    text: String,
+
+    /// False on the frame the shortcut was pressed, so the key's own text event is not typed
+    /// into the field.
+    shown: bool,
+}
+
+/// Result of matching typed text against the defined labels.
+#[derive(Debug, PartialEq, Eq)]
+enum LabelMatch<'a> {
+    /// Exactly one label starts with the typed text.
+    Unique(&'a str),
+
+    /// Several labels start with it (or nothing is typed yet), in their original order.
+    Several(Vec<&'a str>),
+
+    /// No label starts with it.
+    None,
+}
+
+/// Case-insensitive prefix match of `typed` against `labels`.
+///
+/// Nothing typed matches every label but never counts as unique, so pressing `E` with a single
+/// label defined does not add it before you have typed anything.
+fn match_label<'a>(labels: &[&'a str], typed: &str) -> LabelMatch<'a> {
+    let typed = typed.trim().to_lowercase();
+    let matches: Vec<&str> = labels
+        .iter()
+        .copied()
+        .filter(|label| label.to_lowercase().starts_with(&typed))
+        .collect();
+
+    match matches.as_slice() {
+        [] => LabelMatch::None,
+        [only] if !typed.is_empty() => LabelMatch::Unique(only),
+        _ => LabelMatch::Several(matches),
+    }
+}
+
+/// How many leading characters of `label` set it apart from every other label (all of them, if
+/// it is a prefix of another label).
+fn unique_prefix_len(label: &str, labels: &[&str]) -> usize {
+    let lower = label.to_lowercase();
+    let chars: Vec<char> = lower.chars().collect();
+    (1..=chars.len())
+        .find(|&n| {
+            let prefix: String = chars[..n].iter().collect();
+            labels
+                .iter()
+                .filter(|other| other.to_lowercase().starts_with(&prefix))
+                .count()
+                == 1
+        })
+        .unwrap_or(chars.len())
+}
+
+/// The annotation panel's colours that are not label colours.
 #[expect(clippy::disallowed_methods)]
 fn rgb(r: u8, g: u8, b: u8) -> egui::Color32 {
     egui::Color32::from_rgb(r, g, b)
 }
 
-impl CustomTag {
-    fn egui_color(&self) -> egui::Color32 {
-        rgb(self.color[0], self.color[1], self.color[2])
-    }
-}
-
-/// The annotation panel state, persisted across frames.
+/// The labelling panel state, persisted across frames.
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct AnnotationPanel {
     /// Whether the editor side panel is currently shown.
     pub editor_visible: bool,
 
-    /// Whether the quick-tag bar above the time panel is currently shown.
-    pub tag_bar_visible: bool,
-
     custom_tags: Vec<CustomTag>,
 
-    /// True once `DEFAULT_QUICK_TAGS` have been seeded into `custom_tags`. Prevents
-    /// re-seeding after the user has deleted all tags.
+    /// True once `DEFAULT_LABELS` have been seeded into `custom_tags`. Prevents
+    /// re-seeding after the user has deleted all labels.
     defaults_seeded: bool,
 
     #[serde(skip)]
@@ -78,9 +137,6 @@ pub struct AnnotationPanel {
 
     #[serde(skip)]
     new_tag_label: String,
-
-    #[serde(skip)]
-    new_tag_level_idx: usize,
 
     #[serde(skip)]
     annotations: Vec<AnnotationEntry>,
@@ -92,23 +148,25 @@ pub struct AnnotationPanel {
     #[serde(skip)]
     tags_loaded_for: Option<re_log_types::StoreId>,
 
-    /// Fixed autosave path for this session, computed once on first save.
+    /// Fixed autosave path for this recording, computed once on first save.
     #[serde(skip)]
     autosave_path: Option<std::path::PathBuf>,
+
+    /// The `E` / `N` label picker, while it is open.
+    #[serde(skip)]
+    picker: Option<Picker>,
 }
 
 impl AnnotationPanel {
-    /// Seed default tags on first run. Once seeded, never re-seeds — so deleting
-    /// all tags and restarting doesn't bring them back.
+    /// Seed default labels on first run. Once seeded, never re-seeds — so deleting
+    /// all labels and restarting doesn't bring them back.
     fn ensure_default_tags(&mut self) {
         if !self.defaults_seeded {
             if self.custom_tags.is_empty() {
-                self.custom_tags = DEFAULT_QUICK_TAGS
+                self.custom_tags = DEFAULT_LABELS
                     .iter()
-                    .map(|&(label, level, color)| CustomTag {
-                        label: label.to_owned(),
-                        level: level.to_owned(),
-                        color,
+                    .map(|label| CustomTag {
+                        label: (*label).to_owned(),
                     })
                     .collect();
             }
@@ -116,12 +174,36 @@ impl AnnotationPanel {
         }
     }
 
+    fn has_tag(&self, label: &str) -> bool {
+        let slug = label_slug(label);
+        self.custom_tags
+            .iter()
+            .any(|t| label_slug(&t.label) == slug)
+    }
+
     pub fn toggle_editor(&mut self) {
         self.editor_visible = !self.editor_visible;
     }
 
-    pub fn toggle_tag_bar(&mut self) {
-        self.tag_bar_visible = !self.tag_bar_visible;
+    /// Everything the labelling feature shows each frame: the `E` / `N` shortcuts and their
+    /// picker, and the editor side panel when it is open.
+    pub fn ui(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
+        self.ensure_default_tags();
+
+        let recording_id = ctx.store_context.recording.store_id().clone();
+        if self.tags_loaded_for.as_ref() != Some(&recording_id) {
+            self.annotations.clear();
+            self.autosave_path = None;
+            self.picker = None;
+            self.load_tags_from_recording(ctx.store_context.recording);
+            self.load_annotations_from_store(ctx.store_context.recording);
+            self.tags_loaded_for = Some(recording_id);
+        }
+
+        self.update_locked_entity(ctx);
+        self.handle_shortcuts(ui.ctx());
+        self.picker_ui(ctx, ui.ctx());
+        self.show_panel(ctx, ui);
     }
 
     /// Save annotations to disk now. Called after every add/remove — no data
@@ -156,89 +238,212 @@ impl AnnotationPanel {
         }
     }
 
-    /// Horizontal quick-tag bar, rendered above the time panel.
-    pub fn show_tag_bar(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
-        if !self.tag_bar_visible {
+    /// `E` opens the picker for an existing label, `N` for a new one. Ignored while a text
+    /// field has focus, so typing an `e` anywhere else still types an `e`.
+    ///
+    /// Only a focused *text field* blocks them: clicking a 3D view, a list item or a button
+    /// also gives that widget keyboard focus, and the keys must still work then.
+    fn handle_shortcuts(&mut self, egui_ctx: &egui::Context) {
+        if self.picker.is_some() || egui_ctx.text_edit_focused() {
             return;
         }
 
-        self.ensure_default_tags();
-        self.update_locked_entity(ctx);
+        let mode = egui_ctx.input(|i| {
+            if !i.modifiers.is_none() {
+                None
+            } else if i.key_pressed(PICK_LABEL_KEY) {
+                Some(PickerMode::Existing)
+            } else if i.key_pressed(NEW_LABEL_KEY) {
+                Some(PickerMode::New)
+            } else {
+                None
+            }
+        });
 
-        let store_id = ctx.store_context.recording.store_id().clone();
-        let current_timeline = ctx.time_ctrl.timeline().copied();
-        let current_time = ctx.time_ctrl.time_int();
-        let selected_entity = self.locked_entity.clone();
+        if let Some(mode) = mode {
+            self.picker = Some(Picker {
+                mode,
+                text: String::new(),
+                shown: false,
+            });
+            egui_ctx.request_repaint();
+        }
+    }
 
-        egui::Panel::bottom("annotation_tag_bar")
-            .resizable(false)
-            .frame(egui::Frame {
-                fill: ui.style().visuals.panel_fill,
-                inner_margin: egui::Margin::symmetric(8, 6),
-                ..Default::default()
-            })
-            .show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let tags_snapshot: Vec<_> = self
-                        .custom_tags
+    fn picker_ui(&mut self, ctx: &ViewerContext<'_>, egui_ctx: &egui::Context) {
+        let Some(picker) = &mut self.picker else {
+            return;
+        };
+        if !picker.shown {
+            picker.shown = true;
+            egui_ctx.request_repaint();
+            return;
+        }
+
+        let labels: Vec<String> = self.custom_tags.iter().map(|t| t.label.clone()).collect();
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let timeline = ctx.time_ctrl.timeline().copied();
+        let time = ctx.time_ctrl.time_int();
+        let timestamp_format = ctx.app_options().timestamp_format;
+
+        let mut chosen: Option<String> = None;
+        let mut close = false;
+
+        let modal = egui::Modal::new(egui::Id::new("label_picker")).show(egui_ctx, |ui| {
+            ui.set_width(320.0);
+            let mode = picker.mode;
+
+            ui.strong(match mode {
+                PickerMode::Existing => "Add label",
+                PickerMode::New => "New label",
+            });
+            match (timeline, time) {
+                (Some(timeline), Some(time)) => {
+                    let at = timeline.typ().format(time, timestamp_format);
+                    match &self.locked_entity {
+                        Some(entity) => ui.weak(format!("at {at} on {entity}")),
+                        None => ui.weak(format!("at {at}")),
+                    };
+                }
+                _ => {
+                    ui.weak("No time cursor: nothing will be added");
+                }
+            }
+            ui.add_space(4.0);
+
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut picker.text)
+                    .hint_text(match mode {
+                        PickerMode::Existing => "Type to pick a label…",
+                        PickerMode::New => "Name of the new label…",
+                    })
+                    .desired_width(f32::INFINITY),
+            );
+            response.request_focus();
+            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            match mode {
+                PickerMode::Existing => {
+                    let found = match_label(&label_refs, &picker.text);
+                    let candidates: Vec<&str> = match &found {
+                        LabelMatch::Unique(label) => vec![label],
+                        LabelMatch::Several(labels) => labels.clone(),
+                        LabelMatch::None => Vec::new(),
+                    };
+
+                    // Enter takes the exact match if there is one, else the first candidate.
+                    let typed = picker.text.trim().to_lowercase();
+                    let enter_target = candidates
                         .iter()
-                        .map(|t| (t.label.clone(), t.level.clone(), t.egui_color()))
-                        .collect();
+                        .find(|l| l.to_lowercase() == typed)
+                        .or_else(|| candidates.first())
+                        .copied();
 
-                    let base_size = ui.style().text_styles[&egui::TextStyle::Body].size;
-                    let tag_size = base_size * 1.25;
-
-                    for (label, level, color) in &tags_snapshot {
-                        if tag_chip(ui, label, *color, Some(tag_size)).clicked()
-                            && let (Some(time), Some(tl)) = (current_time, &current_timeline)
-                        {
-                            self.add_annotation(
-                                ctx,
-                                &store_id,
-                                tl,
-                                time,
-                                label.clone(),
-                                level.clone(),
-                                *color,
-                                selected_entity.as_ref(),
-                            );
+                    if let LabelMatch::Unique(label) = found {
+                        chosen = Some(label.to_owned());
+                    } else if enter {
+                        if let Some(label) = enter_target {
+                            chosen = Some(label.to_owned());
+                        } else if !typed.is_empty() {
+                            chosen = Some(picker.text.trim().to_owned());
                         }
                     }
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        #[cfg(not(target_arch = "wasm32"))]
+                    ui.add_space(4.0);
+                    if candidates.is_empty() {
+                        if typed.is_empty() {
+                            ui.weak("No labels yet: press Esc, then N to make one.");
+                        } else {
+                            ui.weak(format!(
+                                "No label starts with {:?}: Enter makes it a new label.",
+                                picker.text.trim()
+                            ));
+                        }
+                    }
+                    for label in &candidates {
+                        let n = unique_prefix_len(label, &label_refs);
+                        let split = label.char_indices().nth(n).map_or(label.len(), |(i, _)| i);
+                        let (head, tail) = label.split_at(split);
+                        let is_target = Some(*label) == enter_target;
+                        let row = ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.colored_label(event_label_color(label), "⏺ ");
+                            ui.label(egui::RichText::new(head).strong().underline());
+                            ui.label(tail);
+                            if is_target {
+                                ui.weak("   ⏎");
+                            }
+                        });
                         if ui
-                            .button("Export")
-                            .on_hover_text("Export annotations to .rrd")
+                            .interact(
+                                row.response.rect,
+                                ui.id().with(("label_pick", *label)),
+                                egui::Sense::click(),
+                            )
                             .clicked()
                         {
-                            ctx.command_sender()
-                                .send_system(SystemCommand::ExportAnnotations {
-                                    store_id: store_id.clone(),
-                                });
+                            chosen = Some((*label).to_owned());
                         }
-
-                        if let Some(ref entity) = selected_entity {
-                            ui.weak(format!("@ {entity}"));
+                    }
+                }
+                PickerMode::New => {
+                    let name = picker.text.trim();
+                    ui.add_space(4.0);
+                    if name.is_empty() {
+                        ui.weak("Enter adds it at the time cursor.");
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.colored_label(event_label_color(name), "⏺ ");
+                            ui.label(name);
+                        });
+                        if enter {
+                            chosen = Some(name.to_owned());
                         }
-                    });
-                });
-            });
-    }
+                    }
+                }
+            }
 
-    /// Main UI entry point for the editor side panel.
-    pub fn show_panel(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
-        if !self.editor_visible {
-            return;
+            ui.add_space(4.0);
+            ui.weak("Esc to cancel");
+        });
+
+        if modal.should_close() {
+            close = true;
         }
 
-        self.ensure_default_tags();
+        if let Some(label) = chosen {
+            close = true;
+            if !self.has_tag(&label) {
+                self.custom_tags.push(CustomTag {
+                    label: label.clone(),
+                });
+                self.save_tags_to_recording(ctx, ctx.store_context.recording.store_id());
+            }
+            self.add_label_at_cursor(ctx, label);
+        }
 
-        let recording_id = ctx.store_context.recording.store_id().clone();
-        if self.tags_loaded_for.as_ref() != Some(&recording_id) {
-            self.load_tags_from_recording(ctx.store_context.recording);
-            self.load_annotations_from_store(ctx.store_context.recording);
-            self.tags_loaded_for = Some(recording_id);
+        if close {
+            self.picker = None;
+        }
+    }
+
+    /// Place `label` at the time cursor, on the locked entity if any.
+    fn add_label_at_cursor(&mut self, ctx: &ViewerContext<'_>, label: String) {
+        let (Some(timeline), Some(time)) =
+            (ctx.time_ctrl.timeline().copied(), ctx.time_ctrl.time_int())
+        else {
+            return;
+        };
+        let store_id = ctx.store_context.recording.store_id().clone();
+        let target = self.locked_entity.clone();
+        self.add_annotation(ctx, &store_id, &timeline, time, label, target.as_ref());
+    }
+
+    /// The editor side panel.
+    fn show_panel(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
+        if !self.editor_visible {
+            return;
         }
 
         let screen_width = ui.ctx().content_rect().width();
@@ -272,24 +477,32 @@ impl AnnotationPanel {
     }
 
     fn panel_contents(&mut self, ctx: &ViewerContext<'_>, ui: &mut egui::Ui) {
-        ui.strong("Annotations");
+        ui.strong("Labels");
+        ui.add_space(4.0);
+        ui.weak(format!(
+            "{} adds a label at the time cursor (type until one matches), {} adds a new one.",
+            PICK_LABEL_KEY.name(),
+            NEW_LABEL_KEY.name()
+        ));
         ui.add_space(4.0);
 
         let current_timeline = ctx.time_ctrl.timeline().copied();
         let current_time = ctx.time_ctrl.time_int();
+        let timestamp_format = ctx.app_options().timestamp_format;
 
-        if let Some(tl) = &current_timeline {
-            ui.label(format!("Timeline: {}", tl.name()));
-        } else {
-            ui.label("Timeline: (none)");
-        }
-        if let Some(t) = current_time {
-            ui.label(format!("Time: {}", t.as_i64()));
-        } else {
-            ui.label("Time: (none)");
+        match (&current_timeline, current_time) {
+            (Some(tl), Some(t)) => {
+                ui.label(format!(
+                    "{}: {}",
+                    tl.name(),
+                    tl.typ().format(t, timestamp_format)
+                ));
+            }
+            _ => {
+                ui.label("No time cursor");
+            }
         }
 
-        self.update_locked_entity(ctx);
         let selected_entity = self.locked_entity.clone();
 
         ui.add_space(4.0);
@@ -302,15 +515,10 @@ impl AnnotationPanel {
                     clear_locked = true;
                 }
             });
-            ui.label(
-                egui::RichText::new(format!("Annotations → {entity}/_annotation/{{tag}}"))
-                    .small()
-                    .weak(),
-            );
         } else {
             ui.horizontal(|ui| {
                 ui.label("Target:");
-                ui.weak("(none — annotations go to /annotations/)");
+                ui.weak("(none)");
             });
             ui.label(
                 egui::RichText::new("Select an entity in the viewport to target it")
@@ -326,59 +534,46 @@ impl AnnotationPanel {
         ui.separator();
         ui.add_space(4.0);
 
-        ui.strong("Quick tags");
-        ui.add_space(4.0);
-
         let store_id = ctx.store_context.recording.store_id().clone();
 
-        // Unified quick-tag buttons: defaults + custom, all deletable.
+        // Label chips: click to place, right-click to delete.
         {
             let mut tag_to_remove: Option<usize> = None;
-            let mut tag_to_annotate: Option<(String, String, egui::Color32)> = None;
+            let mut tag_to_annotate: Option<String> = None;
 
-            let tags_snapshot: Vec<_> = self
-                .custom_tags
+            let labels: Vec<String> = self.custom_tags.iter().map(|t| t.label.clone()).collect();
+
+            // Only protect labels that are placed in the current recording.
+            let tags_in_use: std::collections::HashSet<String> = self
+                .annotations
                 .iter()
-                .map(|t| (t.label.clone(), t.level.clone(), t.egui_color()))
+                .map(|a| label_slug(&a.text))
                 .collect();
 
-            // Only protect tags that have annotations in the current recording.
-            let tags_in_use: std::collections::HashSet<&str> =
-                self.annotations.iter().map(|a| a.text.as_str()).collect();
-
             ui.horizontal_wrapped(|ui| {
-                for (idx, (label, level, color)) in tags_snapshot.iter().enumerate() {
-                    let in_use = tags_in_use.contains(label.as_str());
-                    let response = tag_chip(ui, label, *color, None);
+                for (idx, label) in labels.iter().enumerate() {
+                    let in_use = tags_in_use.contains(&label_slug(label));
+                    let response = tag_chip(ui, label, event_label_color(label), None);
                     if response.clicked() {
-                        tag_to_annotate = Some((label.clone(), level.clone(), *color));
+                        tag_to_annotate = Some(label.clone());
                     }
                     if response.secondary_clicked() && !in_use {
                         tag_to_remove = Some(idx);
                     }
                     if in_use {
                         response.on_hover_text(
-                            "Click to annotate. In use — remove annotations first to delete.",
+                            "Click to place at the time cursor. In use — remove its labels first to delete it.",
                         );
                     } else {
-                        response.on_hover_text("Click to annotate. Right-click to remove.");
+                        response.on_hover_text(
+                            "Click to place at the time cursor. Right-click to delete.",
+                        );
                     }
                 }
             });
 
-            if let (Some((label, level, color)), Some(time), Some(tl)) =
-                (tag_to_annotate, current_time, &current_timeline)
-            {
-                self.add_annotation(
-                    ctx,
-                    &store_id,
-                    tl,
-                    time,
-                    label,
-                    level,
-                    color,
-                    selected_entity.as_ref(),
-                );
+            if let Some(label) = tag_to_annotate {
+                self.add_label_at_cursor(ctx, label);
             }
             if let Some(idx) = tag_to_remove {
                 self.custom_tags.remove(idx);
@@ -388,62 +583,40 @@ impl AnnotationPanel {
 
         ui.add_space(4.0);
 
-        const TAG_LEVELS: &[(&str, [u8; 3])] = &[
-            ("INFO", [100, 180, 255]),
-            ("WARN", [255, 165, 0]),
-            ("ERROR", [255, 80, 80]),
-            ("NOTE", [180, 180, 180]),
-        ];
-
-        egui::CollapsingHeader::new("Add custom tag")
-            .default_open(false)
-            .show(ui, |ui| {
-                let label_response = ui
-                    .horizontal(|ui| {
-                        ui.label("Label:");
-                        ui.text_edit_singleline(&mut self.new_tag_label)
-                    })
-                    .inner;
-                ui.horizontal(|ui| {
-                    ui.label("Level:");
-                    for (i, &(name, _)) in TAG_LEVELS.iter().enumerate() {
-                        ui.selectable_value(&mut self.new_tag_level_idx, i, name);
-                    }
-                });
-                let trimmed = self.new_tag_label.trim().to_owned();
-                let duplicate = self.custom_tags.iter().any(|t| t.label == trimmed);
-                let can_add = !trimmed.is_empty() && !duplicate;
-                let enter_pressed =
-                    label_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (can_add && enter_pressed)
-                    || ui
-                        .add_enabled(can_add, egui::Button::new("Add to Quick Tags"))
-                        .clicked()
-                {
-                    let (level, color) = TAG_LEVELS[self.new_tag_level_idx];
-                    self.custom_tags.push(CustomTag {
-                        label: trimmed,
-                        level: level.to_owned(),
-                        color,
-                    });
-                    self.new_tag_label.clear();
-                    self.save_tags_to_recording(ctx, &store_id);
-                }
-                if duplicate && !self.new_tag_label.trim().is_empty() {
-                    ui.weak("Tag already exists");
-                }
-            });
+        let label_response = ui
+            .horizontal(|ui| {
+                ui.label("New label:");
+                ui.text_edit_singleline(&mut self.new_tag_label)
+            })
+            .inner;
+        let trimmed = self.new_tag_label.trim().to_owned();
+        let duplicate = self.has_tag(&trimmed);
+        let can_add = !trimmed.is_empty() && !duplicate;
+        let enter_pressed =
+            label_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (can_add && enter_pressed)
+            || ui
+                .add_enabled(can_add, egui::Button::new("Add label"))
+                .clicked()
+        {
+            self.custom_tags.push(CustomTag { label: trimmed });
+            self.new_tag_label.clear();
+            self.save_tags_to_recording(ctx, &store_id);
+        }
+        if duplicate && !self.new_tag_label.trim().is_empty() {
+            ui.weak("Label already exists");
+        }
 
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
 
-        ui.strong("Free-text annotation");
+        ui.strong("Free-text note");
         ui.add_space(4.0);
 
         let response = ui.add(
             egui::TextEdit::multiline(&mut self.text_input)
-                .hint_text("Type annotation here…")
+                .hint_text("Type a note here…")
                 .desired_width(ui.available_width())
                 .desired_rows(3),
         );
@@ -457,127 +630,82 @@ impl AnnotationPanel {
         let ctrl_enter = response.has_focus()
             && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
 
-        let text_for_tag = self.text_input.trim().to_owned();
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_submit, egui::Button::new("Add annotation"))
-                .clicked()
-                || (can_submit && ctrl_enter)
-            {
-                self.text_input.clear();
-                if let (Some(time), Some(tl)) = (current_time, &current_timeline) {
-                    self.add_annotation(
-                        ctx,
-                        &store_id,
-                        tl,
-                        time,
-                        text_for_tag.clone(),
-                        "INFO".to_owned(),
-                        rgb(180, 180, 180),
-                        selected_entity.as_ref(),
-                    );
-                }
-            }
-
-            let tag_duplicate = self.custom_tags.iter().any(|t| t.label == text_for_tag);
-            let can_add_tag = !text_for_tag.is_empty() && !tag_duplicate;
-            if ui
-                .add_enabled(can_add_tag, egui::Button::new("Add to Quick Tags"))
-                .on_hover_text(if tag_duplicate {
-                    "Tag already exists"
-                } else {
-                    "Promote this text to a reusable quick tag"
-                })
-                .clicked()
-            {
-                self.custom_tags.push(CustomTag {
-                    label: text_for_tag,
-                    level: "INFO".to_owned(),
-                    color: [100, 180, 255],
-                });
-                self.text_input.clear();
-                self.save_tags_to_recording(ctx, &store_id);
-            }
-        });
+        if ui
+            .add_enabled(can_submit, egui::Button::new("Add note"))
+            .clicked()
+            || (can_submit && ctrl_enter)
+        {
+            let text = self.text_input.trim().to_owned();
+            self.text_input.clear();
+            self.add_label_at_cursor(ctx, text);
+        }
 
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
 
-        ui.strong("Session annotations");
+        ui.strong(format!("In this recording ({})", self.annotations.len()));
         ui.add_space(4.0);
 
         if self.annotations.is_empty() {
-            ui.weak("No annotations yet.");
+            ui.weak("No labels yet.");
         } else {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    let mut to_remove: Option<usize> = None;
+            let mut to_remove: Option<usize> = None;
 
-                    for (idx, ann) in self.annotations.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(ann.color, &ann.level);
+            for (idx, ann) in self.annotations.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(event_label_color(&ann.text), "⏺");
 
-                            let time_text =
-                                format!("[{}={}]", ann.timeline.name(), ann.time.as_i64());
-                            let time_response = ui.small_button(&time_text);
-                            if time_response.clicked() {
-                                // Set active timeline then jump to time
-                                ctx.command_sender().send_system(
-                                    SystemCommand::TimeControlCommands {
-                                        store_id: store_id.clone(),
-                                        time_commands: vec![
-                                            TimeControlCommand::SetActiveTimeline(
-                                                *ann.timeline.name(),
-                                            ),
-                                            TimeControlCommand::SetTime(TimeReal::from(ann.time)),
-                                        ],
-                                    },
-                                );
-                                if let Some(ref source) = ann.source_entity {
-                                    ctx.command_sender()
-                                        .send_system(SystemCommand::set_selection(
-                                            re_viewer_context::Item::InstancePath(
-                                                re_entity_db::InstancePath::entity_all(
-                                                    source.clone(),
-                                                ),
-                                            ),
-                                        ));
-                                }
-                            }
-                            time_response.on_hover_text("Click to jump to this annotation's time");
+                    let time_text = ann.timeline.typ().format(ann.time, timestamp_format);
+                    let time_response = ui.small_button(&time_text);
+                    if time_response.clicked() {
+                        ctx.command_sender()
+                            .send_system(SystemCommand::TimeControlCommands {
+                                store_id: store_id.clone(),
+                                time_commands: vec![
+                                    TimeControlCommand::SetActiveTimeline(*ann.timeline.name()),
+                                    TimeControlCommand::SetTime(TimeReal::from(ann.time)),
+                                ],
+                            });
+                        if let Some(ref source) = ann.source_entity {
+                            ctx.command_sender()
+                                .send_system(SystemCommand::set_selection(
+                                    re_viewer_context::Item::InstancePath(
+                                        re_entity_db::InstancePath::entity_all(source.clone()),
+                                    ),
+                                ));
+                        }
+                    }
+                    time_response.on_hover_text(format!(
+                        "Jump to this label ({} timeline)",
+                        ann.timeline.name()
+                    ));
 
-                            if let Some(ref source) = ann.source_entity {
-                                ui.weak(format!("@ {source}"));
-                            }
-                        });
+                    ui.label(&ann.text);
+                    if let Some(ref source) = ann.source_entity {
+                        ui.weak(format!("@ {source}"));
+                    }
 
-                        ui.label(&ann.text);
-
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.small_button("Remove").clicked() {
                             to_remove = Some(idx);
                         }
-
-                        ui.add_space(4.0);
-                        ui.separator();
-                        ui.add_space(2.0);
-                    }
-
-                    if let Some(idx) = to_remove {
-                        let ann = self.annotations.remove(idx);
-                        ctx.command_sender()
-                            .send_system(SystemCommand::ClearAnnotation {
-                                store_id: store_id.clone(),
-                                entity_path: ann.entity_path.clone(),
-                                timeline: ann.timeline,
-                                time: ann.time,
-                            });
-                        #[cfg(not(target_arch = "wasm32"))]
-                        self.save_now(ctx);
-                    }
+                    });
                 });
+            }
+
+            if let Some(idx) = to_remove {
+                let ann = self.annotations.remove(idx);
+                ctx.command_sender()
+                    .send_system(SystemCommand::ClearAnnotation {
+                        store_id: store_id.clone(),
+                        entity_path: ann.entity_path.clone(),
+                        timeline: ann.timeline,
+                        time: ann.time,
+                    });
+                #[cfg(not(target_arch = "wasm32"))]
+                self.save_now(ctx);
+            }
         }
 
         ui.add_space(8.0);
@@ -586,26 +714,17 @@ impl AnnotationPanel {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let has_annotations_in_store = {
-                let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-                ctx.store_context
+            let has_annotations = !self.annotations.is_empty()
+                || ctx
+                    .store_context
                     .recording
                     .sorted_entity_paths()
-                    .any(|path| {
-                        path.starts_with(&annotation_prefix)
-                            || path.to_string().contains("/_annotation")
-                    })
-            };
-
-            let has_annotations = !self.annotations.is_empty() || has_annotations_in_store;
+                    .any(is_label_entity);
 
             if ui
-                .add_enabled(
-                    has_annotations,
-                    egui::Button::new("Export annotations to .rrd"),
-                )
+                .add_enabled(has_annotations, egui::Button::new("Export labels to .rrd"))
                 .on_hover_text(
-                    "Save only the annotation entities to a separate .rrd file.\n\
+                    "Save only the labels to a separate .rrd file.\n\
                      Opens a file dialog to choose where to save.",
                 )
                 .clicked()
@@ -618,7 +737,6 @@ impl AnnotationPanel {
         }
     }
 
-    #[expect(clippy::too_many_arguments)]
     fn add_annotation(
         &mut self,
         ctx: &ViewerContext<'_>,
@@ -626,12 +744,10 @@ impl AnnotationPanel {
         timeline: &Timeline,
         time: TimeInt,
         text: String,
-        level: String,
-        color: egui::Color32,
         selected_entity: Option<&EntityPath>,
     ) {
-        // Snap the annotation time to the latest actual data point for the
-        // selected entity. Avoids attaching the annotation at a cursor position
+        // Snap the label time to the latest actual data point for the
+        // selected entity. Avoids attaching the label at a cursor position
         // where the entity has no data (which shows as empty in the text log).
         let snapped_time = if let Some(selected) = selected_entity {
             let query = re_chunk_store::LatestAtQuery::new(*timeline.name(), time);
@@ -661,28 +777,25 @@ impl AnnotationPanel {
             time
         };
 
-        // Per-row entity path: `<entity>/_annotation/<tag>/<time>`. Each annotation
+        // Per-row entity path: `<entity>/_annotation/<label>/<time>`. Each label
         // gets its own unique path so it can be removed in isolation via
-        // `drop_entity_path` without disturbing siblings of the same tag.
-        let tag_slug = text.to_lowercase().replace(' ', "_");
+        // `drop_entity_path` without disturbing siblings with the same name.
+        let tag_slug = label_slug(&text);
         let time_segment = snapped_time.as_i64().to_string();
         let entity_path = if let Some(selected) = selected_entity {
             EntityPath::from(format!("{selected}/_annotation/{tag_slug}/{time_segment}"))
         } else {
-            EntityPath::from(format!(
-                "{ANNOTATIONS_ENTITY_BASE}/{tag_slug}/{time_segment}"
-            ))
+            EntityPath::from(format!("{LABELS_ENTITY_BASE}/{tag_slug}/{time_segment}"))
         };
 
         self.annotations.push(AnnotationEntry {
             text: text.clone(),
-            level: level.clone(),
             timeline: *timeline,
             time: snapped_time,
             entity_path: entity_path.clone(),
             source_entity: selected_entity.cloned(),
-            color,
         });
+        self.annotations.sort_by_key(|a| a.time);
 
         ctx.command_sender()
             .send_system(SystemCommand::AddAnnotation {
@@ -691,7 +804,6 @@ impl AnnotationPanel {
                 timeline: *timeline,
                 time: snapped_time,
                 text,
-                level,
             });
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -700,7 +812,8 @@ impl AnnotationPanel {
 
     fn save_tags_to_recording(&self, ctx: &ViewerContext<'_>, store_id: &re_log_types::StoreId) {
         let tags_json = serde_json::to_string_pretty(&self.custom_tags).unwrap_or_default();
-        let entity_path = EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/_config/tags"));
+        let entity_path =
+            EntityPath::from(format!("{LABELS_ENTITY_BASE}/{LABELS_CONFIG_PART}/tags"));
 
         let text_doc =
             re_sdk_types::archetypes::TextDocument::new(tags_json).with_media_type("text/plain");
@@ -720,22 +833,14 @@ impl AnnotationPanel {
     }
 
     fn load_annotations_from_store(&mut self, entity_db: &re_entity_db::EntityDb) {
-        let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
-        let config_prefix = EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/_config"));
-
         let engine = entity_db.storage_engine();
 
         for chunk in engine.store().iter_physical_chunks() {
             let path = chunk.entity_path();
 
-            if path.starts_with(&config_prefix) {
-                continue;
-            }
-
-            let is_annotation =
-                path.starts_with(&annotation_prefix) || path.to_string().contains("/_annotation");
-
-            if !is_annotation {
+            // `rr.mark_event` markers are drawn on the timeline too, but they are not the
+            // user's labels to edit here.
+            if !is_label_entity(path) {
                 continue;
             }
 
@@ -745,94 +850,87 @@ impl AnnotationPanel {
                     .component_mono(re_sdk_types::archetypes::TextLog::descriptor_text().component)
                     .and_then(|r| r.ok());
 
-                let level: Option<re_sdk_types::components::TextLogLevel> = unit
-                    .component_mono(re_sdk_types::archetypes::TextLog::descriptor_level().component)
-                    .and_then(|r| r.ok());
+                let Some(text) = text else {
+                    continue;
+                };
+                let text_str = text.0.0.as_str().to_owned();
 
-                if let Some(text) = text {
-                    let text_str = text.0.0.as_str().to_owned();
-                    let level_str = level
-                        .map(|l| l.0.0.as_str().to_owned())
-                        .unwrap_or_else(|| "INFO".to_owned());
-
-                    let (timeline, time) = chunk
-                        .timelines()
-                        .values()
-                        .next()
-                        .and_then(|col| {
-                            let times = col.times_raw();
-                            if row_idx < times.len() {
-                                Some((*col.timeline(), TimeInt::new_temporal(times[row_idx])))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_else(|| {
-                            (
-                                Timeline::new(
-                                    re_chunk::TimelineName::log_time(),
-                                    re_log_types::TimeType::TimestampNs,
-                                ),
-                                TimeInt::ZERO,
-                            )
-                        });
-
-                    let color = match level_str.as_str() {
-                        "WARN" => rgb(255, 165, 0),
-                        "ERROR" => rgb(255, 80, 80),
-                        _ => rgb(180, 180, 180),
-                    };
-
-                    let already_exists = self
-                        .annotations
-                        .iter()
-                        .any(|a| a.entity_path == *path && a.time == time && a.text == text_str);
-
-                    if !already_exists {
-                        let path_str = path.to_string();
-                        let source_entity = if let Some(pos) = path_str.find("/_annotation") {
-                            let parent = &path_str[..pos];
-                            if !parent.is_empty() {
-                                Some(EntityPath::from(parent))
-                            } else {
-                                None
-                            }
+                let (timeline, time) = chunk
+                    .timelines()
+                    .values()
+                    .next()
+                    .and_then(|col| {
+                        let times = col.times_raw();
+                        if row_idx < times.len() {
+                            Some((*col.timeline(), TimeInt::new_temporal(times[row_idx])))
                         } else {
                             None
-                        };
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        (
+                            Timeline::new(
+                                re_chunk::TimelineName::log_time(),
+                                re_log_types::TimeType::TimestampNs,
+                            ),
+                            TimeInt::ZERO,
+                        )
+                    });
 
-                        self.annotations.push(AnnotationEntry {
-                            text: text_str,
-                            level: level_str,
-                            timeline,
-                            time,
-                            entity_path: path.clone(),
-                            source_entity,
-                            color,
+                let already_exists = self
+                    .annotations
+                    .iter()
+                    .any(|a| a.entity_path == *path && a.time == time && a.text == text_str);
+
+                if !already_exists {
+                    // Labels found in the recording can be picked with `E` too.
+                    if !self.has_tag(&text_str) && !text_str.contains('\n') {
+                        self.custom_tags.push(CustomTag {
+                            label: text_str.clone(),
                         });
                     }
+                    self.annotations.push(AnnotationEntry {
+                        text: text_str,
+                        timeline,
+                        time,
+                        entity_path: path.clone(),
+                        source_entity: labelled_entity_for_path(path),
+                    });
                 }
             }
         }
+
+        self.annotations.sort_by_key(|a| a.time);
     }
 
+    /// Adds the labels defined in the recording to the ones known to the panel.
     pub fn load_tags_from_recording(&mut self, entity_db: &re_entity_db::EntityDb) {
-        let entity_path = EntityPath::from(format!("{ANNOTATIONS_ENTITY_BASE}/_config/tags"));
+        let entity_path =
+            EntityPath::from(format!("{LABELS_ENTITY_BASE}/{LABELS_CONFIG_PART}/tags"));
         let query = re_chunk_store::LatestAtQuery::latest(re_chunk::TimelineName::log_time());
 
         if let Some((_idx, text)) = entity_db.latest_at_component::<re_sdk_types::components::Text>(
             &entity_path,
             &query,
             re_sdk_types::archetypes::TextDocument::descriptor_text().component,
-        ) {
-            let text_str = text.0.0.as_str();
-            if let Ok(tags) = serde_json::from_str::<Vec<CustomTag>>(text_str)
-                && self.custom_tags.is_empty()
-            {
-                self.custom_tags = tags;
+        ) && let Ok(tags) = serde_json::from_str::<Vec<CustomTag>>(text.0.0.as_str())
+        {
+            for tag in tags {
+                if !self.has_tag(&tag.label) {
+                    self.custom_tags.push(tag);
+                }
             }
         }
     }
+}
+
+/// Whether `path` holds a label placed in the viewer (not an `rr.mark_event` marker, nor the
+/// panel's configuration).
+fn is_label_entity(path: &EntityPath) -> bool {
+    matches!(
+        event_label_for_path(path),
+        Some((_, re_viewer_context::event_labels::EventLabelKind::Label))
+    )
 }
 
 /// Build a [`Chunk`] containing a single [`TextLog`] annotation row.
@@ -841,10 +939,8 @@ pub fn build_annotation_chunk(
     timeline: &Timeline,
     time: TimeInt,
     text: &str,
-    level: &str,
 ) -> anyhow::Result<Chunk> {
-    let text_log =
-        TextLog::new(text).with_level(re_sdk_types::components::TextLogLevel(level.into()));
+    let text_log = TextLog::new(text);
 
     let timepoint = TimePoint::from_iter([(
         *timeline.name(),
@@ -874,14 +970,14 @@ pub fn prepare_annotation_export(entity_db: &re_entity_db::EntityDb) -> Option<A
 
     let store_id = entity_db.store_id();
 
-    let annotation_prefix = EntityPath::from(ANNOTATIONS_ENTITY_BASE);
+    let annotation_prefix = EntityPath::from(LABELS_ENTITY_BASE);
     let mut annotation_chunks: Vec<Arc<Chunk>> = entity_db
         .storage_engine()
         .store()
         .iter_physical_chunks()
         .filter(|chunk| {
             let path = chunk.entity_path();
-            path.starts_with(&annotation_prefix) || path.to_string().contains("/_annotation")
+            path.starts_with(&annotation_prefix) || is_label_entity(path)
         })
         .cloned()
         .collect();
@@ -1017,13 +1113,7 @@ fn autosave_annotations_to(
     let chunks: Vec<Arc<Chunk>> = annotations
         .iter()
         .filter_map(|ann| {
-            match build_annotation_chunk(
-                &ann.entity_path,
-                &ann.timeline,
-                ann.time,
-                &ann.text,
-                &ann.level,
-            ) {
+            match build_annotation_chunk(&ann.entity_path, &ann.timeline, ann.time, &ann.text) {
                 Ok(chunk) => Some(Arc::new(chunk)),
                 Err(err) => {
                     re_log::warn_once!("Failed to build annotation chunk for autosave: {err}");
@@ -1055,5 +1145,117 @@ fn autosave_annotations_to(
     match crate::saving::encode_to_file(rrd_version, save_path, messages.into_iter()) {
         Ok(()) => re_log::debug!("Auto-saved annotations to {}", save_path.display()),
         Err(err) => re_log::warn!("Failed to auto-save annotations: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LABELS: &[&str] = &["correct", "comma", "Bug"];
+
+    /// Focuses the widget `show` adds, then presses `key`, and returns the picker mode the
+    /// shortcut opened, if any.
+    fn press_with_focus(key: egui::Key, show: impl Fn(&mut egui::Ui)) -> Option<PickerMode> {
+        let ctx = egui::Context::default();
+        let mut panel = AnnotationPanel::default();
+
+        // Focus requests take effect on the next frame.
+        let _ignored = ctx.run_ui(egui::RawInput::default(), &show);
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let _ignored = ctx.run_ui(input, |ui| {
+            show(ui);
+            panel.handle_shortcuts(ui.ctx());
+        });
+        panel.picker.map(|p| p.mode)
+    }
+
+    #[test]
+    fn shortcuts_work_while_a_non_text_widget_has_focus() {
+        let button = |ui: &mut egui::Ui| {
+            ui.button("view").request_focus();
+        };
+        assert_eq!(
+            press_with_focus(PICK_LABEL_KEY, button),
+            Some(PickerMode::Existing)
+        );
+        assert_eq!(
+            press_with_focus(NEW_LABEL_KEY, button),
+            Some(PickerMode::New)
+        );
+    }
+
+    #[test]
+    fn shortcuts_are_ignored_while_a_text_field_has_focus() {
+        let text_field = |ui: &mut egui::Ui| {
+            let mut text = String::new();
+            ui.text_edit_singleline(&mut text).request_focus();
+        };
+        assert_eq!(press_with_focus(PICK_LABEL_KEY, text_field), None);
+    }
+
+    #[test]
+    fn typing_disambiguates() {
+        assert_eq!(
+            match_label(LABELS, ""),
+            LabelMatch::Several(LABELS.to_vec())
+        );
+        assert_eq!(
+            match_label(LABELS, "c"),
+            LabelMatch::Several(vec!["correct", "comma"])
+        );
+        assert_eq!(
+            match_label(LABELS, "co"),
+            LabelMatch::Several(vec!["correct", "comma"])
+        );
+        assert_eq!(match_label(LABELS, "cor"), LabelMatch::Unique("correct"));
+        assert_eq!(match_label(LABELS, "com"), LabelMatch::Unique("comma"));
+        assert_eq!(match_label(LABELS, "b"), LabelMatch::Unique("Bug"));
+        assert_eq!(match_label(LABELS, "x"), LabelMatch::None);
+    }
+
+    #[test]
+    fn nothing_typed_is_never_unique() {
+        assert_eq!(
+            match_label(&["only"], ""),
+            LabelMatch::Several(vec!["only"])
+        );
+    }
+
+    #[test]
+    fn a_label_that_prefixes_another_stays_ambiguous() {
+        assert_eq!(
+            match_label(&["cor", "correct"], "cor"),
+            LabelMatch::Several(vec!["cor", "correct"])
+        );
+        assert_eq!(
+            match_label(&["cor", "correct"], "corr"),
+            LabelMatch::Unique("correct")
+        );
+    }
+
+    #[test]
+    fn unique_prefix() {
+        assert_eq!(unique_prefix_len("correct", LABELS), 3);
+        assert_eq!(unique_prefix_len("comma", LABELS), 3);
+        assert_eq!(unique_prefix_len("Bug", LABELS), 1);
+        assert_eq!(unique_prefix_len("cor", &["cor", "correct"]), 3);
+    }
+
+    #[test]
+    fn old_saved_tags_still_load() {
+        let json = r#"[{"label": "Bug", "level": "ERROR", "color": [255, 80, 80]}]"#;
+        let tags: Vec<CustomTag> = serde_json::from_str(json).unwrap();
+        assert_eq!(tags[0].label, "Bug");
     }
 }

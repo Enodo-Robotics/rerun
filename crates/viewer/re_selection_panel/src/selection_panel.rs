@@ -1488,21 +1488,8 @@ fn annotation_tags_ui(ctx: &ViewerContext<'_>, ui: &mut egui::Ui, entity_path: &
             continue;
         };
 
-        let level = recording
-            .latest_at_component::<re_sdk_types::components::TextLogLevel>(
-                ann_path,
-                &query,
-                re_sdk_types::archetypes::TextLog::descriptor_level().component,
-            )
-            .map(|(_, l)| l);
-
         let label = text.0.0.as_str().to_owned();
-        let level_str = level.map(|l| l.0.0.as_str().to_owned()).unwrap_or_default();
-        let color = match level_str.as_str() {
-            "WARN" => ctx.tokens().alert_warning.icon,
-            "ERROR" => ctx.tokens().alert_error.icon,
-            _ => ctx.tokens().alert_info.icon,
-        };
+        let color = re_viewer_context::event_labels::event_label_color(&label);
 
         let info = TagInfo {
             label: label.clone(),
